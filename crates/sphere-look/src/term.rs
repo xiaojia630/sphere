@@ -14,7 +14,7 @@ use alacritty_terminal::{
     term::{cell::Flags, Config, Term, TermMode},
     vte::ansi::{Color as AColor, NamedColor, Processor},
 };
-use bevy::text::{LetterSpacing, LineHeight};
+use bevy::text::LineHeight;
 use bevy::{
     input::{keyboard::{Key, KeyboardInput}, ButtonState},
     prelude::*,
@@ -221,12 +221,14 @@ pub fn pump(mut t: ResMut<Terminal>) {
 pub struct TermUi {
     pub rows: Vec<Entity>,
     pub hashes: Vec<u64>,
+    #[allow(dead_code)]
     pub status: Entity,
     pub last_focus: bool,
     pub last_blink: bool,
 }
 
 #[derive(Component)]
+#[allow(dead_code)]
 pub struct TermRow(pub usize);
 
 pub fn build_term_ui(commands: &mut Commands, root: Entity, f: &UiFonts) -> TermUi {
@@ -374,6 +376,7 @@ pub fn draw(
         }
     }
     drop(guard);
+    #[allow(clippy::needless_range_loop)]
     for r in 0..ROWS {
         let mut h = std::collections::hash_map::DefaultHasher::new();
         use std::hash::{Hash, Hasher};

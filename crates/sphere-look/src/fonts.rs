@@ -11,6 +11,7 @@ pub const RAJDHANI_600: &[u8] = include_bytes!("../../../assets/fonts/Rajdhani-6
 pub const RAJDHANI_700: &[u8] = include_bytes!("../../../assets/fonts/Rajdhani-700.ttf");
 pub const MICHROMA: &[u8] = include_bytes!("../../../assets/fonts/Michroma-400.ttf");
 pub const MONO_400: &[u8] = include_bytes!("../../../assets/fonts/JetBrainsMono-400.ttf");
+#[allow(dead_code)]
 pub const MONO_500: &[u8] = include_bytes!("../../../assets/fonts/JetBrainsMono-500.ttf");
 pub const MONO_700: &[u8] = include_bytes!("../../../assets/fonts/JetBrainsMono-700.ttf");
 

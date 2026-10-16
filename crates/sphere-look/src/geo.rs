@@ -38,6 +38,7 @@ impl Geo {
         self.vtx(c1, 1.0, 1.0, k);
         self.vtx(c0, 1.0, 1.0, k);
     }
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.p.is_empty()
     }

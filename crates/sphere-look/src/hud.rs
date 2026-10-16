@@ -5,10 +5,10 @@ use crate::glow::*;
 use crate::panel::*;
 use crate::term::{self, Terminal, TERM_H, TERM_W};
 use crate::util::*;
-use crate::{target_for, Args, CamCore, Offscreen};
-use bevy::text::{LetterSpacing, LineHeight};
+use crate::{camera_output, target_for, Args, CamCore, Offscreen, WindowCam};
+use bevy::text::LineHeight;
 use bevy::{
-    camera::{visibility::RenderLayers, ClearColorConfig},
+    camera::visibility::RenderLayers,
     mesh::PrimitiveTopology,
     prelude::*,
     asset::RenderAssetUsages,
@@ -20,6 +20,7 @@ use bevy::{
 
 pub const SCALE_MIN: f32 = 1.0;
 
+#[allow(clippy::too_many_arguments)]
 pub fn setup_panels(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -131,8 +132,10 @@ pub fn update_readout(
     let d = &decks.list[CORE];
     let op = clamp(1.0 - ctl.focus_amt * 1.4, 0.0, 1.0) * clamp(d.u_reveal * 1.4, 0.0, 1.0);
     for h in &q {
-        if let Some(mut m) = mats.get_mut(&h.0) {
-            m.u.size.w = op;
+        if mats.get(&h.0).is_some_and(|m| m.u.size.w != op) {
+            if let Some(mut m) = mats.get_mut(&h.0) {
+                m.u.size.w = op;
+            }
         }
     }
 }
@@ -174,9 +177,11 @@ pub fn update_backdrop(
     let half_h = (20.0f32 * DEG).tan() * 3000.0;
     for (mut t, h) in &mut q {
         t.scale = Vec3::new(2.0 * half_h * sv.w / sv.h, 2.0 * half_h, 1.0);
-        if let Some(mut m) = mats.get_mut(&h.0) {
-            m.u.c.x = sv.w;
-            m.u.c.y = sv.h;
+        if mats.get(&h.0).is_some_and(|m| m.u.c.x != sv.w || m.u.c.y != sv.h) {
+            if let Some(mut m) = mats.get_mut(&h.0) {
+                m.u.c.x = sv.w;
+                m.u.c.y = sv.h;
+            }
         }
     }
 }
@@ -195,12 +200,13 @@ pub struct FrameStats {
 pub struct StatsText;
 
 pub fn setup_overlay(mut commands: Commands, f: Res<UiFonts>, off: Res<Offscreen>, args: Res<Args>) {
+    let (msaa, clear_color, output_mode) = camera_output(&args, WindowCam::Overlay);
     let cam = commands
         .spawn((
             Camera2d,
-            Camera { order: 100, clear_color: ClearColorConfig::None, ..default() },
+            Camera { order: 100, clear_color, output_mode, ..default() },
             bevy::camera::Hdr,
-            if args.msaa { Msaa::Sample4 } else { Msaa::Off },
+            msaa,
             bevy::core_pipeline::tonemapping::Tonemapping::None,
             bevy::core_pipeline::tonemapping::DebandDither::Disabled,
             target_for(&off),

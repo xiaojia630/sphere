@@ -99,7 +99,9 @@ pub enum PanelId {
 #[derive(Component)]
 pub struct Panel {
     pub id: PanelId,
+    #[allow(dead_code)]
     pub w: f32,
+    #[allow(dead_code)]
     pub h: f32,
     /// home position in world units (stage px mapped to world, z = 0 plane)
     pub home: Vec3,
@@ -119,6 +121,7 @@ pub struct Panel {
 }
 
 #[derive(Resource)]
+#[allow(dead_code)]
 pub struct PanelScale(pub f32);
 
 pub fn stage_to_world(sx: f32, sy: f32) -> Vec3 {
@@ -127,9 +130,14 @@ pub fn stage_to_world(sx: f32, sy: f32) -> Vec3 {
 
 pub struct UiPanel {
     pub root: Entity,
+    #[allow(dead_code)]
     pub camera: Entity,
     pub image: Handle<Image>,
 }
+
+/// Marks a camera that renders a panel's UI into its image. See `gate_panel_cameras`.
+#[derive(Component)]
+pub struct PanelUiCamera;
 
 /// A UI camera that renders into an image, plus the full-size root node whose UI lives there.
 pub fn spawn_ui_panel(commands: &mut Commands, images: &mut Assets<Image>, w: f32, h: f32, scale: f32, order: isize) -> UiPanel {
@@ -151,6 +159,7 @@ pub fn spawn_ui_panel(commands: &mut Commands, images: &mut Assets<Image>, w: f3
             Camera { order, clear_color: ClearColorConfig::Custom(Color::NONE), ..default() },
             RenderTarget::Image(ImageRenderTarget { handle: image.clone(), scale_factor: scale }),
             Msaa::Off,
+            PanelUiCamera,
         ))
         .id();
     let root = commands
@@ -311,8 +320,10 @@ pub fn update_panels(
         tr.scale = Vec3::splat(p.sc.x.max(0.001));
         let op = clamp(p.op.x, 0.0, 1.0);
         *vis = if op > 0.004 { Visibility::Inherited } else { Visibility::Hidden };
-        if let Some(mut m) = mats.get_mut(&p.material) {
-            m.u.size.w = op;
+        if mats.get(&p.material).is_some_and(|m| m.u.size.w != op) {
+            if let Some(mut m) = mats.get_mut(&p.material) {
+                m.u.size.w = op;
+            }
         }
     }
 }
@@ -500,6 +511,62 @@ pub fn blink_system(sim: Res<Sim>, mut q: Query<&mut BackgroundColor, With<Blink
     let on = (sim.t % 1.4) < 0.7;
     let fill = role_color(Role::Fill);
     for mut b in &mut q {
-        b.0 = with_alpha(fill, if on { 1.0 } else { 0.15 });
+        // `set_if_neq`: only a real flip should mark the UI changed and wake the panel camera
+        b.set_if_neq(BackgroundColor(with_alpha(fill, if on { 1.0 } else { 0.15 })));
+    }
+}
+
+/// Frames every panel camera renders after start-up, while fonts, glyph atlases and layout settle.
+const PANEL_WARMUP_FRAMES: u32 = 30;
+
+/// Panel UI only changes now and then (an agents rebuild, the LED blink, a terminal row), yet each panel camera
+/// would redraw its texture every frame. Keep a panel camera active only in frames where something under its UI
+/// root changed; otherwise its image keeps last frame's pixels. Runs in `Last`, after layout and text.
+#[allow(clippy::type_complexity)]
+pub fn gate_panel_cameras(
+    changed: Query<
+        Entity,
+        Or<(
+            Changed<ComputedNode>,
+            Changed<UiGlobalTransform>,
+            Changed<bevy::text::TextLayoutInfo>,
+            Changed<Text>,
+            Changed<TextSpan>,
+            Changed<TextColor>,
+            Changed<TextBackgroundColor>,
+            Changed<BackgroundColor>,
+            Changed<BorderColor>,
+            Changed<Children>,
+            Changed<Visibility>,
+        )>,
+    >,
+    parents: Query<&ChildOf>,
+    roots: Query<&UiTargetCamera>,
+    mut cams: Query<(Entity, &mut Camera), With<PanelUiCamera>>,
+    mut frames: Local<u32>,
+    mut dirty: Local<Vec<Entity>>,
+) {
+    *frames = frames.saturating_add(1);
+    dirty.clear();
+    for e in &changed {
+        let mut cur = e;
+        loop {
+            if let Ok(t) = roots.get(cur) {
+                if !dirty.contains(&t.entity()) {
+                    dirty.push(t.entity());
+                }
+                break;
+            }
+            match parents.get(cur) {
+                Ok(p) => cur = p.parent(),
+                Err(_) => break,
+            }
+        }
+    }
+    for (e, mut cam) in &mut cams {
+        let on = *frames <= PANEL_WARMUP_FRAMES || dirty.contains(&e);
+        if cam.is_active != on {
+            cam.is_active = on;
+        }
     }
 }

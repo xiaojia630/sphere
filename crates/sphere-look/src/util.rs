@@ -57,9 +57,11 @@ pub enum Role {
     Acc,
     Deep,
     Ok,
+    #[allow(dead_code)]
     Bad,
 }
 
+#[allow(dead_code)]
 pub const BLOOM: f32 = 0.6;
 
 pub fn hex(s: &str) -> Color {

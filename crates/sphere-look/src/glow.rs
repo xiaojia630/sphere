@@ -25,7 +25,7 @@ pub enum Kind {
     Backdrop,
 }
 
-#[derive(Clone, Copy, Debug, ShaderType)]
+#[derive(Clone, Copy, Debug, PartialEq, ShaderType)]
 pub struct GlowUniform {
     pub color: Vec4,
     pub c2: Vec4,

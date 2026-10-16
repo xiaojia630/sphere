@@ -251,6 +251,7 @@ pub struct Deck {
 pub struct Decks {
     pub list: Vec<Deck>,
     pub tilt: Entity,
+    #[allow(dead_code)]
     pub root: Entity,
     pub voice_lvl: f32,
 }
@@ -267,6 +268,7 @@ const NSP: usize = 156;
 
 #[derive(Resource)]
 pub struct CoreAssets {
+    #[allow(dead_code)]
     pub spokes_mesh: Handle<Mesh>,
     spokes: Vec<(f32, f32, f32)>, // angle, level, phase
     energy: f32,
@@ -318,6 +320,7 @@ fn add_geo(
     (id, mh)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn quad_label(b: &mut B, deck: usize, parent: Entity, text: &str, size: f32, role: Role, alpha: f32, ang: f32, r: f32) {
     let l = raster_label(RAJDHANI_600, text, size, 0.16);
     let img = b.images.add(l.image);
@@ -631,7 +634,7 @@ fn build_sphere(b: &mut B, fold: Entity) {
     let dots = b.meshes.add(attr_mesh(PrimitiveTopology::TriangleList, dpos, dat));
     spawn_sph(b, sphere_g, dots, Kind::Dots, Role::Fill, 0.95, Tag::Dots);
     // fresnel shell
-    let shell = Mesh::from(Sphere::new(r + 1.0).mesh().uv(64, 40));
+    let shell = Sphere::new(r + 1.0).mesh().uv(64, 40);
     let n = shell.count_vertices();
     let mut shell = shell;
     shell.insert_attribute(ATTR_HOLO, vec![[0.0f32; 4]; n]);
@@ -701,6 +704,7 @@ fn write_spokes_geo(g: &mut Geo, spokes: &[(f32, f32, f32)], rw: f32, wl: f32) {
 
 // ---------------------------------------------------------------- per-frame update
 
+#[allow(clippy::too_many_arguments)]
 pub fn update_core(
     sim: Res<Sim>,
     mut ctl: ResMut<CoreCtl>,
@@ -848,7 +852,9 @@ pub fn update_materials(
 ) {
     let pr = win.single().map(|w| w.scale_factor()).unwrap_or(1.0);
     for (h, info) in &q {
-        let Some(mut m) = mats.get_mut(&h.0) else { continue };
+        // `get_mut` marks the asset changed and makes the renderer prepare it again, so only take it when a value
+        // actually differs.
+        let Some(cur) = mats.get(&h.0) else { continue };
         let d = &decks.list[info.deck];
         let mut alpha = info.alpha;
         match info.tag {
@@ -856,13 +862,19 @@ pub fn update_materials(
             Tag::Spine => alpha = ctl.depth_amt * 0.55,
             _ => {}
         }
-        m.u.a = Vec4::new(alpha, info.wall, d.u_reveal, d.u_hi);
-        m.u.b = Vec4::new(d.u_fade, d.u_depth, 0.0, 0.0);
+        let mut u = cur.u;
+        u.a = Vec4::new(alpha, info.wall, d.u_reveal, d.u_hi);
+        u.b = Vec4::new(d.u_fade, d.u_depth, 0.0, 0.0);
         if info.tag == Tag::Dots {
-            m.u.c.z = 3.0 * pr;
+            u.c.z = 3.0 * pr;
         }
         if info.tag == Tag::Shell {
-            m.u.d = Vec4::new(sim.t, 0.0, 0.0, 0.0);
+            u.d = Vec4::new(sim.t, 0.0, 0.0, 0.0);
+        }
+        if u != cur.u {
+            if let Some(mut m) = mats.get_mut(&h.0) {
+                m.u = u;
+            }
         }
     }
 }

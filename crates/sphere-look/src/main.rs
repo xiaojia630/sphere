@@ -9,14 +9,14 @@ mod term;
 mod util;
 
 use bevy::{
-    camera::{visibility::RenderLayers, ClearColorConfig},
+    camera::{visibility::RenderLayers, CameraOutputMode, ClearColorConfig},
     core_pipeline::tonemapping::{DebandDither, Tonemapping},
     post_process::bloom::{Bloom, BloomCompositeMode},
     prelude::*,
     window::{ExitCondition, PresentMode, PrimaryWindow},
     winit::WinitPlugin,
     camera::{ImageRenderTarget, RenderTarget},
-    render::render_resource::{TextureFormat, TextureUsages},
+    render::render_resource::{BlendState, TextureFormat, TextureUsages},
     app::ScheduleRunnerPlugin,
 };
 use core::*;
@@ -108,7 +108,8 @@ fn main() {
                 hud::shot,
             )
                 .chain(),
-        );
+        )
+        .add_systems(Last, panel::gate_panel_cameras);
     if args.shot.is_some() {
         app.add_plugins(ScheduleRunnerPlugin::run_loop(std::time::Duration::from_millis(1)));
         // Offscreen there is no swap chain to throttle submission, and a software rasteriser would let queued
@@ -175,12 +176,40 @@ fn tick_sim(time: Res<Time<Real>>, mut sim: ResMut<Sim>) {
     sim.boot_t += dt;
 }
 
+/// How the three window cameras (core, panels, overlay) share textures and reach the window.
+///
+/// Bevy gives cameras on one target a shared main texture only when their MSAA matches, and a camera that draws
+/// over a shared MSAA texture first copies the resolved image back into it (a full-screen 4x "writeback"). With
+/// MSAA on, only the core's lines need it: the panels are textured quads whose edges are transparent padding, and
+/// the overlay is UI. So the core renders with MSAA and writes the window; the panels and the overlay share one
+/// non-MSAA texture, cleared to transparent, and the overlay blends it over the window (premultiplied, as both
+/// draw it). Without MSAA all three share one texture and only the last camera writes the window.
+pub fn camera_output(args: &Args, cam: WindowCam) -> (Msaa, ClearColorConfig, CameraOutputMode) {
+    let skip = CameraOutputMode::Skip;
+    let write = |blend| CameraOutputMode::Write { blend_state: Some(blend), clear_color: ClearColorConfig::None };
+    match (args.msaa, cam) {
+        (true, WindowCam::Core) => (Msaa::Sample4, ClearColorConfig::Custom(Color::BLACK), CameraOutputMode::default()),
+        (true, WindowCam::Panels) => (Msaa::Off, ClearColorConfig::Custom(Color::NONE), skip),
+        (true, WindowCam::Overlay) => (Msaa::Off, ClearColorConfig::None, write(BlendState::PREMULTIPLIED_ALPHA_BLENDING)),
+        (false, WindowCam::Core) => (Msaa::Off, ClearColorConfig::Custom(Color::BLACK), skip),
+        (false, WindowCam::Panels) => (Msaa::Off, ClearColorConfig::None, skip),
+        (false, WindowCam::Overlay) => (Msaa::Off, ClearColorConfig::None, write(BlendState::REPLACE)),
+    }
+}
+
+#[derive(Clone, Copy)]
+pub enum WindowCam {
+    Core,
+    Panels,
+    Overlay,
+}
+
 fn setup_cameras(mut commands: Commands, args: Res<Args>, off: Res<Offscreen>) {
     let proj = Projection::Perspective(PerspectiveProjection { fov: 40.0 * DEG, near: 10.0, far: 40000.0, ..default() });
-    let msaa = if args.msaa { Msaa::Sample4 } else { Msaa::Off };
+    let (msaa, clear_color, output_mode) = camera_output(&args, WindowCam::Core);
     commands.spawn((
         Camera3d::default(),
-        Camera { order: 0, clear_color: ClearColorConfig::Custom(Color::BLACK), ..default() },
+        Camera { order: 0, clear_color, output_mode, ..default() },
         bevy::camera::Hdr,
         Tonemapping::None,
         DebandDither::Disabled,
@@ -191,9 +220,10 @@ fn setup_cameras(mut commands: Commands, args: Res<Args>, off: Res<Offscreen>) {
         Transform::from_xyz(0.0, 0.0, 1500.0),
         CamCore,
     ));
+    let (msaa, clear_color, output_mode) = camera_output(&args, WindowCam::Panels);
     commands.spawn((
         Camera3d::default(),
-        Camera { order: 1, clear_color: ClearColorConfig::None, ..default() },
+        Camera { order: 1, clear_color, output_mode, ..default() },
         bevy::camera::Hdr,
         Tonemapping::None,
         DebandDither::Disabled,
@@ -212,6 +242,7 @@ fn stage_view(win: Query<&Window, With<PrimaryWindow>>, mut sv: ResMut<StageView
     }
 }
 
+#[allow(clippy::type_complexity)]
 fn camera_rig(sv: Res<StageView>, ctl: Res<CoreCtl>, mut cams: Query<&mut Transform, Or<(With<CamCore>, With<CamPanels>)>>) {
     for mut t in &mut cams {
         t.translation = Vec3::new(0.0, sv.base_y, sv.d * ctl.zoom.x);
