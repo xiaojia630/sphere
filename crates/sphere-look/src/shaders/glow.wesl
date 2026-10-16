@@ -163,5 +163,7 @@ fn fs_backdrop(i: VOut) -> @location(0) vec4<f32> {
     let grid = g * mask * 0.11 * 0.34;
     // scanlines: 2px dark every 4px at 5%
     let scan = step(2.0, yb % 4.0) * 0.05;
-    return vec4<f32>(m.color.rgb * ta + m.c2.rgb * grid, scan);
+    let srgb = m.color.rgb * ta + m.c2.rgb * grid;
+    let lin = select(srgb / 12.92, pow((srgb + vec3<f32>(0.055)) / 1.055, vec3<f32>(2.4)), srgb > vec3<f32>(0.04045));
+    return vec4<f32>(lin, scan);
 }

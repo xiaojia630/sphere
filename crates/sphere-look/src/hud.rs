@@ -75,7 +75,7 @@ pub fn setup_panels(
     );
 
     // ---- Core readout, riding on the sphere deck
-    let (rw, rh) = (230.0, 96.0);
+    let (rw, rh) = (272.0, 96.0);
     let ui = spawn_ui_panel(&mut commands, &mut images, rw, rh, scale, -8);
     build_readout_ui(&mut commands, ui.root, &f, &agents);
     let spec = PanelSpec { id: PanelId::Readout, w: rw, h: rh, home: Vec3::ZERO, home_scale: 1.0, side: 0.0, phase: 0.0, show_at: 0.0, unframed: true };
@@ -151,8 +151,8 @@ pub fn setup_backdrop(
         ATTR_HOLO,
         vec![[0.0f32, 1.0, 0.0, 0.0], [1.0, 1.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0]],
     );
-    let tint = hex("#03141a").to_linear();
-    let line = role_color(Role::Line).to_linear();
+    let tint = hex("#03141a").to_srgba();
+    let line = role_color(Role::Line).to_srgba();
     let mut gm = GlowMaterial::new(Kind::Backdrop, Vec4::new(tint.red, tint.green, tint.blue, 1.0), 1.0);
     gm.u.c2 = Vec4::new(line.red, line.green, line.blue, 1.0);
     let e = commands
@@ -195,9 +195,6 @@ pub struct FrameStats {
 pub struct StatsText;
 
 pub fn setup_overlay(mut commands: Commands, f: Res<UiFonts>, off: Res<Offscreen>, args: Res<Args>) {
-    if std::env::var("SPHERE_NOOV").is_ok() {
-        return;
-    }
     let cam = commands
         .spawn((
             Camera2d,

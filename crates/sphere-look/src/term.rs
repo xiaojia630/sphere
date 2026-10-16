@@ -159,9 +159,15 @@ impl Terminal {
         });
         let term = Term::new(Config::default(), &Size, Listener { writer: writer.clone() });
         {
-            let mut w = writer.lock().unwrap();
-            let _ = w.write_all(format!("{first_cmd}\n").as_bytes());
-            let _ = w.flush();
+            // wait for bash to draw its first prompt so the command is not echoed twice
+            let w = writer.clone();
+            let line = format!("{first_cmd}\n");
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(500));
+                let mut w = w.lock().unwrap();
+                let _ = w.write_all(line.as_bytes());
+                let _ = w.flush();
+            });
         }
         Ok(Self {
             inner: Mutex::new(Inner { term, parser: Processor::new(), rx, writer, _master: pair.master, _child: child }),

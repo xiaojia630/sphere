@@ -175,25 +175,12 @@ fn tick_sim(time: Res<Time<Real>>, mut sim: ResMut<Sim>) {
     sim.boot_t += dt;
 }
 
-fn setup_cameras(mut commands: Commands, args: Res<Args>, off: Res<Offscreen>, mut meshes: ResMut<Assets<Mesh>>, mut sm: ResMut<Assets<StandardMaterial>>) {
-    if std::env::var("SPHERE_CUBE").is_ok() {
-        commands.spawn((Mesh3d(meshes.add(Cuboid::new(300.0, 300.0, 300.0))), MeshMaterial3d(sm.add(StandardMaterial { base_color: Color::srgb(0.0, 1.0, 0.0), unlit: true, ..default() })), Transform::from_xyz(0.0, 0.0, 0.0)));
-    }
+fn setup_cameras(mut commands: Commands, args: Res<Args>, off: Res<Offscreen>) {
     let proj = Projection::Perspective(PerspectiveProjection { fov: 40.0 * DEG, near: 10.0, far: 40000.0, ..default() });
     let msaa = if args.msaa { Msaa::Sample4 } else { Msaa::Off };
-    if std::env::var("SPHERE_PLAIN").is_ok() {
-        commands.spawn((
-            Camera3d::default(),
-            Camera { order: 0, clear_color: ClearColorConfig::Custom(Color::srgb(0.3, 0.0, 0.0)), ..default() },
-            target_for(&off),
-            Transform::from_xyz(0.0, 0.0, 1500.0),
-            CamCore,
-        ));
-        return;
-    }
     commands.spawn((
         Camera3d::default(),
-        Camera { order: 0, clear_color: ClearColorConfig::Custom(if std::env::var("SPHERE_DBG").is_ok() { Color::srgb(0.3, 0.0, 0.0) } else { Color::BLACK }), ..default() },
+        Camera { order: 0, clear_color: ClearColorConfig::Custom(Color::BLACK), ..default() },
         bevy::camera::Hdr,
         Tonemapping::None,
         DebandDither::Disabled,
@@ -204,7 +191,6 @@ fn setup_cameras(mut commands: Commands, args: Res<Args>, off: Res<Offscreen>, m
         Transform::from_xyz(0.0, 0.0, 1500.0),
         CamCore,
     ));
-    if std::env::var("SPHERE_NOB").is_ok() { return; }
     commands.spawn((
         Camera3d::default(),
         Camera { order: 1, clear_color: ClearColorConfig::None, ..default() },
