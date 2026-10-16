@@ -19,7 +19,12 @@ const SPACES: [(&str, [f32; 3], &[&str]); 6] = [
     (
         "AGENTS",
         [0.3, 0.85, 1.0],
-        &["Inbox triage", "Q4 market research", "Weekly update draft", "Flights to Lagos"],
+        &[
+            "Inbox triage",
+            "Q4 market research",
+            "Weekly update draft",
+            "Flights to Lagos",
+        ],
     ),
     (
         "MAIL",
@@ -276,7 +281,9 @@ fn setup(
             Transform::from_scale(Vec3::splat(0.9)),
         ))
         .observe(
-            |trigger: Trigger<Pointer<Click>>, gesture: Res<Gesture>, mut actions: ResMut<Actions>| {
+            |trigger: Trigger<Pointer<Click>>,
+             gesture: Res<Gesture>,
+             mut actions: ResMut<Actions>| {
                 if trigger.event().button == PointerButton::Primary
                     && gesture.travelled < DRAG_THRESHOLD
                 {
@@ -298,11 +305,21 @@ fn setup(
     }
 
     // The track the spaces orbit on.
-    let mut track_arcs = vec![(SPACE_RING_RADIUS - 0.012, SPACE_RING_RADIUS + 0.012, 0.0, TAU)];
+    let mut track_arcs = vec![(
+        SPACE_RING_RADIUS - 0.012,
+        SPACE_RING_RADIUS + 0.012,
+        0.0,
+        TAU,
+    )];
     for i in 0..120 {
         let a = i as f32 / 120.0 * TAU;
         let len = if i % 10 == 0 { 0.14 } else { 0.05 };
-        track_arcs.push((SPACE_RING_RADIUS + 0.04, SPACE_RING_RADIUS + 0.04 + len, a, a + 0.006));
+        track_arcs.push((
+            SPACE_RING_RADIUS + 0.04,
+            SPACE_RING_RADIUS + 0.04 + len,
+            a,
+            a + 0.006,
+        ));
     }
     commands.spawn((
         Track,
@@ -350,7 +367,11 @@ fn spawn_hud_text(commands: &mut Commands) {
             ..default()
         })
         .with_children(|hud| {
-            hud.spawn((Text::new("SPHERE OS"), font(18.0), TextColor(Color::srgb(0.55, 0.85, 1.0))));
+            hud.spawn((
+                Text::new("SPHERE OS"),
+                font(18.0),
+                TextColor(Color::srgb(0.55, 0.85, 1.0)),
+            ));
             hud.spawn((HudPath, Text::new("CORE"), font(13.0), TextColor(dim)));
         });
 
@@ -366,7 +387,12 @@ fn spawn_hud_text(commands: &mut Commands) {
             ..default()
         })
         .with_children(|hud| {
-            hud.spawn((HudClock, Text::new("--:--"), font(30.0), TextColor(Color::srgb(0.85, 0.95, 1.0))));
+            hud.spawn((
+                HudClock,
+                Text::new("--:--"),
+                font(30.0),
+                TextColor(Color::srgb(0.85, 0.95, 1.0)),
+            ));
             hud.spawn((HudDate, Text::new(""), font(12.0), TextColor(dim)));
         });
 
@@ -481,7 +507,11 @@ fn hud_rings() -> Vec<(Vec<Arc>, LinearRgba, f32)> {
 
     // Outer sweeping arcs.
     rings.push((
-        vec![(2.3, 2.33, 0.4, 4.4), (2.3, 2.4, 4.65, 5.5), (2.45, 2.47, 5.7, 6.1)],
+        vec![
+            (2.3, 2.33, 0.4, 4.4),
+            (2.3, 2.4, 4.65, 5.5),
+            (2.45, 2.47, 5.7, 6.1),
+        ],
         ICE * 1.1,
         0.018,
     ));
@@ -522,11 +552,14 @@ fn arc_mesh(arcs: &[Arc]) -> Mesh {
         }
     }
     let n = positions.len();
-    Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default())
-        .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
-        .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, vec![[0.0, 0.0, 1.0]; n])
-        .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, vec![[0.0, 0.0]; n])
-        .with_inserted_indices(Indices::U32(indices))
+    Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::default(),
+    )
+    .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
+    .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, vec![[0.0, 0.0, 1.0]; n])
+    .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, vec![[0.0, 0.0]; n])
+    .with_inserted_indices(Indices::U32(indices))
 }
 
 /// Evenly spread point `i` of `n` on the unit sphere.
@@ -606,7 +639,11 @@ fn camera_input(
     }
 }
 
-fn on_orb_click(trigger: Trigger<Pointer<Click>>, gesture: Res<Gesture>, mut actions: ResMut<Actions>) {
+fn on_orb_click(
+    trigger: Trigger<Pointer<Click>>,
+    gesture: Res<Gesture>,
+    mut actions: ResMut<Actions>,
+) {
     if trigger.event().button == PointerButton::Primary && gesture.travelled < DRAG_THRESHOLD {
         actions.0.push(Action::ClickOrb(trigger.target()));
     }
@@ -667,7 +704,9 @@ fn apply_actions(
                 }
             }
             Action::ClickOrb(entity) => {
-                let Ok((_, orb)) = orbs.get(entity) else { continue };
+                let Ok((_, orb)) = orbs.get(entity) else {
+                    continue;
+                };
                 if !orb.alive {
                     continue;
                 }
@@ -798,7 +837,11 @@ fn spawn_orb(
             MeshMaterial3d(materials.add(glow_material(color * 1.6))),
             Transform::default(),
             Billboard {
-                speed: if matches!(kind, OrbKind::Space(_)) { 0.3 } else { -0.5 },
+                speed: if matches!(kind, OrbKind::Space(_)) {
+                    0.3
+                } else {
+                    -0.5
+                },
                 angle: home.x,
             },
             Pickable::IGNORE,
@@ -887,7 +930,12 @@ fn animate_core(
 fn animate_orbs(
     mut commands: Commands,
     time: Res<Time>,
-    mut orbs: Query<(Entity, &mut Orb, &mut Transform, &MeshMaterial3d<StandardMaterial>)>,
+    mut orbs: Query<(
+        Entity,
+        &mut Orb,
+        &mut Transform,
+        &MeshMaterial3d<StandardMaterial>,
+    )>,
     nav: Res<Nav>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
@@ -899,7 +947,11 @@ fn animate_orbs(
         orb.anim = move_towards(orb.anim, goal, dt * rate);
         let selected = matches!(orb.kind, OrbKind::Item(i, j) if nav.selected == Some((i, j)));
         let focused = nav.focus == Some(entity);
-        let glow_goal = if orb.hovered || selected || focused { 1.0 } else { 0.0 };
+        let glow_goal = if orb.hovered || selected || focused {
+            1.0
+        } else {
+            0.0
+        };
         orb.glow = move_towards(orb.glow, glow_goal, dt * 6.0);
 
         if !orb.alive && orb.anim <= 0.0 {
@@ -914,7 +966,11 @@ fn animate_orbs(
         transform.scale = Vec3::splat(orb.size * e.max(0.0) * (1.0 + 0.18 * orb.glow));
 
         if let Some(material) = materials.get_mut(&material.0) {
-            let pulse = if selected { 1.0 + 0.4 * (t * 6.0).sin() } else { 1.0 };
+            let pulse = if selected {
+                1.0 + 0.4 * (t * 6.0).sin()
+            } else {
+                1.0
+            };
             material.emissive = orb.color * (0.55 + 1.4 * orb.glow) * pulse;
         }
     }
@@ -983,7 +1039,9 @@ fn update_labels(
     orbs: Query<(&Orb, &Transform)>,
     mut labels: Query<(&mut Node, &mut Visibility, &mut TextColor)>,
 ) {
-    let Ok((camera, camera_transform)) = camera.single() else { return };
+    let Ok((camera, camera_transform)) = camera.single() else {
+        return;
+    };
     let view_dir = camera_transform.forward();
     for (orb, transform) in orbs.iter() {
         let Ok((mut node, mut visibility, mut color)) = labels.get_mut(orb.label) else {
@@ -1034,8 +1092,7 @@ fn update_hud(
         text.0 = match nav.selected {
             Some((i, j)) => format!(
                 "{}  /  {}\nAn agent will pick this up for you once the agent link is online.",
-                SPACES[i].0,
-                SPACES[i].2[j]
+                SPACES[i].0, SPACES[i].2[j]
             ),
             None if !nav.expanded => "Click the sphere".to_string(),
             None => String::new(),
