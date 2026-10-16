@@ -7,10 +7,6 @@ use serde::Deserialize;
 use sphere_proto::paths;
 use std::path::{Path, PathBuf};
 
-/// Claude Code versions the protocol handling was tested against.
-pub const CLAUDE_TESTED_MIN: (u64, u64, u64) = (2, 1, 0);
-pub const CLAUDE_TESTED_BELOW: (u64, u64, u64) = (2, 2, 0);
-
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
@@ -148,24 +144,6 @@ impl Config {
     }
 }
 
-/// Parse the first `x.y.z` out of `claude --version` output.
-pub fn parse_version(text: &str) -> Option<(u64, u64, u64)> {
-    for word in text.split_whitespace() {
-        let mut parts = word.trim_start_matches('v').split('.');
-        let (Some(a), Some(b), Some(c)) = (parts.next(), parts.next(), parts.next()) else {
-            continue;
-        };
-        if let (Ok(a), Ok(b), Ok(c)) = (a.parse(), b.parse(), c.parse()) {
-            return Some((a, b, c));
-        }
-    }
-    None
-}
-
-pub fn version_in_tested_range(v: (u64, u64, u64)) -> bool {
-    v >= CLAUDE_TESTED_MIN && v < CLAUDE_TESTED_BELOW
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -177,16 +155,6 @@ mod tests {
         assert_eq!(c.agent_args, vec!["--fixture", "f"]);
         assert_eq!(c.stop_grace_ms, 5000);
         assert!(toml::from_str::<Config>("max_concurent = 1").is_err());
-    }
-
-    #[test]
-    fn versions() {
-        assert_eq!(parse_version("2.1.301 (Claude Code)"), Some((2, 1, 301)));
-        assert_eq!(parse_version("claude v3.0.1"), Some((3, 0, 1)));
-        assert_eq!(parse_version("none"), None);
-        assert!(version_in_tested_range((2, 1, 301)));
-        assert!(!version_in_tested_range((2, 2, 0)));
-        assert!(!version_in_tested_range((1, 9, 9)));
     }
 
     #[test]

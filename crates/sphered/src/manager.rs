@@ -6,7 +6,7 @@
 //! reads on from the offsets it saved in the same transaction as the events.
 
 use crate::agent_proto::{self as proto, Block, CanUseTool, Incoming};
-use crate::config::{self, Config};
+use crate::config::Config;
 use crate::host_link::HostLink;
 use crate::hub::Hub;
 use crate::policy::{self, Ctx, Policy, Verdict};
@@ -16,6 +16,7 @@ use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
 use sphere_host::{ExitStatus, FollowItem, SpawnParams, Stream};
 use sphere_proto::api::{self, kind, RpcError};
+use sphere_proto::version;
 use sphere_proto::{
     now_rfc3339, AnswerKind, EventBody, Excerpt, OutputRef, RequestInfo, RequestKind, RequestStatus, TaskState,
     TaskView,
@@ -311,13 +312,9 @@ impl Manager {
             match run_capture(&[self.cfg.agent_command.clone(), "--version".into()]).await {
                 Ok(text) => {
                     self.info.lock().unwrap().claude_version = Some(text.trim().to_string());
-                    match config::parse_version(&text) {
-                        Some(v) if config::version_in_tested_range(v) => {}
-                        Some(v) => self.warn(format!(
-                            "Claude Code {}.{}.{} is outside the tested range ({}.{}.x to below {}.{}.0); things may not work",
-                            v.0, v.1, v.2, config::CLAUDE_TESTED_MIN.0, config::CLAUDE_TESTED_MIN.1,
-                            config::CLAUDE_TESTED_BELOW.0, config::CLAUDE_TESTED_BELOW.1
-                        )),
+                    match version::parse(&text) {
+                        Some(v) if version::in_tested_range(v) => {}
+                        Some(v) => self.warn(version::out_of_range_message(v)),
                         None => self.warn(format!("could not read a version from `{}`", text.trim())),
                     }
                 }
@@ -1092,6 +1089,7 @@ impl Manager {
             let mut rt = self.rt.lock().unwrap();
             rt.tasks.get_mut(task).map(|t| {
                 t.stopping = true;
+                t.interrupted = true;
                 if let Some(h) = t.idle_timer.take() {
                     h.abort();
                 }
@@ -1156,7 +1154,23 @@ impl Manager {
                     },
                 )
                 .map_err(ApiError::from)?;
-            let message = continue_message(&view, if p.answer == AnswerKind::Change { note } else { None });
+            let mut message = continue_message(&view, None);
+            if let Some(list) = info.input["cut_off"].as_array() {
+                if !list.is_empty() && view.open_steps.is_empty() {
+                    message.push_str(
+                        "\n\nThese tool calls were cut off before they finished, so they may or may not have completed. \
+                         Check their state before repeating anything with side effects:",
+                    );
+                    for c in list {
+                        message.push_str(&format!("\n- {}", c["title"].as_str().unwrap_or("a tool call")));
+                    }
+                }
+            }
+            if p.answer == AnswerKind::Change {
+                if let Some(n) = note {
+                    message.push_str(&format!("\n\nThe user says: {n}"));
+                }
+            }
             if self.rt.lock().unwrap().launching.insert(info.task.clone()) {
                 let (this, task) = (self.clone(), info.task.clone());
                 tokio::spawn(async move { this.launch(task, Some(message)).await });

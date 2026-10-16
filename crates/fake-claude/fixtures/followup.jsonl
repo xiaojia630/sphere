@@ -1,0 +1,13 @@
+// Two turns on one process; stays alive between them and after.
+{"op":"init"}
+{"op":"wait_user"}
+{"mode":"fresh","op":"say_args"}
+{"mode":"resume","op":"say_args"}
+{"op":"say","text":"first turn"}
+{"op":"result","text":"first done","cost":0.01}
+{"op":"wait_user"}
+{"op":"say_user","prefix":"second turn, you said: "}
+{"op":"result","text":"second done","cost":0.02}
+{"op":"wait_user"}
+{"op":"say_user","prefix":"third turn, you said: "}
+{"op":"result","text":"third done","cost":0.02}

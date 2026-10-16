@@ -1,0 +1,8 @@
+// The agent asks the human a question.
+{"op":"init"}
+{"op":"wait_user"}
+{"op":"tool_use","id":"toolu_q","name":"AskUserQuestion","input":{"questions":[{"question":"Which database?","header":"DB","multiSelect":false,"options":[{"label":"Postgres","description":"Server"},{"label":"SQLite","description":"File"}]}]}}
+{"op":"ask","tool":"AskUserQuestion","tool_use_id":"toolu_q","input":{"questions":[{"question":"Which database?","header":"DB","multiSelect":false,"options":[{"label":"Postgres","description":"Server"},{"label":"SQLite","description":"File"}]}]},"allow":[{"op":"say_response"},{"op":"tool_result","id":"toolu_q","result":"answered"}],"deny":[{"op":"say_response"}]}
+{"op":"tool_use","id":"toolu_plan","name":"ExitPlanMode","input":{"plan":"1. Add the table\n2. Migrate"}}
+{"op":"ask","tool":"ExitPlanMode","tool_use_id":"toolu_plan","input":{"plan":"1. Add the table\n2. Migrate"},"allow":[{"op":"say_response"}],"deny":[{"op":"say_response"}]}
+{"op":"result","text":"asked"}

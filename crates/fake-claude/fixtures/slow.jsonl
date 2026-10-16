@@ -1,0 +1,6 @@
+// Takes a little while, then finishes; for queueing.
+{"op":"init"}
+{"op":"wait_user"}
+{"op":"say","text":"slowly working"}
+{"op":"sleep","ms":1500}
+{"op":"result","text":"slow done","cost":0.5}

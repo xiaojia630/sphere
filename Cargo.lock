@@ -583,6 +583,7 @@ dependencies = [
  "serde_json",
  "sphere-client",
  "sphere-proto",
+ "tempfile",
  "tokio",
 ]
 

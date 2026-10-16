@@ -1,0 +1,5 @@
+// Dies without a result.
+{"op":"init"}
+{"op":"wait_user"}
+{"op":"stderr","text":"boom: something broke"}
+{"op":"exit","code":3}

@@ -1,0 +1,9 @@
+// A long run to stop: a child in the agent's process group and a long sleep.
+{"op":"init"}
+{"op":"wait_user"}
+{"op":"say","text":"Starting a long job."}
+{"op":"spawn_sleeper","secs":300}
+{"op":"tool","name":"Read","input":{"file_path":"README.md"},"result":"hello"}
+{"op":"ask","tool":"Bash","tool_use_id":"toolu_wait","description":"Never answered","input":{"command":"git push"},"allow":[{"op":"say","text":"allowed"}],"deny":[{"op":"say","text":"denied"}]}
+{"op":"sleep","ms":600000}
+{"op":"result","text":"never"}

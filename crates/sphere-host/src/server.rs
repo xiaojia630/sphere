@@ -147,6 +147,10 @@ struct Host {
     children: Mutex<HashMap<String, Arc<Child>>>,
     next: AtomicU64,
     shutdown: Notify,
+    /// Set once a shutdown starts: the children are being killed, and
+    /// followers must see the connection drop, not a clean exit, so their
+    /// owner knows the host went away rather than the child finishing.
+    closing: AtomicBool,
 }
 
 fn exit_status(raw: i32) -> ExitStatus {
@@ -181,6 +185,7 @@ impl Host {
             children: Mutex::new(HashMap::new()),
             next: AtomicU64::new(next),
             shutdown: Notify::new(),
+            closing: AtomicBool::new(false),
         }
     }
 
@@ -325,6 +330,7 @@ impl Host {
     }
 
     fn kill_all(&self) {
+        self.closing.store(true, Ordering::SeqCst);
         for c in self.children.lock().unwrap().values() {
             if c.exit().is_none() {
                 unsafe { libc::kill(-(c.pid as i32), libc::SIGKILL) };
@@ -508,6 +514,9 @@ async fn follow(host: &Host, p: ReadParams, id: u64, w: &mut tokio::net::unix::O
             send_line(w, &ev).await?;
             off += data.len() as u64;
             continue;
+        }
+        if host.closing.load(Ordering::SeqCst) {
+            return Ok(());
         }
         if let Some((status, at)) = child.exit() {
             if chan.done.load(Ordering::SeqCst) || at.elapsed() > EXIT_DRAIN {

@@ -1,0 +1,7 @@
+// Records the control requests it receives.
+{"op":"init"}
+{"op":"wait_user"}
+{"op":"result","text":"ready"}
+{"op":"wait_user"}
+{"op":"say_ctl"}
+{"op":"result","text":"reported"}

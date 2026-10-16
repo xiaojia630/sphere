@@ -1,0 +1,6 @@
+// One push to the task's own branch (settled by a Sphere rule) and one to main (asks).
+{"op":"init"}
+{"op":"wait_user"}
+{"op":"ask","tool":"Bash","tool_use_id":"toolu_a","input":{"command":"git push origin sphere/tier-two"},"allow":[{"op":"say_response"}],"deny":[{"op":"say_response"}]}
+{"op":"ask","tool":"Bash","tool_use_id":"toolu_b","description":"Push main","input":{"command":"git push origin main"},"allow":[{"op":"say","text":"main allowed"},{"op":"say_response"}],"deny":[{"op":"say","text":"main denied"},{"op":"say_response"}]}
+{"op":"result","text":"pushed"}

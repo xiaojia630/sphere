@@ -17,3 +17,6 @@ serde_json.workspace = true
 sphere-client.workspace = true
 sphere-proto.workspace = true
 tokio.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

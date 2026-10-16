@@ -1,0 +1,21 @@
+// A plain run: reads, a search, edits, a noisy shell command, a result.
+{"op":"init"}
+{"op":"wait_user"}
+{"op":"say_args"}
+{"op":"say_env","name":"SPHERE_TASK"}
+{"op":"delta","text":"Let me "}
+{"op":"delta","text":"look around."}
+{"op":"emit","line":{"type":"brand_new_message","extra":{"x":1}}}
+{"op":"emit","line":{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"I'll read the README, then add notes."},{"type":"some_future_block","data":1}]},"unknown_field":true}}
+{"op":"tool","name":"Read","input":{"file_path":"README.md"},"result":"hello\n"}
+{"op":"tool","name":"Grep","input":{"pattern":"hello"},"result":"README.md:1:hello"}
+{"op":"tool_use","id":"toolu_edit","name":"Write","input":{"file_path":"notes.txt","content":"one\ntwo\n"}}
+{"op":"touch_file","path":"notes.txt","content":"one\ntwo\n"}
+{"op":"tool_result","id":"toolu_edit","result":"File created successfully"}
+{"op":"tool_use","id":"toolu_edit2","name":"Edit","input":{"file_path":"README.md","old_string":"hello","new_string":"hello world"}}
+{"op":"append_file","path":"README.md","content":"more\n"}
+{"op":"tool_result","id":"toolu_edit2","result":"The file has been updated"}
+{"op":"tool","name":"Bash","input":{"command":"cargo test","description":"Run the tests"},"result_bytes":6000}
+{"op":"tool","name":"Bash","input":{"command":"false"},"result":"exit 1","is_error":true}
+{"op":"say","text":"All done."}
+{"op":"result","text":"Added notes.txt","cost":0.02,"turns":3}

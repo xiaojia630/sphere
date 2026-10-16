@@ -5,6 +5,7 @@ pub mod api;
 pub mod event;
 pub mod paths;
 pub mod request;
+pub mod version;
 pub mod views;
 
 pub use event::{rfc3339_from_unix_ms, 

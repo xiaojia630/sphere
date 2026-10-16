@@ -1,0 +1,8 @@
+// Interrupted mid-run; carries on with the next message.
+{"op":"init"}
+{"op":"wait_user"}
+{"op":"say","text":"working"}
+{"op":"sleep","ms":600000}
+{"op":"wait_user"}
+{"op":"say_user","prefix":"after the interrupt: "}
+{"op":"result","text":"recovered"}
