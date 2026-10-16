@@ -221,7 +221,10 @@ mod tests {
     #[test]
     fn follow_events_are_tagged() {
         let e = FollowEvent::Exit {
-            status: ExitStatus { code: Some(3), signal: None },
+            status: ExitStatus {
+                code: Some(3),
+                signal: None,
+            },
         };
         let v = serde_json::to_value(&e).unwrap();
         assert_eq!(v["event"], "exit");

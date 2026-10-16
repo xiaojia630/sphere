@@ -47,7 +47,11 @@ fn parse<T: DeserializeOwned>(v: Value) -> Result<T, RpcError> {
 }
 
 fn ok<T: serde::Serialize>(v: T) -> Result<Value, RpcError> {
-    serde_json::to_value(v).map_err(|e| RpcError { code: code::INTERNAL, message: e.to_string(), data: None })
+    serde_json::to_value(v).map_err(|e| RpcError {
+        code: code::INTERNAL,
+        message: e.to_string(),
+        data: None,
+    })
 }
 
 fn response(id: &Value, r: Result<Value, RpcError>) -> String {
@@ -79,7 +83,14 @@ async fn handle(mgr: Arc<Manager>, stream: UnixStream) {
             }
         }
     });
-    let mut conn = Conn { kind: ClientKind::Cli, pid, subscribed: false, out: out_tx, close: close.clone(), start_stream: None, };
+    let mut conn = Conn {
+        kind: ClientKind::Cli,
+        pid,
+        subscribed: false,
+        out: out_tx,
+        close: close.clone(),
+        start_stream: None,
+    };
     let mut lines = BufReader::new(r).lines();
     loop {
         let line = tokio::select! {
@@ -92,7 +103,11 @@ async fn handle(mgr: Arc<Manager>, stream: UnixStream) {
         let reply = match serde_json::from_str::<api::RpcRequest>(&line) {
             Err(e) => response(
                 &Value::Null,
-                Err(RpcError { code: code::PARSE, message: format!("parse error: {e}"), data: None }),
+                Err(RpcError {
+                    code: code::PARSE,
+                    message: format!("parse error: {e}"),
+                    data: None,
+                }),
             ),
             Ok(req) => {
                 let result = dispatch(&mgr, &mut conn, &req.method, req.params).await;
@@ -103,14 +118,25 @@ async fn handle(mgr: Arc<Manager>, stream: UnixStream) {
             break;
         }
         if let Some((sub, p)) = conn.start_stream.take() {
-            tokio::spawn(forward(mgr.clone(), sub, p, conn.out.clone(), conn.close.clone()));
+            tokio::spawn(forward(
+                mgr.clone(),
+                sub,
+                p,
+                conn.out.clone(),
+                conn.close.clone(),
+            ));
         }
     }
     drop(conn);
     let _ = writer.await;
 }
 
-async fn dispatch(mgr: &Arc<Manager>, conn: &mut Conn, m: &str, params: Value) -> Result<Value, RpcError> {
+async fn dispatch(
+    mgr: &Arc<Manager>,
+    conn: &mut Conn,
+    m: &str,
+    params: Value,
+) -> Result<Value, RpcError> {
     let r: Result<Value, ApiError> = async {
         match m {
             method::HELLO => {
@@ -123,14 +149,21 @@ async fn dispatch(mgr: &Arc<Manager>, conn: &mut Conn, m: &str, params: Value) -
                 let p: api::HistoryParams = parse(params)?;
                 let events = mgr
                     .hub
-                    .history(p.task.as_deref(), p.before, p.limit.unwrap_or(100).clamp(1, 1000))
+                    .history(
+                        p.task.as_deref(),
+                        p.before,
+                        p.limit.unwrap_or(100).clamp(1, 1000),
+                    )
                     .map_err(ApiError::from)?;
                 Ok(ok(api::HistoryResult { events })?)
             }
             method::BLOB_READ => Ok(ok(mgr.blob_read(parse(params)?).await?)?),
             method::SUBSCRIBE => {
                 if conn.subscribed {
-                    return Err(ApiError(RpcError::app(kind::INVALID_STATE, "already subscribed on this connection")));
+                    return Err(ApiError(RpcError::app(
+                        kind::INVALID_STATE,
+                        "already subscribed on this connection",
+                    )));
                 }
                 let p: api::SubscribeParams = parse(params)?;
                 conn.subscribed = true;
@@ -146,7 +179,8 @@ async fn dispatch(mgr: &Arc<Manager>, conn: &mut Conn, m: &str, params: Value) -
                 Ok(ok(api::Ack { ok: true })?)
             }
             method::TASK_INTERRUPT => {
-                mgr.interrupt(&parse::<api::TaskParams>(params)?.task).await?;
+                mgr.interrupt(&parse::<api::TaskParams>(params)?.task)
+                    .await?;
                 Ok(ok(api::Ack { ok: true })?)
             }
             method::TASK_STOP => {
@@ -163,7 +197,10 @@ async fn dispatch(mgr: &Arc<Manager>, conn: &mut Conn, m: &str, params: Value) -
                 mgr.set_model(&p.task, p.model).await?;
                 Ok(ok(api::Ack { ok: true })?)
             }
-            method::TASK_REWIND => Err(ApiError(RpcError::app(kind::NOT_IMPLEMENTED, "rewind is not implemented yet"))),
+            method::TASK_REWIND => Err(ApiError(RpcError::app(
+                kind::NOT_IMPLEMENTED,
+                "rewind is not implemented yet",
+            ))),
             method::SESSION_LIST => Ok(ok(mgr.session_list().await?)?),
             method::SESSION_BRING_IN => Ok(ok(mgr.bring_in(parse(params)?).await?)?),
             method::REQUEST_ANSWER => {
@@ -193,13 +230,17 @@ impl From<RpcError> for ApiError {
 async fn authorize_answer(mgr: &Arc<Manager>, conn: &Conn) -> Result<(), ApiError> {
     let forbidden = |why: &str| ApiError(RpcError::app(kind::FORBIDDEN, why));
     if conn.kind == ClientKind::Assistant {
-        return Err(forbidden("the assistant cannot answer requests; only you can"));
+        return Err(forbidden(
+            "the assistant cannot answer requests; only you can",
+        ));
     }
     match conn.pid {
         Some(pid) => {
             let roots = mgr.agent_roots().await;
             if peer::descends_from(pid, &roots) {
-                return Err(forbidden("requests cannot be answered from a process an agent started"));
+                return Err(forbidden(
+                    "requests cannot be answered from a process an agent started",
+                ));
             }
         }
         None => tracing::warn!("could not identify the caller's process; allowing the answer"),
@@ -209,11 +250,22 @@ async fn authorize_answer(mgr: &Arc<Manager>, conn: &Conn) -> Result<(), ApiErro
 
 /// Replay stored events, then stream live ones. Ends when the client goes
 /// away or falls too far behind.
-async fn forward(mgr: Arc<Manager>, mut sub: crate::hub::Subscription, p: api::SubscribeParams, out: mpsc::Sender<String>, close: Arc<Notify>) {
-    let note = |method: &str, params: Value| json!({"jsonrpc": "2.0", "method": method, "params": params}).to_string();
+async fn forward(
+    mgr: Arc<Manager>,
+    mut sub: crate::hub::Subscription,
+    p: api::SubscribeParams,
+    out: mpsc::Sender<String>,
+    close: Arc<Notify>,
+) {
+    let note = |method: &str, params: Value| {
+        json!({"jsonrpc": "2.0", "method": method, "params": params}).to_string()
+    };
     let mut since = p.since;
     loop {
-        let page = match mgr.hub.replay_page(since, sub.replay_upto, p.task.as_deref(), REPLAY_PAGE) {
+        let page = match mgr
+            .hub
+            .replay_page(since, sub.replay_upto, p.task.as_deref(), REPLAY_PAGE)
+        {
             Ok(p) => p,
             Err(e) => {
                 tracing::error!("replay failed: {e:#}");
@@ -221,9 +273,18 @@ async fn forward(mgr: Arc<Manager>, mut sub: crate::hub::Subscription, p: api::S
                 return;
             }
         };
-        let Some(last) = page.last().map(|e| e.seq) else { break };
+        let Some(last) = page.last().map(|e| e.seq) else {
+            break;
+        };
         for ev in page {
-            if out.send(note(notify::EVENT, serde_json::to_value(&ev).unwrap_or_default())).await.is_err() {
+            if out
+                .send(note(
+                    notify::EVENT,
+                    serde_json::to_value(&ev).unwrap_or_default(),
+                ))
+                .await
+                .is_err()
+            {
                 return;
             }
         }
@@ -241,7 +302,10 @@ async fn forward(mgr: Arc<Manager>, mut sub: crate::hub::Subscription, p: api::S
     if sub.lagged.load(Ordering::SeqCst) {
         let err = response(
             &Value::Null,
-            Err(RpcError::app(kind::LAGGED, "the client fell too far behind; reconnect and resync from a snapshot")),
+            Err(RpcError::app(
+                kind::LAGGED,
+                "the client fell too far behind; reconnect and resync from a snapshot",
+            )),
         );
         let _ = out.send(err).await;
     }

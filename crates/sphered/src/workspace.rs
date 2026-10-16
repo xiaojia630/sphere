@@ -33,7 +33,11 @@ fn git(dir: &Path, args: &[&str]) -> Result<String> {
         .output()
         .context("run git")?;
     if !out.status.success() {
-        bail!("git {} failed: {}", args.join(" "), String::from_utf8_lossy(&out.stderr).trim());
+        bail!(
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
     }
     Ok(String::from_utf8_lossy(&out.stdout).trim_end().to_string())
 }
@@ -60,12 +64,22 @@ pub fn slug(title: &str) -> String {
 }
 
 pub fn repo_toplevel(repo: &Path) -> Result<PathBuf> {
-    let top = git(repo, &["rev-parse", "--show-toplevel"]).with_context(|| format!("{} is not a git repository", repo.display()))?;
+    let top = git(repo, &["rev-parse", "--show-toplevel"])
+        .with_context(|| format!("{} is not a git repository", repo.display()))?;
     Ok(PathBuf::from(top))
 }
 
 fn branch_exists(repo: &Path, name: &str) -> bool {
-    git(repo, &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{name}")]).is_ok()
+    git(
+        repo,
+        &[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{name}"),
+        ],
+    )
+    .is_ok()
 }
 
 fn read_repo_config(top: &Path) -> Result<RepoConfig> {
@@ -80,12 +94,21 @@ fn read_repo_config(top: &Path) -> Result<RepoConfig> {
 /// Only plain relative paths inside the repo may be copied.
 fn safe_relative(p: &str) -> bool {
     let path = Path::new(p);
-    path.is_relative() && !path.components().any(|c| matches!(c, std::path::Component::ParentDir))
+    path.is_relative()
+        && !path
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
 }
 
 /// Create the workspace for a task: a worktree on `sphere/<slug>`, or the repo
 /// itself with `in_place`. Runs the repo's copy list and setup command.
-pub fn prepare(worktrees: &Path, repo: &Path, task_id: &str, title: &str, in_place: bool) -> Result<Workspace> {
+pub fn prepare(
+    worktrees: &Path,
+    repo: &Path,
+    task_id: &str,
+    title: &str,
+    in_place: bool,
+) -> Result<Workspace> {
     let top = repo_toplevel(repo)?;
     let base = git(&top, &["rev-parse", "HEAD"]).context("the repository has no commits yet")?;
     if in_place {
@@ -110,7 +133,17 @@ pub fn prepare(worktrees: &Path, repo: &Path, task_id: &str, title: &str, in_pla
         branch = format!("{base_name}-{n}");
         n += 1;
     }
-    git(&top, &["worktree", "add", "-b", &branch, &workdir.to_string_lossy(), "HEAD"])?;
+    git(
+        &top,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            &branch,
+            &workdir.to_string_lossy(),
+            "HEAD",
+        ],
+    )?;
 
     let cfg = read_repo_config(&top)?;
     for rel in &cfg.copy {
@@ -134,12 +167,31 @@ pub fn prepare(worktrees: &Path, repo: &Path, task_id: &str, title: &str, in_pla
             .output()
             .context("run setup")?;
         if !out.status.success() {
-            let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
-            let tail: String = text.chars().rev().take(800).collect::<Vec<_>>().into_iter().rev().collect();
-            bail!("setup command `{setup}` failed ({}): {}", out.status, tail.trim());
+            let text = format!(
+                "{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+            let tail: String = text
+                .chars()
+                .rev()
+                .take(800)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect();
+            bail!(
+                "setup command `{setup}` failed ({}): {}",
+                out.status,
+                tail.trim()
+            );
         }
     }
-    Ok(Workspace { workdir, branch: Some(branch), base })
+    Ok(Workspace {
+        workdir,
+        branch: Some(branch),
+        base,
+    })
 }
 
 /// Files changed since `base`, from `git diff --numstat` plus untracked files.
@@ -149,7 +201,9 @@ pub fn files_touched(workdir: &Path, base: &str) -> Result<Vec<FileStat>> {
     let numstat = git(workdir, &["diff", "--numstat", "--no-renames", base])?;
     for line in numstat.lines() {
         let mut it = line.splitn(3, '\t');
-        let (Some(a), Some(r), Some(path)) = (it.next(), it.next(), it.next()) else { continue };
+        let (Some(a), Some(r), Some(path)) = (it.next(), it.next(), it.next()) else {
+            continue;
+        };
         files.push(FileStat {
             path: path.to_string(),
             added: a.parse().unwrap_or(0),
@@ -165,7 +219,11 @@ pub fn files_touched(workdir: &Path, base: &str) -> Result<Vec<FileStat>> {
                 .unwrap_or(0),
             _ => 0,
         };
-        files.push(FileStat { path: path.to_string(), added, removed: 0 });
+        files.push(FileStat {
+            path: path.to_string(),
+            added,
+            removed: 0,
+        });
     }
     files.sort_by(|a, b| a.path.cmp(&b.path));
     Ok(files)
@@ -179,8 +237,17 @@ pub mod testutil {
     pub fn init_repo(dir: &Path) {
         std::fs::create_dir_all(dir).unwrap();
         let run = |args: &[&str]| {
-            let st = Command::new("git").arg("-C").arg(dir).args(args).output().unwrap();
-            assert!(st.status.success(), "{args:?}: {}", String::from_utf8_lossy(&st.stderr));
+            let st = Command::new("git")
+                .arg("-C")
+                .arg(dir)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                st.status.success(),
+                "{args:?}: {}",
+                String::from_utf8_lossy(&st.stderr)
+            );
         };
         run(&["init", "-q", "-b", "main"]);
         run(&["config", "user.email", "t@example.com"]);
@@ -215,8 +282,15 @@ mod tests {
         assert_eq!(a.workdir, wt.join("myrepo").join("t1"));
         assert_eq!(a.branch.as_deref(), Some("sphere/fix-login"));
         assert!(a.workdir.join("README.md").exists());
-        assert_eq!(git(&a.workdir, &["rev-parse", "--abbrev-ref", "HEAD"]).unwrap(), "sphere/fix-login");
-        assert_eq!(git(&repo, &["rev-parse", "--abbrev-ref", "HEAD"]).unwrap(), "main", "the checkout is untouched");
+        assert_eq!(
+            git(&a.workdir, &["rev-parse", "--abbrev-ref", "HEAD"]).unwrap(),
+            "sphere/fix-login"
+        );
+        assert_eq!(
+            git(&repo, &["rev-parse", "--abbrev-ref", "HEAD"]).unwrap(),
+            "main",
+            "the checkout is untouched"
+        );
 
         let b = prepare(&wt, &repo, "t2", "Fix login", false).unwrap();
         assert_eq!(b.branch.as_deref(), Some("sphere/fix-login-2"));
@@ -247,8 +321,14 @@ mod tests {
         )
         .unwrap();
         let w = prepare(&tmp.path().join("wt"), &repo, "t1", "x", false).unwrap();
-        assert_eq!(std::fs::read_to_string(w.workdir.join(".env")).unwrap(), "SECRET=1\n");
-        assert_eq!(std::fs::read_to_string(w.workdir.join("setup-ran.txt")).unwrap(), "ready\n");
+        assert_eq!(
+            std::fs::read_to_string(w.workdir.join(".env")).unwrap(),
+            "SECRET=1\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(w.workdir.join("setup-ran.txt")).unwrap(),
+            "ready\n"
+        );
     }
 
     #[test]
@@ -257,7 +337,11 @@ mod tests {
         let repo = tmp.path().join("r");
         init_repo(&repo);
         std::fs::create_dir_all(repo.join(".sphere")).unwrap();
-        std::fs::write(repo.join(".sphere/config.toml"), "setup = \"echo nope >&2; exit 3\"\n").unwrap();
+        std::fs::write(
+            repo.join(".sphere/config.toml"),
+            "setup = \"echo nope >&2; exit 3\"\n",
+        )
+        .unwrap();
         let err = prepare(&tmp.path().join("wt"), &repo, "t1", "x", false).unwrap_err();
         assert!(format!("{err:#}").contains("nope"), "{err:#}");
 
@@ -270,7 +354,10 @@ mod tests {
     fn not_a_repo_is_a_clear_error() {
         let tmp = tempfile::tempdir().unwrap();
         let err = prepare(&tmp.path().join("wt"), tmp.path(), "t1", "x", false).unwrap_err();
-        assert!(format!("{err:#}").contains("not a git repository"), "{err:#}");
+        assert!(
+            format!("{err:#}").contains("not a git repository"),
+            "{err:#}"
+        );
     }
 
     #[test]
@@ -286,13 +373,34 @@ mod tests {
         assert_eq!(
             files,
             vec![
-                FileStat { path: "README.md".into(), added: 1, removed: 0 },
-                FileStat { path: "new.txt".into(), added: 3, removed: 0 },
+                FileStat {
+                    path: "README.md".into(),
+                    added: 1,
+                    removed: 0
+                },
+                FileStat {
+                    path: "new.txt".into(),
+                    added: 3,
+                    removed: 0
+                },
             ]
         );
         // Committed changes still count against the base.
         git(&w.workdir, &["add", "."]).unwrap();
-        git(&w.workdir, &["-c", "user.email=a@b", "-c", "user.name=n", "commit", "-q", "-m", "c"]).unwrap();
+        git(
+            &w.workdir,
+            &[
+                "-c",
+                "user.email=a@b",
+                "-c",
+                "user.name=n",
+                "commit",
+                "-q",
+                "-m",
+                "c",
+            ],
+        )
+        .unwrap();
         assert_eq!(files_touched(&w.workdir, &w.base).unwrap().len(), 2);
     }
 }

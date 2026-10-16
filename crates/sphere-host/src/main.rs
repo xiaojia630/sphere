@@ -38,7 +38,10 @@ fn daemonize(log: &std::path::Path) -> std::io::Result<()> {
         }
     }
     let null = std::fs::File::open("/dev/null")?;
-    let log = std::fs::OpenOptions::new().create(true).append(true).open(log)?;
+    let log = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log)?;
     unsafe {
         libc::dup2(null.as_raw_fd(), 0);
         libc::dup2(log.as_raw_fd(), 1);
@@ -54,7 +57,9 @@ fn main() -> Result<()> {
         daemonize(&args.dir.join("host.log"))?;
     }
     tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
+        )
         .with_ansi(false)
         .init();
     // The runtime is built after the fork: forking a running runtime is unsound.

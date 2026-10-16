@@ -37,7 +37,15 @@ pub fn bins() -> &'static Bins {
         if !(b.host.exists() && b.fake.exists() && b.sphere.exists()) {
             let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
             let st = Command::new(cargo)
-                .args(["build", "-p", "sphere-host", "-p", "fake-claude", "-p", "sphere-cli"])
+                .args([
+                    "build",
+                    "-p",
+                    "sphere-host",
+                    "-p",
+                    "fake-claude",
+                    "-p",
+                    "sphere-cli",
+                ])
                 .status()
                 .expect("run cargo build");
             assert!(st.success(), "could not build the test binaries");
@@ -53,8 +61,17 @@ pub fn fixture(name: &str) -> PathBuf {
 }
 
 pub fn git(dir: &Path, args: &[&str]) -> String {
-    let out = Command::new("git").arg("-C").arg(dir).args(args).output().unwrap();
-    assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
 
@@ -81,7 +98,10 @@ pub struct Env {
 
 impl Env {
     pub fn new(fixture_name: &str) -> Env {
-        let tmp = tempfile::Builder::new().prefix("sp").tempdir_in("/tmp").unwrap();
+        let tmp = tempfile::Builder::new()
+            .prefix("sp")
+            .tempdir_in("/tmp")
+            .unwrap();
         let root = tmp.path().to_path_buf();
         let repo = root.join("repo");
         init_repo(&repo);
@@ -95,7 +115,10 @@ impl Env {
         settings.insert("agent_command".into(), q(&b.fake));
         settings.insert(
             "agent_args".into(),
-            format!("[\"--fixture\", {:?}]", fixture(fixture_name).to_string_lossy()),
+            format!(
+                "[\"--fixture\", {:?}]",
+                fixture(fixture_name).to_string_lossy()
+            ),
         );
         settings.insert("stop_grace_ms".into(), "1000".into());
         settings.insert("interrupt_wait_ms".into(), "300".into());
@@ -134,7 +157,10 @@ impl Env {
     }
 
     fn config_text(&self) -> String {
-        self.settings.iter().map(|(k, v)| format!("{k} = {v}\n")).collect()
+        self.settings
+            .iter()
+            .map(|(k, v)| format!("{k} = {v}\n"))
+            .collect()
     }
 
     /// Start (or restart) sphered and wait until it answers.
@@ -167,7 +193,11 @@ impl Env {
             if let Some(Ok(Some(st))) = self.daemon.as_mut().map(|d| d.try_wait()) {
                 panic!("sphered exited early ({st}):\n{}", self.daemon_log());
             }
-            assert!(Instant::now() < deadline, "sphered did not start:\n{}", self.daemon_log());
+            assert!(
+                Instant::now() < deadline,
+                "sphered did not start:\n{}",
+                self.daemon_log()
+            );
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
     }
@@ -189,13 +219,17 @@ impl Env {
     }
 
     pub async fn client(&self) -> Client {
-        let c = Client::connect(&self.socket).await.expect("connect to sphered");
+        let c = Client::connect(&self.socket)
+            .await
+            .expect("connect to sphered");
         c.hello(sphere_client::ClientKind::Cli).await.unwrap();
         c
     }
 
     pub async fn watcher(&self, since: u64, task: Option<&str>) -> Watcher {
-        let c = Client::connect(&self.socket).await.expect("connect to sphered");
+        let c = Client::connect(&self.socket)
+            .await
+            .expect("connect to sphered");
         Watcher::new(&c, since, task).await
     }
 
@@ -221,7 +255,12 @@ impl Env {
     }
 
     pub fn host_pid(&self) -> u32 {
-        self.host_call("ping").expect("host answers").pointer("/result/pid").unwrap().as_u64().unwrap() as u32
+        self.host_call("ping")
+            .expect("host answers")
+            .pointer("/result/pid")
+            .unwrap()
+            .as_u64()
+            .unwrap() as u32
     }
 }
 
@@ -246,8 +285,17 @@ pub struct Watcher {
 
 impl Watcher {
     pub async fn new(c: &Client, since: u64, task: Option<&str>) -> Watcher {
-        let (_, sub) = c.subscribe(since, task.map(str::to_string)).await.expect("subscribe");
-        Watcher { sub, log: vec![], live: vec![], lagged: false, closed: false }
+        let (_, sub) = c
+            .subscribe(since, task.map(str::to_string))
+            .await
+            .expect("subscribe");
+        Watcher {
+            sub,
+            log: vec![],
+            live: vec![],
+            lagged: false,
+            closed: false,
+        }
     }
 
     async fn recv(&mut self, wait: Duration) -> bool {
@@ -269,7 +317,12 @@ impl Watcher {
         }
     }
 
-    pub async fn wait_from<F: Fn(&Event) -> bool>(&mut self, min_seq: u64, what: &str, f: F) -> Event {
+    pub async fn wait_from<F: Fn(&Event) -> bool>(
+        &mut self,
+        min_seq: u64,
+        what: &str,
+        f: F,
+    ) -> Event {
         let deadline = Instant::now() + Duration::from_secs(30);
         let mut scanned = 0;
         loop {
@@ -287,9 +340,21 @@ impl Watcher {
                     .rev()
                     .take(25)
                     .rev()
-                    .map(|e| format!("{} {} {}", e.seq, e.task, serde_json::to_string(&e.body).unwrap_or_default()))
+                    .map(|e| {
+                        format!(
+                            "{} {} {}",
+                            e.seq,
+                            e.task,
+                            serde_json::to_string(&e.body).unwrap_or_default()
+                        )
+                    })
                     .collect();
-                panic!("timed out waiting for {what} (closed={} lagged={}); last events:\n{}", self.closed, self.lagged, tail.join("\n"));
+                panic!(
+                    "timed out waiting for {what} (closed={} lagged={}); last events:\n{}",
+                    self.closed,
+                    self.lagged,
+                    tail.join("\n")
+                );
             }
             self.recv(Duration::from_millis(200)).await;
         }
@@ -334,7 +399,11 @@ pub fn say_text(e: &Event) -> String {
 }
 
 /// Poll `f` until it returns Some, for up to `secs`.
-pub async fn eventually<T, Fut: std::future::Future<Output = Option<T>>>(what: &str, secs: u64, mut f: impl FnMut() -> Fut) -> T {
+pub async fn eventually<T, Fut: std::future::Future<Output = Option<T>>>(
+    what: &str,
+    secs: u64,
+    mut f: impl FnMut() -> Fut,
+) -> T {
     let end = Instant::now() + Duration::from_secs(secs);
     loop {
         if let Some(v) = f().await {
@@ -350,5 +419,8 @@ pub fn pid_alive(pid: i32) -> bool {
 }
 
 pub fn pid_from_say(text: &str, prefix: &str) -> i32 {
-    text.split(prefix).nth(1).and_then(|s| s.trim().parse().ok()).unwrap_or_else(|| panic!("no pid in {text:?}"))
+    text.split(prefix)
+        .nth(1)
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or_else(|| panic!("no pid in {text:?}"))
 }

@@ -372,7 +372,10 @@ mod tests {
     #[test]
     fn unix_ms_formats() {
         assert_eq!(rfc3339_from_unix_ms(0), "1970-01-01T00:00:00.000Z");
-        assert_eq!(rfc3339_from_unix_ms(1_700_000_000_123), "2023-11-14T22:13:20.123Z");
+        assert_eq!(
+            rfc3339_from_unix_ms(1_700_000_000_123),
+            "2023-11-14T22:13:20.123Z"
+        );
     }
 
     #[test]
@@ -405,8 +408,12 @@ mod tests {
     fn every_body_has_a_kind_name_matching_its_tag() {
         let bodies = vec![
             EventBody::Stopped {},
-            EventBody::Warning { message: "w".into() },
-            EventBody::SessionId { session_id: "s".into() },
+            EventBody::Warning {
+                message: "w".into(),
+            },
+            EventBody::SessionId {
+                session_id: "s".into(),
+            },
         ];
         for b in bodies {
             let v = serde_json::to_value(&b).unwrap();

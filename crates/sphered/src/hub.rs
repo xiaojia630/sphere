@@ -12,6 +12,7 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 
 #[derive(Debug, Clone)]
+#[allow(clippy::large_enum_variant)] // events dominate; boxing them would only add an allocation per message
 pub enum Msg {
     Event(Event),
     Live(LiveFrame),
@@ -56,7 +57,9 @@ impl Hub {
         let mut since = 0;
         loop {
             let page = store.events_after(since, i64::MAX as u64, None, 1000)?;
-            let Some(last) = page.last().map(|e| e.seq) else { break };
+            let Some(last) = page.last().map(|e| e.seq) else {
+                break;
+            };
             for ev in &page {
                 views.apply(ev);
             }
@@ -66,7 +69,11 @@ impl Hub {
         Ok(Hub {
             next_task: AtomicU64::new(views.max_task()),
             next_request: AtomicU64::new(views.max_request()),
-            inner: Mutex::new(Inner { store, views, subs: vec![] }),
+            inner: Mutex::new(Inner {
+                store,
+                views,
+                subs: vec![],
+            }),
             queue_cap,
         })
     }
@@ -94,7 +101,12 @@ impl Hub {
 
     /// Persist `bodies` (and `offset`) in one transaction, then update the
     /// views and tell the subscribers.
-    pub fn commit(&self, task: &str, bodies: Vec<EventBody>, offset: Option<OffsetUpdate>) -> Result<Vec<Event>> {
+    pub fn commit(
+        &self,
+        task: &str,
+        bodies: Vec<EventBody>,
+        offset: Option<OffsetUpdate>,
+    ) -> Result<Vec<Event>> {
         let mut g = self.inner.lock().unwrap();
         let events = g.store.append(task, &bodies, offset.as_ref())?;
         let Inner { views, subs, .. } = &mut *g;
@@ -132,7 +144,10 @@ impl Hub {
             if s.task.as_deref().is_some_and(|t| t != task) {
                 continue;
             }
-            let _ = s.tx.try_send(Msg::Live(LiveFrame { task: task.to_string(), text: text.clone() }));
+            let _ = s.tx.try_send(Msg::Live(LiveFrame {
+                task: task.to_string(),
+                text: text.clone(),
+            }));
         }
     }
 
@@ -143,16 +158,43 @@ impl Hub {
         let (tx, rx) = mpsc::channel(self.queue_cap);
         let lagged = Arc::new(AtomicBool::new(false));
         let replay_upto = g.views.seq;
-        g.subs.push(Sub { tx, task, lagged: lagged.clone() });
-        Subscription { rx, lagged, replay_upto }
+        g.subs.push(Sub {
+            tx,
+            task,
+            lagged: lagged.clone(),
+        });
+        Subscription {
+            rx,
+            lagged,
+            replay_upto,
+        }
     }
 
-    pub fn replay_page(&self, since: u64, upto: u64, task: Option<&str>, limit: usize) -> Result<Vec<Event>> {
-        self.inner.lock().unwrap().store.events_after(since, upto, task, limit)
+    pub fn replay_page(
+        &self,
+        since: u64,
+        upto: u64,
+        task: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<Event>> {
+        self.inner
+            .lock()
+            .unwrap()
+            .store
+            .events_after(since, upto, task, limit)
     }
 
-    pub fn history(&self, task: Option<&str>, before: Option<u64>, limit: usize) -> Result<Vec<Event>> {
-        self.inner.lock().unwrap().store.history(task, before, limit)
+    pub fn history(
+        &self,
+        task: Option<&str>,
+        before: Option<u64>,
+        limit: usize,
+    ) -> Result<Vec<Event>> {
+        self.inner
+            .lock()
+            .unwrap()
+            .store
+            .history(task, before, limit)
     }
 
     pub fn subscriber_count(&self) -> usize {
@@ -203,7 +245,10 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
-        assert_eq!(h.view(|v| v.task("t1").map(|t| t.state)), Some(TaskState::Queued));
+        assert_eq!(
+            h.view(|v| v.task("t1").map(|t| t.state)),
+            Some(TaskState::Queued)
+        );
         assert_eq!(h.new_task_id(), "t2");
     }
 
@@ -219,7 +264,10 @@ mod tests {
         }
         let h = Hub::open(&path, 16).unwrap();
         assert_eq!(h.last_seq(), 2);
-        assert_eq!(h.view(|v| v.task("t1").map(|t| t.last_say.clone())), Some("hi".into()));
+        assert_eq!(
+            h.view(|v| v.task("t1").map(|t| t.last_say.clone())),
+            Some("hi".into())
+        );
         assert_eq!(h.new_task_id(), "t2");
     }
 
@@ -254,8 +302,15 @@ mod tests {
         }
         assert!(!slow.lagged.load(Ordering::SeqCst));
         h.publish("t1", say("2")).unwrap();
-        assert!(slow.lagged.load(Ordering::SeqCst), "queue overflow drops the client");
-        assert_eq!(h.subscriber_count(), 1, "the filtered subscriber is unaffected");
+        assert!(
+            slow.lagged.load(Ordering::SeqCst),
+            "queue overflow drops the client"
+        );
+        assert_eq!(
+            h.subscriber_count(),
+            1,
+            "the filtered subscriber is unaffected"
+        );
         // The queue holds what fitted, then reports closed.
         assert!(slow.rx.try_recv().is_ok());
         assert!(other.rx.try_recv().is_err());

@@ -102,7 +102,11 @@ fn hint_key(task: &str, tool: &str) -> String {
 }
 
 fn first_line(s: &str, max: usize) -> String {
-    let line = s.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim();
+    let line = s
+        .lines()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or("")
+        .trim();
     line.chars().take(max).collect()
 }
 
@@ -113,7 +117,10 @@ impl Views {
 
     /// Tasks in the order they were created.
     pub fn tasks(&self) -> Vec<&TaskView> {
-        self.task_order.iter().filter_map(|id| self.tasks.get(id)).collect()
+        self.task_order
+            .iter()
+            .filter_map(|id| self.tasks.get(id))
+            .collect()
     }
 
     pub fn request(&self, id: &str) -> Option<&RequestView> {
@@ -130,7 +137,10 @@ impl Views {
     }
 
     pub fn open_requests_for(&self, task: &str) -> Vec<&RequestView> {
-        self.open_requests().into_iter().filter(|r| r.info.task == task).collect()
+        self.open_requests()
+            .into_iter()
+            .filter(|r| r.info.task == task)
+            .collect()
     }
 
     /// The request a new ask from `task` for `tool` revises, if the last one
@@ -157,13 +167,19 @@ impl Views {
     }
 
     pub fn queued(&self) -> Vec<&TaskView> {
-        self.tasks().into_iter().filter(|t| t.state == TaskState::Queued).collect()
+        self.tasks()
+            .into_iter()
+            .filter(|t| t.state == TaskState::Queued)
+            .collect()
     }
 
     /// A task that is waiting on a request is `needs_you`; with none left it is
     /// working again.
     fn settle(&mut self, task: &str) {
-        let waiting = self.requests.values().any(|r| r.info.task == task && r.status.is_open());
+        let waiting = self
+            .requests
+            .values()
+            .any(|r| r.info.task == task && r.status.is_open());
         if let Some(t) = self.tasks.get_mut(task) {
             match (t.state, waiting) {
                 (TaskState::Working, true) => t.state = TaskState::NeedsYou,
@@ -253,7 +269,8 @@ impl Views {
                 if !self.requests.contains_key(&request.id) {
                     self.request_order.push(request.id.clone());
                 }
-                self.revise_hints.remove(&hint_key(&request.task, &request.tool));
+                self.revise_hints
+                    .remove(&hint_key(&request.task, &request.tool));
                 self.requests.insert(
                     request.id.clone(),
                     RequestView {
@@ -270,7 +287,9 @@ impl Views {
                     }
                 }
             }
-            EventBody::RequestAnswered { request, answer, .. } => {
+            EventBody::RequestAnswered {
+                request, answer, ..
+            } => {
                 if let Some(r) = self.requests.get_mut(request) {
                     if *answer == AnswerKind::Later {
                         r.status = RequestStatus::Snoozed;
@@ -293,10 +312,16 @@ impl Views {
 
         let day = ev.at.get(..10).unwrap_or("").to_string();
         let mut extra_cost = 0.0;
-        let Some(t) = self.tasks.get_mut(id) else { return };
+        let Some(t) = self.tasks.get_mut(id) else {
+            return;
+        };
         t.updated_at = ev.at.clone();
         match &ev.body {
-            EventBody::WorkspaceReady { workdir, branch, base } => {
+            EventBody::WorkspaceReady {
+                workdir,
+                branch,
+                base,
+            } => {
                 t.workdir = Some(workdir.clone());
                 t.branch = branch.clone();
                 t.base = Some(base.clone());
@@ -336,7 +361,13 @@ impl Views {
                 t.last_say = text.clone();
             }
             EventBody::Plan { items } => t.plan = items.clone(),
-            EventBody::Step { id, tool, title, detail, .. } => {
+            EventBody::Step {
+                id,
+                tool,
+                title,
+                detail,
+                ..
+            } => {
                 t.steps += 1;
                 t.open_steps.push(OpenStep {
                     id: id.clone(),
@@ -502,9 +533,19 @@ mod tests {
         assert_eq!(v.task("t1").unwrap().state, TaskState::Working);
         assert_eq!(v.active_count(), 1);
 
-        v.apply(&ev(3, "t1", EventBody::Request { request: req("r1", "t1", "Bash", None) }));
+        v.apply(&ev(
+            3,
+            "t1",
+            EventBody::Request {
+                request: req("r1", "t1", "Bash", None),
+            },
+        ));
         assert_eq!(v.task("t1").unwrap().state, TaskState::NeedsYou);
-        assert!(v.task("t1").unwrap().status.starts_with("Needs you: Bash git push"));
+        assert!(v
+            .task("t1")
+            .unwrap()
+            .status
+            .starts_with("Needs you: Bash git push"));
         assert_eq!(v.open_requests().len(), 1);
 
         // later: still open, still needs you.
@@ -537,7 +578,13 @@ mod tests {
         assert_eq!(v.revises("t1", "Bash").as_deref(), Some("r1"));
         assert_eq!(v.revises("t1", "Edit"), None);
 
-        v.apply(&ev(6, "t1", EventBody::Request { request: req("r2", "t1", "Bash", Some("r1")) }));
+        v.apply(&ev(
+            6,
+            "t1",
+            EventBody::Request {
+                request: req("r2", "t1", "Bash", Some("r1")),
+            },
+        ));
         assert_eq!(v.revises("t1", "Bash"), None, "the hint is used up");
         assert_eq!(v.max_request(), 2);
 
@@ -570,9 +617,20 @@ mod tests {
                 parent: None,
             },
         ));
-        assert_eq!(v.task("t1").unwrap().status, "Running npx playwright test, step 1");
+        assert_eq!(
+            v.task("t1").unwrap().status,
+            "Running npx playwright test, step 1"
+        );
         assert_eq!(v.task("t1").unwrap().open_steps.len(), 1);
-        v.apply(&ev(4, "t1", EventBody::StepDone { id: "s1".into(), ok: true, output: None }));
+        v.apply(&ev(
+            4,
+            "t1",
+            EventBody::StepDone {
+                id: "s1".into(),
+                ok: true,
+                output: None,
+            },
+        ));
         assert!(v.task("t1").unwrap().open_steps.is_empty());
 
         let turn = |seq, total, delta| {
@@ -591,7 +649,13 @@ mod tests {
             )
         };
         v.apply(&turn(5, 0.25, 0.25));
-        v.apply(&ev(6, "t1", EventBody::UserMessage { text: "more".into() }));
+        v.apply(&ev(
+            6,
+            "t1",
+            EventBody::UserMessage {
+                text: "more".into(),
+            },
+        ));
         assert_eq!(v.task("t1").unwrap().state, TaskState::Working);
         v.apply(&turn(7, 0.75, 0.5));
         let t = v.task("t1").unwrap();
@@ -607,7 +671,13 @@ mod tests {
         let mut v = Views::default();
         v.apply(&created(1, "t12"));
         assert_eq!(v.max_task(), 12);
-        v.apply(&ev(2, "t12", EventBody::Failed { message: "boom".into() }));
+        v.apply(&ev(
+            2,
+            "t12",
+            EventBody::Failed {
+                message: "boom".into(),
+            },
+        ));
         assert_eq!(v.task("t12").unwrap().state, TaskState::Failed);
         v.apply(&ev(3, "t12", EventBody::Stopped {}));
         assert_eq!(v.task("t12").unwrap().state, TaskState::Stopped);

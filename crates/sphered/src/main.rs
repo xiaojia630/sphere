@@ -27,12 +27,20 @@ struct Args {
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
+        )
         .with_writer(std::io::stderr)
         .init();
     let args = Args::parse();
-    let state_dir = args.state_dir.clone().unwrap_or_else(sphere_proto::paths::default_state_dir);
-    let config_path = args.config.clone().unwrap_or_else(|| state_dir.join("config.toml"));
+    let state_dir = args
+        .state_dir
+        .clone()
+        .unwrap_or_else(sphere_proto::paths::default_state_dir);
+    let config_path = args
+        .config
+        .clone()
+        .unwrap_or_else(|| state_dir.join("config.toml"));
     let mut cfg = if config_path.exists() {
         Config::load(&config_path)?
     } else if args.config.is_some() {

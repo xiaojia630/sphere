@@ -359,10 +359,13 @@ mod tests {
 
     #[test]
     fn rpc_message_parses_both_shapes() {
-        let r: RpcMessage = serde_json::from_str(r#"{"jsonrpc":"2.0","id":1,"result":{"a":1}}"#).unwrap();
+        let r: RpcMessage =
+            serde_json::from_str(r#"{"jsonrpc":"2.0","id":1,"result":{"a":1}}"#).unwrap();
         assert!(r.method.is_none() && r.result.is_some());
-        let n: RpcMessage =
-            serde_json::from_str(r#"{"jsonrpc":"2.0","method":"live","params":{"task":"t1","text":"x"}}"#).unwrap();
+        let n: RpcMessage = serde_json::from_str(
+            r#"{"jsonrpc":"2.0","method":"live","params":{"task":"t1","text":"x"}}"#,
+        )
+        .unwrap();
         assert_eq!(n.method.as_deref(), Some("live"));
     }
 }

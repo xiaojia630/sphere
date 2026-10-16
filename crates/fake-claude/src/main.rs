@@ -20,7 +20,10 @@ struct Args {
 
 fn parse_args() -> Args {
     let raw: Vec<String> = std::env::args().skip(1).collect();
-    let mut a = Args { raw: raw.clone(), ..Default::default() };
+    let mut a = Args {
+        raw: raw.clone(),
+        ..Default::default()
+    };
     let mut it = raw.iter();
     while let Some(arg) = it.next() {
         let mut take = || it.next().cloned();
@@ -105,8 +108,10 @@ impl Fake {
     }
 
     fn assistant(&self, blocks: Vec<Value>) {
-        self.emit(json!({"type":"assistant","message":{"role":"assistant","content":blocks},
-            "parent_tool_use_id":null,"session_id":self.session_id}));
+        self.emit(
+            json!({"type":"assistant","message":{"role":"assistant","content":blocks},
+            "parent_tool_use_id":null,"session_id":self.session_id}),
+        );
     }
 
     fn say(&self, text: &str) {
@@ -132,11 +137,17 @@ impl Fake {
     fn classify(&mut self, m: Value) -> Cls {
         match m.get("type").and_then(|t| t.as_str()) {
             Some("user") => {
-                self.pending_users.push_back(text_of(m.pointer("/message/content").unwrap_or(&Value::Null)));
+                self.pending_users.push_back(text_of(
+                    m.pointer("/message/content").unwrap_or(&Value::Null),
+                ));
                 Cls::Handled
             }
             Some("control_request") => {
-                let id = m.get("request_id").and_then(|i| i.as_str()).unwrap_or("").to_string();
+                let id = m
+                    .get("request_id")
+                    .and_then(|i| i.as_str())
+                    .unwrap_or("")
+                    .to_string();
                 let req = m.get("request").cloned().unwrap_or(Value::Null);
                 self.control_ok(&id);
                 if req.get("subtype").and_then(|s| s.as_str()) == Some("interrupt") {
@@ -349,7 +360,10 @@ impl Fake {
 
     fn run(&mut self, ops: Vec<Value>) {
         let resumed = self.args.resume.is_some();
-        let ops: Vec<Value> = ops.into_iter().filter(|o| mode_matches(o, resumed)).collect();
+        let ops: Vec<Value> = ops
+            .into_iter()
+            .filter(|o| mode_matches(o, resumed))
+            .collect();
         let mut pc = 0;
         while pc < ops.len() {
             match self.exec(&ops[pc]) {
@@ -384,7 +398,11 @@ fn main() {
     match args.raw.first().map(String::as_str) {
         Some("--version") => return println!("2.1.0 (fake-claude)"),
         Some("agents") => {
-            let text = args.data.as_ref().and_then(|p| std::fs::read_to_string(p).ok()).unwrap_or_else(|| "[]".into());
+            let text = args
+                .data
+                .as_ref()
+                .and_then(|p| std::fs::read_to_string(p).ok())
+                .unwrap_or_else(|| "[]".into());
             return print!("{text}");
         }
         Some("auth") => {
@@ -438,7 +456,10 @@ fn main() {
         let _ = tx.send(Input::Eof);
     });
 
-    let session_id = args.resume.clone().unwrap_or_else(|| format!("fake-session-{}", std::process::id()));
+    let session_id = args
+        .resume
+        .clone()
+        .unwrap_or_else(|| format!("fake-session-{}", std::process::id()));
     let mut fake = Fake {
         args,
         rx,

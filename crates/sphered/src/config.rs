@@ -69,7 +69,8 @@ impl Default for Config {
 
 impl Config {
     pub fn load(path: &Path) -> Result<Config> {
-        let text = std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+        let text =
+            std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
         toml::from_str(&text).with_context(|| format!("parse {}", path.display()))
     }
 
@@ -78,7 +79,9 @@ impl Config {
     }
 
     pub fn host_socket_path(&self) -> PathBuf {
-        self.host_socket.clone().unwrap_or_else(paths::default_host_socket)
+        self.host_socket
+            .clone()
+            .unwrap_or_else(paths::default_host_socket)
     }
 
     pub fn host_dir(&self) -> PathBuf {
@@ -150,7 +153,8 @@ mod tests {
 
     #[test]
     fn parses_a_config_file_and_rejects_typos() {
-        let c: Config = toml::from_str("max_concurrent = 1\nagent_args = [\"--fixture\", \"f\"]\n").unwrap();
+        let c: Config =
+            toml::from_str("max_concurrent = 1\nagent_args = [\"--fixture\", \"f\"]\n").unwrap();
         assert_eq!(c.max_concurrent, 1);
         assert_eq!(c.agent_args, vec!["--fixture", "f"]);
         assert_eq!(c.stop_grace_ms, 5000);
@@ -159,7 +163,10 @@ mod tests {
 
     #[test]
     fn the_fake_agent_skips_the_version_check() {
-        let c = Config { agent_command: "/x/target/debug/fake-claude".into(), ..Config::default() };
+        let c = Config {
+            agent_command: "/x/target/debug/fake-claude".into(),
+            ..Config::default()
+        };
         assert!(!c.version_check_applies());
         assert!(Config::default().version_check_applies());
     }

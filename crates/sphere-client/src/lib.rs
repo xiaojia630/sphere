@@ -4,8 +4,8 @@
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::Value;
-use sphere_proto::api::{self, kind, method, notify, RpcError, RpcMessage};
 use sphere_proto::api::Snapshot;
+use sphere_proto::api::{self, kind, method, notify, RpcError, RpcMessage};
 use sphere_proto::Event;
 use std::collections::HashMap;
 use std::path::Path;
@@ -17,7 +17,8 @@ use tokio::net::UnixStream;
 use tokio::sync::{mpsc, oneshot};
 
 pub use sphere_proto::api::{
-    AnswerParams, BringInParams, ClientKind, HistoryParams, LiveFrame, SessionInfo, StartParams, Status,
+    AnswerParams, BringInParams, ClientKind, HistoryParams, LiveFrame, SessionInfo, StartParams,
+    Status,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -50,6 +51,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 /// What a subscription delivers.
 #[derive(Debug, Clone)]
+#[allow(clippy::large_enum_variant)] // events dominate; boxing them would only add an allocation per message
 pub enum Update {
     Event(Event),
     /// A typing delta; never stored, may be missing from history.
@@ -94,7 +96,9 @@ impl Client {
         tokio::spawn(async move {
             let mut lines = BufReader::new(r).lines();
             while let Ok(Some(line)) = lines.next_line().await {
-                let Ok(msg) = serde_json::from_str::<RpcMessage>(&line) else { continue };
+                let Ok(msg) = serde_json::from_str::<RpcMessage>(&line) else {
+                    continue;
+                };
                 match (&msg.id, &msg.method) {
                     (Some(id), _) if !id.is_null() => {
                         let Some(id) = id.as_u64() else { continue };
@@ -142,11 +146,16 @@ impl Client {
         Self::connect(&sphere_proto::paths::default_socket()).await
     }
 
-    pub async fn call<T: DeserializeOwned>(&self, method: &str, params: impl Serialize) -> Result<T> {
+    pub async fn call<T: DeserializeOwned>(
+        &self,
+        method: &str,
+        params: impl Serialize,
+    ) -> Result<T> {
         let id = self.inner.next_id.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = oneshot::channel();
         self.inner.pending.lock().unwrap().insert(id, tx);
-        let req = serde_json::json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
+        let req =
+            serde_json::json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
         let mut line = req.to_string();
         line.push('\n');
         {
@@ -166,7 +175,9 @@ impl Client {
     // ---- sync ------------------------------------------------------------------
 
     pub async fn hello(&self, client: ClientKind) -> Result<()> {
-        let _: api::Ack = self.call(method::HELLO, api::HelloParams { client }).await?;
+        let _: api::Ack = self
+            .call(method::HELLO, api::HelloParams { client })
+            .await?;
         Ok(())
     }
 
@@ -179,11 +190,17 @@ impl Client {
     }
 
     pub async fn history(&self, p: HistoryParams) -> Result<Vec<Event>> {
-        Ok(self.call::<api::HistoryResult>(method::HISTORY, p).await?.events)
+        Ok(self
+            .call::<api::HistoryResult>(method::HISTORY, p)
+            .await?
+            .events)
     }
 
     pub async fn blob_read(&self, p: api::BlobReadParams) -> Result<String> {
-        Ok(self.call::<api::BlobReadResult>(method::BLOB_READ, p).await?.text)
+        Ok(self
+            .call::<api::BlobReadResult>(method::BLOB_READ, p)
+            .await?
+            .text)
     }
 
     /// Replay durable events after `since`, then stream live. Once per client.
@@ -196,48 +213,82 @@ impl Client {
             .unwrap()
             .take()
             .ok_or_else(|| Error::Protocol("this client is already subscribed".into()))?;
-        let r: api::SubscribeResult = self.call(method::SUBSCRIBE, api::SubscribeParams { since, task }).await?;
+        let r: api::SubscribeResult = self
+            .call(method::SUBSCRIBE, api::SubscribeParams { since, task })
+            .await?;
         Ok((r.seq, Subscription { rx }))
     }
 
     // ---- tasks -------------------------------------------------------------------
 
     pub async fn start_task(&self, p: StartParams) -> Result<String> {
-        Ok(self.call::<api::StartResult>(method::TASK_START, p).await?.task)
+        Ok(self
+            .call::<api::StartResult>(method::TASK_START, p)
+            .await?
+            .task)
     }
 
     pub async fn send(&self, task: &str, text: &str) -> Result<()> {
-        let _: api::Ack = self.call(method::TASK_SEND, api::SendParams { task: task.into(), text: text.into() }).await?;
+        let _: api::Ack = self
+            .call(
+                method::TASK_SEND,
+                api::SendParams {
+                    task: task.into(),
+                    text: text.into(),
+                },
+            )
+            .await?;
         Ok(())
     }
 
     pub async fn interrupt(&self, task: &str) -> Result<()> {
-        let _: api::Ack = self.call(method::TASK_INTERRUPT, api::TaskParams { task: task.into() }).await?;
+        let _: api::Ack = self
+            .call(
+                method::TASK_INTERRUPT,
+                api::TaskParams { task: task.into() },
+            )
+            .await?;
         Ok(())
     }
 
     pub async fn stop(&self, task: &str) -> Result<()> {
-        let _: api::Ack = self.call(method::TASK_STOP, api::TaskParams { task: task.into() }).await?;
+        let _: api::Ack = self
+            .call(method::TASK_STOP, api::TaskParams { task: task.into() })
+            .await?;
         Ok(())
     }
 
     pub async fn set_mode(&self, task: &str, mode: &str) -> Result<()> {
         let _: api::Ack = self
-            .call(method::TASK_SET_MODE, api::SetModeParams { task: task.into(), mode: mode.into() })
+            .call(
+                method::TASK_SET_MODE,
+                api::SetModeParams {
+                    task: task.into(),
+                    mode: mode.into(),
+                },
+            )
             .await?;
         Ok(())
     }
 
     pub async fn set_model(&self, task: &str, model: &str) -> Result<()> {
         let _: api::Ack = self
-            .call(method::TASK_SET_MODEL, api::SetModelParams { task: task.into(), model: model.into() })
+            .call(
+                method::TASK_SET_MODEL,
+                api::SetModelParams {
+                    task: task.into(),
+                    model: model.into(),
+                },
+            )
             .await?;
         Ok(())
     }
 
     /// Not implemented by sphered yet; always an error of kind `not_implemented`.
     pub async fn rewind(&self, task: &str) -> Result<()> {
-        let _: api::Ack = self.call(method::TASK_REWIND, api::TaskParams { task: task.into() }).await?;
+        let _: api::Ack = self
+            .call(method::TASK_REWIND, api::TaskParams { task: task.into() })
+            .await?;
         Ok(())
     }
 
@@ -246,7 +297,10 @@ impl Client {
     }
 
     pub async fn bring_in(&self, p: BringInParams) -> Result<String> {
-        Ok(self.call::<api::StartResult>(method::SESSION_BRING_IN, p).await?.task)
+        Ok(self
+            .call::<api::StartResult>(method::SESSION_BRING_IN, p)
+            .await?
+            .task)
     }
 
     // ---- requests ------------------------------------------------------------------

@@ -8,8 +8,9 @@ pub mod request;
 pub mod version;
 pub mod views;
 
-pub use event::{rfc3339_from_unix_ms, 
-    now_rfc3339, Event, EventBody, Excerpt, FileStat, OutputRef, PlanItem, StepKind, TaskState,
+pub use event::{
+    now_rfc3339, rfc3339_from_unix_ms, Event, EventBody, Excerpt, FileStat, OutputRef, PlanItem,
+    StepKind, TaskState,
 };
 pub use request::{AnswerKind, RequestInfo, RequestKind, RequestStatus};
 pub use views::{RequestView, TaskView, Views};

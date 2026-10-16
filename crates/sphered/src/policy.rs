@@ -152,7 +152,9 @@ impl Default for Policy {
 
 fn read_file(path: &Path) -> Result<Option<PolicyFile>> {
     match std::fs::read_to_string(path) {
-        Ok(text) => Ok(Some(toml::from_str(&text).with_context(|| format!("parse {}", path.display()))?)),
+        Ok(text) => Ok(Some(
+            toml::from_str(&text).with_context(|| format!("parse {}", path.display()))?,
+        )),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(e).with_context(|| format!("read {}", path.display())),
     }
@@ -191,7 +193,8 @@ impl Policy {
             self.auto.extend(f.auto);
         } else {
             // Untrusted: may only add restrictions.
-            self.auto.extend(f.auto.into_iter().filter(|r| r.decision != Decision::Allow));
+            self.auto
+                .extend(f.auto.into_iter().filter(|r| r.decision != Decision::Allow));
         }
         push_unique(&mut self.deny, f.rules.deny);
         push_unique(&mut self.ask, f.rules.ask);
@@ -245,7 +248,11 @@ impl Policy {
                 Decision::Ask => 1,
                 Decision::Allow => 0,
             };
-            if best.as_ref().map(|(d, _)| rank(rule.decision) > rank(*d)).unwrap_or(true) {
+            if best
+                .as_ref()
+                .map(|(d, _)| rank(rule.decision) > rank(*d))
+                .unwrap_or(true)
+            {
                 best = Some((rule.decision, name));
             }
         }
@@ -302,7 +309,9 @@ pub fn glob_match(pattern: &str, text: &str) -> bool {
 
 /// The allow rule a permission suggestion stands for, in rule syntax.
 pub fn rule_from_suggestion(s: &Value) -> Option<String> {
-    if s.get("type")?.as_str()? != "addRules" || s.get("behavior").and_then(|b| b.as_str()) != Some("allow") {
+    if s.get("type")?.as_str()? != "addRules"
+        || s.get("behavior").and_then(|b| b.as_str()) != Some("allow")
+    {
         return None;
     }
     let rule = s.get("rules")?.as_array()?.first()?;
@@ -332,7 +341,9 @@ pub fn append_allow_rule(path: &Path, rule: &str) -> Result<()> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
         Err(e) => return Err(e).with_context(|| format!("read {}", path.display())),
     };
-    let mut doc: DocumentMut = text.parse().with_context(|| format!("parse {}", path.display()))?;
+    let mut doc: DocumentMut = text
+        .parse()
+        .with_context(|| format!("parse {}", path.display()))?;
     let rules = doc
         .entry("rules")
         .or_insert_with(|| Item::Table(Table::new()))
@@ -367,7 +378,10 @@ mod tests {
 
     #[test]
     fn globs() {
-        assert!(glob_match("git push * sphere/*", "git push origin sphere/fix-x"));
+        assert!(glob_match(
+            "git push * sphere/*",
+            "git push origin sphere/fix-x"
+        ));
         assert!(glob_match("git push*", "git push"));
         assert!(!glob_match("git push * sphere/*", "git push origin main"));
         assert!(glob_match("a?c", "abc"));
@@ -395,7 +409,11 @@ mod tests {
     fn allow_rewrites_lifts_the_denies_but_push_still_asks() {
         let s = Policy::default().settings_json(true);
         assert!(s["permissions"]["deny"].as_array().unwrap().is_empty());
-        assert!(s["permissions"]["ask"].as_array().unwrap().iter().any(|r| r == "Bash(git push:*)"));
+        assert!(s["permissions"]["ask"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r == "Bash(git push:*)"));
     }
 
     #[test]
@@ -417,8 +435,16 @@ deny = ["Bash(rm -rf:*)"]
         let s = p.settings_json(false);
         assert_eq!(s["sandbox"]["enabled"], false);
         assert_eq!(s["sandbox"]["network"]["allowedDomains"][0], "crates.io");
-        assert!(s["permissions"]["allow"].as_array().unwrap().iter().any(|r| r == "Bash(make:*)"));
-        assert!(s["permissions"]["deny"].as_array().unwrap().iter().any(|r| r == "Bash(rm -rf:*)"));
+        assert!(s["permissions"]["allow"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r == "Bash(make:*)"));
+        assert!(s["permissions"]["deny"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r == "Bash(rm -rf:*)"));
     }
 
     #[test]
@@ -442,15 +468,32 @@ decision = "allow"
         );
         let p = Policy::load(&user, Some(&repo)).unwrap();
         let s = p.settings_json(false);
-        assert_eq!(s["sandbox"]["enabled"], true, "repo cannot turn the sandbox off");
-        assert!(!s["permissions"]["allow"].as_array().unwrap().iter().any(|r| r == "Bash(curl:*)"));
-        assert!(s["permissions"]["ask"].as_array().unwrap().iter().any(|r| r == "Bash(make deploy:*)"));
-        assert_eq!(p.decide("Bash", &json!({"command": "ls"}), &Ctx { branch: None }), Verdict::Ask);
+        assert_eq!(
+            s["sandbox"]["enabled"], true,
+            "repo cannot turn the sandbox off"
+        );
+        assert!(!s["permissions"]["allow"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r == "Bash(curl:*)"));
+        assert!(s["permissions"]["ask"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r == "Bash(make deploy:*)"));
+        assert_eq!(
+            p.decide("Bash", &json!({"command": "ls"}), &Ctx { branch: None }),
+            Verdict::Ask
+        );
 
         let user = write(dir.path(), "user.toml", "trust_repos = true\n");
         let p = Policy::load(&user, Some(&repo)).unwrap();
         assert_eq!(p.settings_json(false)["sandbox"]["enabled"], false);
-        assert!(matches!(p.decide("Bash", &json!({"command": "ls"}), &Ctx { branch: None }), Verdict::Allow(_)));
+        assert!(matches!(
+            p.decide("Bash", &json!({"command": "ls"}), &Ctx { branch: None }),
+            Verdict::Allow(_)
+        ));
     }
 
     #[test]
@@ -461,53 +504,91 @@ decision = "allow"
     }
 
     fn auto(tool: &str, pattern: Option<&str>, d: Decision) -> AutoRule {
-        AutoRule { tool: tool.into(), pattern: pattern.map(str::to_string), decision: d, name: None }
+        AutoRule {
+            tool: tool.into(),
+            pattern: pattern.map(str::to_string),
+            decision: d,
+            name: None,
+        }
     }
 
     #[test]
     fn tier2_allows_a_push_only_to_the_task_branch() {
         let mut p = Policy::default();
-        p.auto.push(auto("Bash", Some("git push * {branch}"), Decision::Allow));
-        let ctx = Ctx { branch: Some("sphere/fix-login") };
+        p.auto
+            .push(auto("Bash", Some("git push * {branch}"), Decision::Allow));
+        let ctx = Ctx {
+            branch: Some("sphere/fix-login"),
+        };
         let push = |b: &str| json!({"command": format!("git push origin {b}")});
-        assert!(matches!(p.decide("Bash", &push("sphere/fix-login"), &ctx), Verdict::Allow(_)));
+        assert!(matches!(
+            p.decide("Bash", &push("sphere/fix-login"), &ctx),
+            Verdict::Allow(_)
+        ));
         assert_eq!(p.decide("Bash", &push("main"), &ctx), Verdict::Ask);
-        assert_eq!(p.decide("Edit", &push("sphere/fix-login"), &ctx), Verdict::Ask);
+        assert_eq!(
+            p.decide("Edit", &push("sphere/fix-login"), &ctx),
+            Verdict::Ask
+        );
         // No branch (in place): a rule that needs one never matches.
-        assert_eq!(p.decide("Bash", &push("sphere/fix-login"), &Ctx { branch: None }), Verdict::Ask);
+        assert_eq!(
+            p.decide("Bash", &push("sphere/fix-login"), &Ctx { branch: None }),
+            Verdict::Ask
+        );
     }
 
     #[test]
     fn tier2_precedence_is_deny_then_ask_then_allow() {
         let mut p = Policy::default();
-        p.auto.push(auto("Bash", Some("git push*"), Decision::Allow));
+        p.auto
+            .push(auto("Bash", Some("git push*"), Decision::Allow));
         p.auto.push(auto("*", Some("*prod*"), Decision::Deny));
         let ctx = Ctx { branch: None };
-        assert!(matches!(p.decide("Bash", &json!({"command": "git push origin x"}), &ctx), Verdict::Allow(_)));
-        assert!(matches!(p.decide("Bash", &json!({"command": "git push prod x"}), &ctx), Verdict::Deny(_)));
+        assert!(matches!(
+            p.decide("Bash", &json!({"command": "git push origin x"}), &ctx),
+            Verdict::Allow(_)
+        ));
+        assert!(matches!(
+            p.decide("Bash", &json!({"command": "git push prod x"}), &ctx),
+            Verdict::Deny(_)
+        ));
         p.auto.push(auto("Bash", None, Decision::Ask));
-        assert_eq!(p.decide("Bash", &json!({"command": "git push origin x"}), &ctx), Verdict::Ask);
+        assert_eq!(
+            p.decide("Bash", &json!({"command": "git push origin x"}), &ctx),
+            Verdict::Ask
+        );
     }
 
     #[test]
     fn main_input_picks_the_right_field() {
         assert_eq!(main_input("Bash", &json!({"command": "ls"})), "ls");
         assert_eq!(main_input("Edit", &json!({"file_path": "/a/b"})), "/a/b");
-        assert_eq!(main_input("WebFetch", &json!({"url": "https://x"})), "https://x");
+        assert_eq!(
+            main_input("WebFetch", &json!({"url": "https://x"})),
+            "https://x"
+        );
         assert_eq!(main_input("Other", &json!({"a": 1})), "{\"a\":1}");
     }
 
     #[test]
     fn suggestions_become_rules_and_are_scoped_to_the_session() {
         let s = json!({"type":"addRules","rules":[{"toolName":"Bash","ruleContent":"cargo test:*"}],"behavior":"allow","destination":"localSettings"});
-        assert_eq!(rule_from_suggestion(&s).as_deref(), Some("Bash(cargo test:*)"));
+        assert_eq!(
+            rule_from_suggestion(&s).as_deref(),
+            Some("Bash(cargo test:*)")
+        );
         assert_eq!(session_scoped(&s)["destination"], "session");
         assert_eq!(s["destination"], "localSettings");
         let bare = json!({"type":"addRules","rules":[{"toolName":"WebFetch"}],"behavior":"allow"});
         assert_eq!(rule_from_suggestion(&bare).as_deref(), Some("WebFetch"));
-        assert_eq!(rule_from_suggestion(&json!({"type":"setMode","mode":"acceptEdits"})), None);
         assert_eq!(
-            rule_from_suggestion(&json!({"type":"addRules","rules":[{"toolName":"Bash","ruleContent":"x"}],"behavior":"deny"})),
+            rule_from_suggestion(&json!({"type":"setMode","mode":"acceptEdits"})),
+            None
+        );
+        assert_eq!(
+            rule_from_suggestion(
+                &json!({"type":"addRules","rules":[{"toolName":"Bash","ruleContent":"x"}],"behavior":"deny"})
+            ),
             None
         );
     }
@@ -516,11 +597,18 @@ decision = "allow"
     fn appending_a_rule_keeps_comments_and_does_not_duplicate() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("policy.toml");
-        std::fs::write(&path, "# my policy\n[rules]\n# tests are fine\nallow = [\"Bash(make:*)\"]\n").unwrap();
+        std::fs::write(
+            &path,
+            "# my policy\n[rules]\n# tests are fine\nallow = [\"Bash(make:*)\"]\n",
+        )
+        .unwrap();
         append_allow_rule(&path, "Bash(cargo test:*)").unwrap();
         append_allow_rule(&path, "Bash(cargo test:*)").unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
-        assert!(text.contains("# my policy") && text.contains("# tests are fine"), "{text}");
+        assert!(
+            text.contains("# my policy") && text.contains("# tests are fine"),
+            "{text}"
+        );
         assert_eq!(text.matches("cargo test").count(), 1);
         let p = Policy::load(&path, None).unwrap();
         assert!(p.allow.contains(&"Bash(make:*)".to_string()));
@@ -528,6 +616,9 @@ decision = "allow"
 
         let fresh = dir.path().join("sub/new.toml");
         append_allow_rule(&fresh, "WebFetch").unwrap();
-        assert!(Policy::load(&fresh, None).unwrap().allow.contains(&"WebFetch".to_string()));
+        assert!(Policy::load(&fresh, None)
+            .unwrap()
+            .allow
+            .contains(&"WebFetch".to_string()));
     }
 }

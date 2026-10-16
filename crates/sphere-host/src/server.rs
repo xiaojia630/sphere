@@ -155,11 +155,20 @@ struct Host {
 
 fn exit_status(raw: i32) -> ExitStatus {
     if libc::WIFEXITED(raw) {
-        ExitStatus { code: Some(libc::WEXITSTATUS(raw)), signal: None }
+        ExitStatus {
+            code: Some(libc::WEXITSTATUS(raw)),
+            signal: None,
+        }
     } else if libc::WIFSIGNALED(raw) {
-        ExitStatus { code: None, signal: Some(libc::WTERMSIG(raw)) }
+        ExitStatus {
+            code: None,
+            signal: Some(libc::WTERMSIG(raw)),
+        }
     } else {
-        ExitStatus { code: None, signal: None }
+        ExitStatus {
+            code: None,
+            signal: None,
+        }
     }
 }
 
@@ -230,7 +239,11 @@ impl Host {
         let out_path = self.dir.join(format!("{id}.out"));
         let err_path = self.dir.join(format!("{id}.err"));
         let open = |path: &Path| {
-            OpenOptions::new().create(true).append(true).open(path).with_context(|| path.display().to_string())
+            OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+                .with_context(|| path.display().to_string())
         };
         let out_file = open(&out_path)?;
 
@@ -263,7 +276,9 @@ impl Host {
             drop(cmd);
             (pid, Io::Pty(master))
         } else {
-            cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+            cmd.stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
             unsafe {
                 cmd.pre_exec(|| {
                     if libc::setsid() < 0 {
@@ -298,8 +313,16 @@ impl Host {
             cmd: p.cmd.clone(),
             cwd: p.cwd.clone(),
             pty: is_pty,
-            out: Chan { path: out_path, len: AtomicU64::new(0), done: AtomicBool::new(false) },
-            err: Chan { path: err_path, len: AtomicU64::new(0), done: AtomicBool::new(false) },
+            out: Chan {
+                path: out_path,
+                len: AtomicU64::new(0),
+                done: AtomicBool::new(false),
+            },
+            err: Chan {
+                path: err_path,
+                len: AtomicU64::new(0),
+                done: AtomicBool::new(false),
+            },
             stdin: Mutex::new(Some(stdin_tx)),
             master: master_keep,
             exit: Mutex::new(None),
@@ -312,7 +335,11 @@ impl Host {
                 writer_thread(File::from(master), stdin_rx);
                 pump(reader, out_file, child.clone(), Stream::Out);
             }
-            Io::Pipes { stdin, stdout, stderr } => {
+            Io::Pipes {
+                stdin,
+                stdout,
+                stderr,
+            } => {
                 if let Some(stdin) = stdin {
                     writer_thread(stdin, stdin_rx);
                 }
@@ -320,7 +347,9 @@ impl Host {
                     pump(stdout, out_file, child.clone(), Stream::Out);
                 }
                 match stderr {
-                    Some(stderr) => pump(stderr, open(&child.err.path)?, child.clone(), Stream::Err),
+                    Some(stderr) => {
+                        pump(stderr, open(&child.err.path)?, child.clone(), Stream::Err)
+                    }
                     None => child.err.done.store(true, Ordering::SeqCst),
                 }
             }
@@ -374,8 +403,15 @@ impl Host {
             method::RESIZE => {
                 let p: ResizeParams = parse(params)?;
                 let c = self.get(&p.id)?;
-                let Some(m) = &c.master else { bail!("not a terminal") };
-                let ws = libc::winsize { ws_row: p.rows, ws_col: p.cols, ws_xpixel: 0, ws_ypixel: 0 };
+                let Some(m) = &c.master else {
+                    bail!("not a terminal")
+                };
+                let ws = libc::winsize {
+                    ws_row: p.rows,
+                    ws_col: p.cols,
+                    ws_xpixel: 0,
+                    ws_ypixel: 0,
+                };
                 if unsafe { libc::ioctl(m.as_raw_fd(), libc::TIOCSWINSZ as _, &ws) } != 0 {
                     bail!("resize: {}", std::io::Error::last_os_error());
                 }
@@ -385,9 +421,14 @@ impl Host {
             }
             method::SIGNAL => {
                 let p: SignalParams = parse(params)?;
-                let sig = signal_number(&p.sig).ok_or_else(|| anyhow!("unknown signal {}", p.sig))?;
+                let sig =
+                    signal_number(&p.sig).ok_or_else(|| anyhow!("unknown signal {}", p.sig))?;
                 let c = self.get(&p.id)?;
-                let target = if p.group { -(c.pid as i32) } else { c.pid as i32 };
+                let target = if p.group {
+                    -(c.pid as i32)
+                } else {
+                    c.pid as i32
+                };
                 if c.exit().is_some() && !p.group {
                     bail!("child has exited");
                 }
@@ -398,8 +439,13 @@ impl Host {
                 Ok(json!({}))
             }
             method::LIST => {
-                let mut infos: Vec<ChildInfo> =
-                    self.children.lock().unwrap().values().map(|c| c.info()).collect();
+                let mut infos: Vec<ChildInfo> = self
+                    .children
+                    .lock()
+                    .unwrap()
+                    .values()
+                    .map(|c| c.info())
+                    .collect();
                 infos.sort_by_key(|i| i.id[1..].parse::<u64>().unwrap_or(0));
                 Ok(serde_json::to_value(infos)?)
             }
@@ -413,7 +459,11 @@ impl Host {
                 let data = read_at(&chan.path, p.from_offset, n as usize)?;
                 let offset = p.from_offset + data.len() as u64;
                 let eof = c.exit().is_some() && chan.done.load(Ordering::SeqCst) && offset >= len;
-                Ok(serde_json::to_value(ReadResult { data: B64.encode(&data), offset, eof })?)
+                Ok(serde_json::to_value(ReadResult {
+                    data: B64.encode(&data),
+                    offset,
+                    eof,
+                })?)
             }
             method::FORGET => {
                 let id = parse::<IdParams>(params)?.id;
@@ -446,7 +496,12 @@ enum Io {
 
 fn open_pty(size: PtySize) -> Result<(OwnedFd, OwnedFd)> {
     let (mut master, mut slave) = (0, 0);
-    let ws = libc::winsize { ws_row: size.rows, ws_col: size.cols, ws_xpixel: 0, ws_ypixel: 0 };
+    let ws = libc::winsize {
+        ws_row: size.rows,
+        ws_col: size.cols,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
     let rc = unsafe {
         libc::openpty(
             &mut master,
@@ -484,20 +539,44 @@ fn read_at(path: &Path, offset: u64, n: usize) -> Result<Vec<u8>> {
     Ok(buf)
 }
 
-async fn send_line(w: &mut tokio::net::unix::OwnedWriteHalf, v: &impl serde::Serialize) -> std::io::Result<()> {
+async fn send_line(
+    w: &mut tokio::net::unix::OwnedWriteHalf,
+    v: &impl serde::Serialize,
+) -> std::io::Result<()> {
     let mut s = serde_json::to_string(v).unwrap_or_default();
     s.push('\n');
     w.write_all(s.as_bytes()).await
 }
 
-async fn follow(host: &Host, p: ReadParams, id: u64, w: &mut tokio::net::unix::OwnedWriteHalf) -> std::io::Result<()> {
+async fn follow(
+    host: &Host,
+    p: ReadParams,
+    id: u64,
+    w: &mut tokio::net::unix::OwnedWriteHalf,
+) -> std::io::Result<()> {
     let child = match host.get(&p.id) {
         Ok(c) => c,
         Err(e) => {
-            return send_line(w, &Response { id, result: None, error: Some(e.to_string()) }).await;
+            return send_line(
+                w,
+                &Response {
+                    id,
+                    result: None,
+                    error: Some(e.to_string()),
+                },
+            )
+            .await;
         }
     };
-    send_line(w, &Response { id, result: Some(json!({"following": true})), error: None }).await?;
+    send_line(
+        w,
+        &Response {
+            id,
+            result: Some(json!({"following": true})),
+            error: None,
+        },
+    )
+    .await?;
     let chan = child.chan(p.stream);
     let mut off = p.from_offset;
     let mut rx = child.changed.subscribe();
@@ -510,7 +589,10 @@ async fn follow(host: &Host, p: ReadParams, id: u64, w: &mut tokio::net::unix::O
                 Ok(d) if !d.is_empty() => d,
                 _ => break,
             };
-            let ev = FollowEvent::Data { offset: off, data: B64.encode(&data) };
+            let ev = FollowEvent::Data {
+                offset: off,
+                data: B64.encode(&data),
+            };
             send_line(w, &ev).await?;
             off += data.len() as u64;
             continue;
@@ -545,7 +627,15 @@ async fn handle(host: Arc<Host>, stream: UnixStream) {
         let req: Request = match serde_json::from_str(&line) {
             Ok(r) => r,
             Err(e) => {
-                let _ = send_line(&mut w, &Response { id: 0, result: None, error: Some(format!("bad request: {e}")) }).await;
+                let _ = send_line(
+                    &mut w,
+                    &Response {
+                        id: 0,
+                        result: None,
+                        error: Some(format!("bad request: {e}")),
+                    },
+                )
+                .await;
                 continue;
             }
         };
@@ -555,15 +645,31 @@ async fn handle(host: Arc<Host>, stream: UnixStream) {
                     let _ = follow(&host, p, req.id, &mut w).await;
                 }
                 Err(e) => {
-                    let _ = send_line(&mut w, &Response { id: req.id, result: None, error: Some(e.to_string()) }).await;
+                    let _ = send_line(
+                        &mut w,
+                        &Response {
+                            id: req.id,
+                            result: None,
+                            error: Some(e.to_string()),
+                        },
+                    )
+                    .await;
                 }
             }
             return;
         }
         let is_shutdown = req.method == method::SHUTDOWN;
         let resp = match host.call(&req.method, req.params) {
-            Ok(v) => Response { id: req.id, result: Some(v), error: None },
-            Err(e) => Response { id: req.id, result: None, error: Some(format!("{e:#}")) },
+            Ok(v) => Response {
+                id: req.id,
+                result: Some(v),
+                error: None,
+            },
+            Err(e) => Response {
+                id: req.id,
+                result: None,
+                error: Some(format!("{e:#}")),
+            },
         };
         if send_line(&mut w, &resp).await.is_err() {
             return;
@@ -602,7 +708,8 @@ pub async fn serve(opts: ServeOptions) -> Result<()> {
 
     let reaper = host.clone();
     tokio::spawn(async move {
-        let mut sigchld = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::child()).ok();
+        let mut sigchld =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::child()).ok();
         loop {
             match sigchld.as_mut() {
                 Some(s) => {
@@ -646,7 +753,11 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let socket = tmp.path().join("run/host.sock");
         let dir = tmp.path().join("out");
-        let opts = ServeOptions { socket: socket.clone(), dir, reap_orphans: false };
+        let opts = ServeOptions {
+            socket: socket.clone(),
+            dir,
+            reap_orphans: false,
+        };
         tokio::spawn(async move {
             let _ = serve(opts).await;
         });
@@ -691,7 +802,13 @@ mod tests {
         let list = c.list().await.unwrap();
         assert_eq!(list.len(), 1);
         assert!(!list[0].running);
-        assert_eq!(list[0].exit, Some(ExitStatus { code: Some(3), signal: None }));
+        assert_eq!(
+            list[0].exit,
+            Some(ExitStatus {
+                code: Some(3),
+                signal: None
+            })
+        );
         assert_eq!(list[0].out_len, 4);
         // Reading from an offset picks up where a previous reader stopped.
         let r = c.read(&s.id, Stream::Out, 2, None).await.unwrap();
@@ -702,7 +819,10 @@ mod tests {
     #[tokio::test]
     async fn stdin_stays_open_until_closed() {
         let (_tmp, c) = start().await;
-        let s = c.spawn(sh("while read l; do echo got:$l; done")).await.unwrap();
+        let s = c
+            .spawn(sh("while read l; do echo got:$l; done"))
+            .await
+            .unwrap();
         c.write(&s.id, b"a\nb\n").await.unwrap();
         c.close_stdin(&s.id).await.unwrap();
         assert_eq!(read_all(&c, &s.id, Stream::Out).await, "got:a\ngot:b\n");
@@ -721,9 +841,13 @@ mod tests {
             }
         };
         let grandchild: i32 = first.trim().parse().unwrap();
-        assert_ne!(unsafe { libc::getpgid(s.pid as i32) }, unsafe { libc::getpgid(0) });
+        assert_ne!(unsafe { libc::getpgid(s.pid as i32) }, unsafe {
+            libc::getpgid(0)
+        });
         assert_eq!(unsafe { libc::getpgid(grandchild) }, s.pid as i32);
-        c.signal(&s.id, serde_json::json!("TERM"), true).await.unwrap();
+        c.signal(&s.id, serde_json::json!("TERM"), true)
+            .await
+            .unwrap();
         for _ in 0..100 {
             let info = &c.list().await.unwrap()[0];
             if !info.running && unsafe { libc::kill(grandchild, 0) } != 0 {
@@ -738,7 +862,10 @@ mod tests {
     async fn a_pty_child_gets_a_terminal_of_the_asked_size_and_can_be_resized() {
         let (_tmp, c) = start().await;
         let mut p = sh("stty size; read x; echo got:$x; stty size");
-        p.pty = Some(PtySize { cols: 100, rows: 30 });
+        p.pty = Some(PtySize {
+            cols: 100,
+            rows: 30,
+        });
         let s = c.spawn(p).await.unwrap();
         let mut f = c.follow(&s.id, Stream::Out, 0).await.unwrap();
         let mut text = String::new();
@@ -771,7 +898,13 @@ mod tests {
     async fn bad_requests_are_errors_not_crashes() {
         let (_tmp, c) = start().await;
         assert!(c.close_stdin("c99").await.is_err());
-        assert!(c.spawn(SpawnParams { cmd: "/nonexistent/x".into(), ..Default::default() }).await.is_err());
+        assert!(c
+            .spawn(SpawnParams {
+                cmd: "/nonexistent/x".into(),
+                ..Default::default()
+            })
+            .await
+            .is_err());
         assert!(c.resize("c99", 1, 1).await.is_err());
         c.ping().await.unwrap();
     }

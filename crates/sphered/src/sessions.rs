@@ -10,7 +10,16 @@ use std::path::Path;
 use std::time::{Duration, SystemTime};
 
 /// States that mean a session is still alive.
-const LIVE_STATES: &[&str] = &["running", "active", "working", "busy", "starting", "needs_input", "blocked", "waiting"];
+const LIVE_STATES: &[&str] = &[
+    "running",
+    "active",
+    "working",
+    "busy",
+    "starting",
+    "needs_input",
+    "blocked",
+    "waiting",
+];
 
 fn pid_alive(pid: u32) -> bool {
     pid > 0 && unsafe { libc::kill(pid as i32, 0) } == 0
@@ -31,14 +40,21 @@ pub fn parse_agents_json(text: &str) -> Result<Vec<SessionInfo>> {
         _ => vec![],
     };
     let get = |e: &Value, keys: &[&str]| -> Option<String> {
-        keys.iter().find_map(|k| e.get(k).and_then(|x| x.as_str()).map(str::to_string))
+        keys.iter()
+            .find_map(|k| e.get(k).and_then(|x| x.as_str()).map(str::to_string))
     };
     Ok(list
         .iter()
         .filter_map(|e| {
             let session_id = get(e, &["sessionId", "session_id", "id"])?;
-            let pid = e.get("pid").and_then(|p| p.as_u64()).map(|p| p as u32).filter(|p| *p > 0);
-            let state = get(e, &["state", "status"]).unwrap_or_default().to_ascii_lowercase();
+            let pid = e
+                .get("pid")
+                .and_then(|p| p.as_u64())
+                .map(|p| p as u32)
+                .filter(|p| *p > 0);
+            let state = get(e, &["state", "status"])
+                .unwrap_or_default()
+                .to_ascii_lowercase();
             Some(SessionInfo {
                 session_id,
                 cwd: get(e, &["cwd", "workingDirectory"]),
@@ -64,8 +80,14 @@ fn read_transcript(path: &Path) -> Option<SessionInfo> {
     let file = std::fs::File::open(path).ok()?;
     let mut cwd = None;
     let mut title = None;
-    for line in std::io::BufReader::new(file).lines().take(60).map_while(|l| l.ok()) {
-        let Ok(v) = serde_json::from_str::<Value>(&line) else { continue };
+    for line in std::io::BufReader::new(file)
+        .lines()
+        .take(60)
+        .map_while(|l| l.ok())
+    {
+        let Ok(v) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
         if cwd.is_none() {
             cwd = v.get("cwd").and_then(|c| c.as_str()).map(str::to_string);
         }
@@ -99,9 +121,13 @@ fn read_transcript(path: &Path) -> Option<SessionInfo> {
 
 pub fn scan_transcripts(projects: &Path) -> Vec<SessionInfo> {
     let mut out = vec![];
-    let Ok(dirs) = std::fs::read_dir(projects) else { return out };
+    let Ok(dirs) = std::fs::read_dir(projects) else {
+        return out;
+    };
     for dir in dirs.flatten() {
-        let Ok(files) = std::fs::read_dir(dir.path()) else { continue };
+        let Ok(files) = std::fs::read_dir(dir.path()) else {
+            continue;
+        };
         for f in files.flatten() {
             let p = f.path();
             if p.extension().is_some_and(|e| e == "jsonl") {
@@ -113,7 +139,9 @@ pub fn scan_transcripts(projects: &Path) -> Vec<SessionInfo> {
 }
 
 async fn run_json(cmd: &[String]) -> Result<String> {
-    let Some((prog, args)) = cmd.split_first() else { bail!("empty command") };
+    let Some((prog, args)) = cmd.split_first() else {
+        bail!("empty command")
+    };
     let fut = tokio::process::Command::new(prog)
         .args(args)
         .stdin(std::process::Stdio::null())
@@ -124,7 +152,11 @@ async fn run_json(cmd: &[String]) -> Result<String> {
         .with_context(|| format!("`{}` timed out", cmd.join(" ")))?
         .with_context(|| format!("run `{}`", cmd.join(" ")))?;
     if !out.status.success() {
-        bail!("`{}` failed: {}", cmd.join(" "), String::from_utf8_lossy(&out.stderr).trim());
+        bail!(
+            "`{}` failed: {}",
+            cmd.join(" "),
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
     }
     Ok(String::from_utf8_lossy(&out.stdout).to_string())
 }
@@ -137,7 +169,10 @@ pub async fn list(cfg: &Config, known: &HashMap<String, String>) -> Result<Vec<S
     for s in scan_transcripts(&cfg.projects_dir()) {
         by_id.insert(s.session_id.clone(), s);
     }
-    match run_json(&cfg.session_list_cmd()).await.and_then(|t| parse_agents_json(&t)) {
+    match run_json(&cfg.session_list_cmd())
+        .await
+        .and_then(|t| parse_agents_json(&t))
+    {
         Ok(agents) => {
             for a in agents {
                 let merged = match by_id.remove(&a.session_id) {
@@ -158,7 +193,11 @@ pub async fn list(cfg: &Config, known: &HashMap<String, String>) -> Result<Vec<S
     for s in &mut out {
         s.task = known.get(&s.session_id).cloned();
     }
-    out.sort_by(|a, b| b.updated_at.cmp(&a.updated_at).then(a.session_id.cmp(&b.session_id)));
+    out.sort_by(|a, b| {
+        b.updated_at
+            .cmp(&a.updated_at)
+            .then(a.session_id.cmp(&b.session_id))
+    });
     Ok(out)
 }
 

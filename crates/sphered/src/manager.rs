@@ -18,8 +18,8 @@ use sphere_host::{ExitStatus, FollowItem, SpawnParams, Stream};
 use sphere_proto::api::{self, kind, RpcError};
 use sphere_proto::version;
 use sphere_proto::{
-    now_rfc3339, AnswerKind, EventBody, Excerpt, OutputRef, RequestInfo, RequestKind, RequestStatus, TaskState,
-    TaskView,
+    now_rfc3339, AnswerKind, EventBody, Excerpt, OutputRef, RequestInfo, RequestKind,
+    RequestStatus, TaskState, TaskView,
 };
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -35,7 +35,11 @@ pub struct ApiError(pub RpcError);
 
 impl From<anyhow::Error> for ApiError {
     fn from(e: anyhow::Error) -> Self {
-        ApiError(RpcError { code: api::code::INTERNAL, message: format!("{e:#}"), data: None })
+        ApiError(RpcError {
+            code: api::code::INTERNAL,
+            message: format!("{e:#}"),
+            data: None,
+        })
     }
 }
 
@@ -122,23 +126,36 @@ pub fn plan_line(cx: &LineCtx, inc: Incoming) -> Plan {
     let mut plan = Plan::default();
     let task = &cx.view.id;
     match inc {
-        Incoming::Init { session_id, model, permission_mode, slash_commands } => {
+        Incoming::Init {
+            session_id,
+            model,
+            permission_mode,
+            slash_commands,
+        } => {
             if let Some(id) = session_id {
                 if cx.view.session_id.as_deref() != Some(id.as_str()) {
                     plan.events.push(EventBody::SessionId { session_id: id });
                 }
             }
-            plan.events.push(EventBody::Init { model, permission_mode, slash_commands });
+            plan.events.push(EventBody::Init {
+                model,
+                permission_mode,
+                slash_commands,
+            });
         }
         Incoming::Assistant { blocks, parent } => {
             for b in blocks {
                 match b {
-                    Block::Text(t) if !t.trim().is_empty() => plan.events.push(EventBody::Say { text: t }),
+                    Block::Text(t) if !t.trim().is_empty() => {
+                        plan.events.push(EventBody::Say { text: t })
+                    }
                     Block::Text(_) => {}
                     Block::ToolUse { id, name, input } => {
                         let (step_kind, title, detail) = proto::step_info(&name, &input);
                         if name == "TodoWrite" {
-                            plan.events.push(EventBody::Plan { items: proto::plan_items(&input) });
+                            plan.events.push(EventBody::Plan {
+                                items: proto::plan_items(&input),
+                            });
                         }
                         plan.events.push(EventBody::Step {
                             id,
@@ -154,27 +171,60 @@ pub fn plan_line(cx: &LineCtx, inc: Incoming) -> Plan {
         }
         Incoming::ToolResults(results) => {
             for r in results {
-                let tool = cx.view.open_steps.iter().find(|s| s.id == r.tool_use_id).map(|s| s.tool.clone());
-                if tool.as_deref().map(proto::may_change_files).unwrap_or(false) {
+                let tool = cx
+                    .view
+                    .open_steps
+                    .iter()
+                    .find(|s| s.id == r.tool_use_id)
+                    .map(|s| s.tool.clone());
+                if tool
+                    .as_deref()
+                    .map(proto::may_change_files)
+                    .unwrap_or(false)
+                {
                     plan.refresh_files = true;
                 }
                 let output = (!r.text.is_empty()).then(|| {
                     Excerpt::new(
                         &r.text,
                         cx.excerpt_bytes,
-                        Some(OutputRef { child: cx.child.to_string(), offset: cx.offset, len: cx.len }),
+                        Some(OutputRef {
+                            child: cx.child.to_string(),
+                            offset: cx.offset,
+                            len: cx.len,
+                        }),
                     )
                 });
-                plan.events.push(EventBody::StepDone { id: r.tool_use_id, ok: !r.is_error, output });
+                plan.events.push(EventBody::StepDone {
+                    id: r.tool_use_id,
+                    ok: !r.is_error,
+                    output,
+                });
             }
         }
         Incoming::Delta(t) => plan.live.push(t),
-        Incoming::Result { ok, text, turns, duration_ms, total_cost_usd, .. } => {
+        Incoming::Result {
+            ok,
+            text,
+            turns,
+            duration_ms,
+            total_cost_usd,
+            ..
+        } => {
             // An agent that finished its turn is not waiting on anything.
-            for r in cx.open_requests.iter().filter(|r| r.kind != RequestKind::ResumeCheck) {
-                plan.events.push(EventBody::RequestWithdrawn { request: r.id.clone(), reason: "turn ended".into() });
+            for r in cx
+                .open_requests
+                .iter()
+                .filter(|r| r.kind != RequestKind::ResumeCheck)
+            {
+                plan.events.push(EventBody::RequestWithdrawn {
+                    request: r.id.clone(),
+                    reason: "turn ended".into(),
+                });
             }
-            let delta = total_cost_usd.map(|c| (c - cx.view.last_total_cost).max(0.0)).unwrap_or(0.0);
+            let delta = total_cost_usd
+                .map(|c| (c - cx.view.last_total_cost).max(0.0))
+                .unwrap_or(0.0);
             plan.events.push(EventBody::Turn {
                 ok,
                 interrupted: cx.interrupted,
@@ -187,13 +237,28 @@ pub fn plan_line(cx: &LineCtx, inc: Incoming) -> Plan {
             plan.turn_ended = true;
         }
         Incoming::CanUseTool(c) => plan_permission(cx, c, &mut plan),
-        Incoming::OtherControl { request_id, subtype } => {
+        Incoming::OtherControl {
+            request_id,
+            subtype,
+        } => {
             tracing::debug!(%subtype, "unsupported control request from the agent");
-            plan.writes.push(proto::control_error(&request_id, "not supported by this host"));
+            plan.writes.push(proto::control_error(
+                &request_id,
+                "not supported by this host",
+            ));
         }
-        Incoming::ControlResponse { request_id, ok, error, .. } => plan.ctl = Some((request_id, ok, error)),
+        Incoming::ControlResponse {
+            request_id,
+            ok,
+            error,
+            ..
+        } => plan.ctl = Some((request_id, ok, error)),
         Incoming::ControlCancel { request_id } => {
-            for r in cx.open_requests.iter().filter(|r| r.agent_request.as_deref() == Some(request_id.as_str())) {
+            for r in cx
+                .open_requests
+                .iter()
+                .filter(|r| r.agent_request.as_deref() == Some(request_id.as_str()))
+            {
                 plan.events.push(EventBody::RequestWithdrawn {
                     request: r.id.clone(),
                     reason: "cancelled by the agent".into(),
@@ -206,15 +271,29 @@ pub fn plan_line(cx: &LineCtx, inc: Incoming) -> Plan {
 }
 
 fn plan_permission(cx: &LineCtx, c: CanUseTool, plan: &mut Plan) {
-    let ctx = Ctx { branch: cx.view.branch.as_deref() };
+    let ctx = Ctx {
+        branch: cx.view.branch.as_deref(),
+    };
     match cx.policy.decide(&c.tool_name, &c.input, &ctx) {
         Verdict::Allow(rule) => {
-            plan.writes.push(proto::allow_response(&c.request_id, &c.input, None));
-            plan.events.push(EventBody::AutoAnswered { tool: c.tool_name, allow: true, rule });
+            plan.writes
+                .push(proto::allow_response(&c.request_id, &c.input, None));
+            plan.events.push(EventBody::AutoAnswered {
+                tool: c.tool_name,
+                allow: true,
+                rule,
+            });
         }
         Verdict::Deny(rule) => {
-            plan.writes.push(proto::deny_response(&c.request_id, &format!("Denied by Sphere policy ({rule}).")));
-            plan.events.push(EventBody::AutoAnswered { tool: c.tool_name, allow: false, rule });
+            plan.writes.push(proto::deny_response(
+                &c.request_id,
+                &format!("Denied by Sphere policy ({rule})."),
+            ));
+            plan.events.push(EventBody::AutoAnswered {
+                tool: c.tool_name,
+                allow: false,
+                rule,
+            });
         }
         Verdict::Ask => {
             let summary = c
@@ -315,10 +394,15 @@ impl Manager {
                     match version::parse(&text) {
                         Some(v) if version::in_tested_range(v) => {}
                         Some(v) => self.warn(version::out_of_range_message(v)),
-                        None => self.warn(format!("could not read a version from `{}`", text.trim())),
+                        None => {
+                            self.warn(format!("could not read a version from `{}`", text.trim()))
+                        }
                     }
                 }
-                Err(e) => self.warn(format!("could not run `{} --version`: {e:#}", self.cfg.agent_command)),
+                Err(e) => self.warn(format!(
+                    "could not run `{} --version`: {e:#}",
+                    self.cfg.agent_command
+                )),
             }
         }
         match run_capture(&self.cfg.auth_status_cmd()).await {
@@ -340,7 +424,10 @@ impl Manager {
         let tasks: Vec<TaskView> = self.hub.view(|v| v.tasks().into_iter().cloned().collect());
         let referenced: HashSet<String> = tasks.iter().filter_map(|t| t.child.clone()).collect();
         // A child that was spawned but never recorded would run unwatched.
-        for c in children.iter().filter(|c| c.running && !referenced.contains(&c.id)) {
+        for c in children
+            .iter()
+            .filter(|c| c.running && !referenced.contains(&c.id))
+        {
             if c.label.as_deref().is_some_and(|l| l.starts_with("task:")) {
                 tracing::warn!(child = %c.id, "killing an agent that was never recorded");
                 let _ = self.host.signal(&c.id, json!("KILL"), true).await;
@@ -358,7 +445,9 @@ impl Manager {
                     continue;
                 }
                 self.clone().resume_lost(t.id.clone()).await;
-            } else if t.state.is_active() && self.hub.view(|v| v.open_requests_for(&t.id).is_empty()) {
+            } else if t.state.is_active()
+                && self.hub.view(|v| v.open_requests_for(&t.id).is_empty())
+            {
                 // Crashed between steps with nothing recorded: start it again.
                 self.clone().resume_lost(t.id.clone()).await;
             }
@@ -430,7 +519,9 @@ impl Manager {
     }
 
     fn fail(&self, task: &str, message: String) {
-        let stopped = self.hub.view(|v| v.task(task).map(|t| t.state == TaskState::Stopped));
+        let stopped = self
+            .hub
+            .view(|v| v.task(task).map(|t| t.state == TaskState::Stopped));
         if stopped == Some(false) {
             let _ = self.hub.publish(task, EventBody::Failed { message });
         }
@@ -445,7 +536,10 @@ impl Manager {
     }
 
     async fn launch_inner(self: &Arc<Self>, task: &str, message: Option<String>) -> Result<()> {
-        let view = self.hub.view(|v| v.task(task).cloned()).context("unknown task")?;
+        let view = self
+            .hub
+            .view(|v| v.task(task).cloned())
+            .context("unknown task")?;
         if view.state == TaskState::Stopped {
             return Ok(());
         }
@@ -459,8 +553,10 @@ impl Manager {
                     view.title.clone(),
                     view.in_place,
                 );
-                let ws = tokio::task::spawn_blocking(move || workspace::prepare(&wt, &repo, &id, &title, in_place))
-                    .await??;
+                let ws = tokio::task::spawn_blocking(move || {
+                    workspace::prepare(&wt, &repo, &id, &title, in_place)
+                })
+                .await??;
                 self.hub.publish(
                     task,
                     EventBody::WorkspaceReady {
@@ -473,7 +569,9 @@ impl Manager {
             }
         };
 
-        let settings = self.policy_for(&view.repo).settings_json(view.allow_rewrites);
+        let settings = self
+            .policy_for(&view.repo)
+            .settings_json(view.allow_rewrites);
         let dir = self.cfg.settings_dir();
         crate::private_dir(&dir)?;
         let settings_path = dir.join(format!("{task}.json"));
@@ -495,7 +593,10 @@ impl Manager {
         let mut args = self.cfg.agent_args.clone();
         args.extend(gen);
         let mut env = std::collections::BTreeMap::new();
-        env.insert("SPHERE_SOCKET".to_string(), self.cfg.socket_path().to_string_lossy().to_string());
+        env.insert(
+            "SPHERE_SOCKET".to_string(),
+            self.cfg.socket_path().to_string_lossy().to_string(),
+        );
         env.insert("SPHERE_TASK".to_string(), task.to_string());
         let spawned = self
             .host
@@ -516,11 +617,21 @@ impl Manager {
         }
         self.hub.commit(
             task,
-            vec![EventBody::AgentStarted { child: spawned.id.clone(), pid: spawned.pid, resumed: resume.is_some() }],
-            Some(OffsetUpdate { child: spawned.id.clone(), stream: "out", offset: 0 }),
+            vec![EventBody::AgentStarted {
+                child: spawned.id.clone(),
+                pid: spawned.pid,
+                resumed: resume.is_some(),
+            }],
+            Some(OffsetUpdate {
+                child: spawned.id.clone(),
+                stream: "out",
+                offset: 0,
+            }),
         )?;
         self.attach(task, &spawned.id, 0);
-        self.host.write(&spawned.id, proto::user_message(&text).as_bytes()).await?;
+        self.host
+            .write(&spawned.id, proto::user_message(&text).as_bytes())
+            .await?;
         self.hub.publish(task, EventBody::UserMessage { text })?;
         Ok(())
     }
@@ -535,7 +646,13 @@ impl Manager {
         let mut rt = self.rt.lock().unwrap();
         if let Some(old) = rt.tasks.insert(
             task.to_string(),
-            TaskRt { stopping: false, interrupted: false, idle_exit: false, idle_timer: None, exit_tx },
+            TaskRt {
+                stopping: false,
+                interrupted: false,
+                idle_exit: false,
+                idle_timer: None,
+                exit_tx,
+            },
         ) {
             if let Some(h) = old.idle_timer {
                 h.abort();
@@ -546,19 +663,29 @@ impl Manager {
         }
     }
 
-    async fn reader(self: Arc<Self>, task: String, child: String, mut offset: u64, exit_tx: watch::Sender<bool>) {
+    async fn reader(
+        self: Arc<Self>,
+        task: String,
+        child: String,
+        mut offset: u64,
+        exit_tx: watch::Sender<bool>,
+    ) {
         let err_tail = Arc::new(Mutex::new(String::new()));
         let err_reader = {
             let (this, child, tail) = (self.clone(), child.clone(), err_tail.clone());
             tokio::spawn(async move {
-                let Ok(mut f) = this.host.follow(&child, Stream::Err, 0).await else { return };
+                let Ok(mut f) = this.host.follow(&child, Stream::Err, 0).await else {
+                    return;
+                };
                 while let Some(Ok(item)) = f.next().await {
                     if let FollowItem::Data { bytes, .. } = item {
                         let mut t = tail.lock().unwrap();
                         t.push_str(&String::from_utf8_lossy(&bytes));
                         let keep = t.len().saturating_sub(2000);
                         if keep > 0 {
-                            let cut = (keep..t.len()).find(|i| t.is_char_boundary(*i)).unwrap_or(t.len());
+                            let cut = (keep..t.len())
+                                .find(|i| t.is_char_boundary(*i))
+                                .unwrap_or(t.len());
                             t.drain(..cut);
                         }
                     }
@@ -591,7 +718,8 @@ impl Manager {
                                 self.handle_line(&task, &child, buf_start, end, &buf).await;
                             }
                             // Let the stderr reader catch up before we quote it.
-                            let _ = tokio::time::timeout(Duration::from_millis(300), err_reader).await;
+                            let _ =
+                                tokio::time::timeout(Duration::from_millis(300), err_reader).await;
                             let tail = err_tail.lock().unwrap().clone();
                             self.on_exit(&task, status, tail, &exit_tx).await;
                             return;
@@ -618,7 +746,14 @@ impl Manager {
         }
     }
 
-    async fn handle_line(self: &Arc<Self>, task: &str, child: &str, start: u64, end: u64, raw: &[u8]) {
+    async fn handle_line(
+        self: &Arc<Self>,
+        task: &str,
+        child: &str,
+        start: u64,
+        end: u64,
+        raw: &[u8],
+    ) {
         let text = String::from_utf8_lossy(raw);
         let line = text.trim();
         if line.is_empty() {
@@ -631,9 +766,15 @@ impl Manager {
                 return;
             }
         };
-        let Some(view) = self.hub.view(|v| v.task(task).cloned()) else { return };
-        let open: Vec<RequestInfo> =
-            self.hub.view(|v| v.open_requests_for(task).iter().map(|r| r.info.clone()).collect());
+        let Some(view) = self.hub.view(|v| v.task(task).cloned()) else {
+            return;
+        };
+        let open: Vec<RequestInfo> = self.hub.view(|v| {
+            v.open_requests_for(task)
+                .iter()
+                .map(|r| r.info.clone())
+                .collect()
+        });
         let revises = match &inc {
             Incoming::CanUseTool(c) => self.hub.view(|v| v.revises(task, &c.tool_name)),
             _ => None,
@@ -682,7 +823,11 @@ impl Manager {
             self.hub.live(task, l);
         }
         if !plan.events.is_empty() {
-            let upd = OffsetUpdate { child: child.to_string(), stream: "out", offset: end };
+            let upd = OffsetUpdate {
+                child: child.to_string(),
+                stream: "out",
+                offset: end,
+            };
             if let Err(e) = self.hub.commit(task, plan.events, Some(upd)) {
                 tracing::error!(%task, "could not store events: {e:#}");
             }
@@ -702,15 +847,23 @@ impl Manager {
     }
 
     fn refresh_files(self: &Arc<Self>, task: &str) {
-        let Some((Some(workdir), Some(base))) = self.hub.view(|v| v.task(task).map(|t| (t.workdir.clone(), t.base.clone())))
+        let Some((Some(workdir), Some(base))) = self
+            .hub
+            .view(|v| v.task(task).map(|t| (t.workdir.clone(), t.base.clone())))
         else {
             return;
         };
         let (this, task) = (self.clone(), task.to_string());
         tokio::spawn(async move {
-            let files = tokio::task::spawn_blocking(move || workspace::files_touched(Path::new(&workdir), &base)).await;
+            let files = tokio::task::spawn_blocking(move || {
+                workspace::files_touched(Path::new(&workdir), &base)
+            })
+            .await;
             if let Ok(Ok(files)) = files {
-                let same = this.hub.view(|v| v.task(&task).map(|t| t.files == files)).unwrap_or(true);
+                let same = this
+                    .hub
+                    .view(|v| v.task(&task).map(|t| t.files == files))
+                    .unwrap_or(true);
                 if !same {
                     let _ = this.hub.publish(&task, EventBody::FilesTouched { files });
                 }
@@ -718,17 +871,29 @@ impl Manager {
         });
     }
 
-    async fn on_exit(self: &Arc<Self>, task: &str, status: ExitStatus, stderr_tail: String, exit_tx: &watch::Sender<bool>) {
+    async fn on_exit(
+        self: &Arc<Self>,
+        task: &str,
+        status: ExitStatus,
+        stderr_tail: String,
+        exit_tx: &watch::Sender<bool>,
+    ) {
         let (stopping, idle) = {
             let rt = self.rt.lock().unwrap();
-            rt.tasks.get(task).map(|t| (t.stopping, t.idle_exit)).unwrap_or((false, false))
+            rt.tasks
+                .get(task)
+                .map(|t| (t.stopping, t.idle_exit))
+                .unwrap_or((false, false))
         };
         let view = self.hub.view(|v| v.task(task).cloned());
         let mut events: Vec<EventBody> = self.hub.view(|v| {
             v.open_requests_for(task)
                 .iter()
                 .filter(|r| r.info.kind != RequestKind::ResumeCheck)
-                .map(|r| EventBody::RequestWithdrawn { request: r.info.id.clone(), reason: "the agent exited".into() })
+                .map(|r| EventBody::RequestWithdrawn {
+                    request: r.info.id.clone(),
+                    reason: "the agent exited".into(),
+                })
                 .collect()
         });
         let reason = if stopping {
@@ -738,13 +903,20 @@ impl Manager {
         } else {
             "exit"
         };
-        events.push(EventBody::AgentExited { code: status.code, signal: status.signal, reason: reason.into() });
+        events.push(EventBody::AgentExited {
+            code: status.code,
+            signal: status.signal,
+            reason: reason.into(),
+        });
         if let Some(view) = &view {
             if stopping {
                 events.push(EventBody::Stopped {});
             } else if !idle && view.state.is_active() {
                 let tail = stderr_tail.trim();
-                let mut message = format!("the agent exited ({}) before finishing", describe_exit(&status));
+                let mut message = format!(
+                    "the agent exited ({}) before finishing",
+                    describe_exit(&status)
+                );
                 if !tail.is_empty() {
                     message.push_str(&format!(": {tail}"));
                 }
@@ -770,7 +942,9 @@ impl Manager {
     /// The agent's process is gone and nobody saw it exit (the host restarted,
     /// or it was lost). Resume it from its saved session.
     async fn resume_lost(self: Arc<Self>, task: String) {
-        let Some(view) = self.hub.view(|v| v.task(&task).cloned()) else { return };
+        let Some(view) = self.hub.view(|v| v.task(&task).cloned()) else {
+            return;
+        };
         if !view.state.is_active() && view.child.is_none() {
             return;
         }
@@ -781,21 +955,34 @@ impl Manager {
             v.open_requests_for(&task)
                 .iter()
                 .filter(|r| r.info.kind != RequestKind::ResumeCheck)
-                .map(|r| EventBody::RequestWithdrawn { request: r.info.id.clone(), reason: "the agent was restarted".into() })
+                .map(|r| EventBody::RequestWithdrawn {
+                    request: r.info.id.clone(),
+                    reason: "the agent was restarted".into(),
+                })
                 .collect()
         });
         let mut cut: Vec<(String, String, bool)> = vec![];
         for s in &view.open_steps {
             let outbound = proto::is_outbound(&s.tool, &Value::String(s.detail.clone()));
-            events.push(EventBody::CutOff { step: s.id.clone(), title: s.title.clone(), outbound });
+            events.push(EventBody::CutOff {
+                step: s.id.clone(),
+                title: s.title.clone(),
+                outbound,
+            });
             cut.push((s.id.clone(), s.title.clone(), outbound));
         }
         if view.child.is_some() {
-            events.push(EventBody::AgentExited { code: None, signal: None, reason: "lost".into() });
+            events.push(EventBody::AgentExited {
+                code: None,
+                signal: None,
+                reason: "lost".into(),
+            });
         }
         let outbound: Vec<&(String, String, bool)> = cut.iter().filter(|c| c.2).collect();
         let pending_check = self.hub.view(|v| {
-            v.open_requests_for(&task).iter().any(|r| r.info.kind == RequestKind::ResumeCheck)
+            v.open_requests_for(&task)
+                .iter()
+                .any(|r| r.info.kind == RequestKind::ResumeCheck)
         });
         if !outbound.is_empty() && !pending_check {
             let list: Vec<Value> = view
@@ -864,14 +1051,20 @@ impl Manager {
     }
 
     async fn idle_exit(self: &Arc<Self>, task: &str) {
-        let Some(view) = self.hub.view(|v| v.task(task).cloned()) else { return };
-        let Some(child) = view.child.clone() else { return };
+        let Some(view) = self.hub.view(|v| v.task(task).cloned()) else {
+            return;
+        };
+        let Some(child) = view.child.clone() else {
+            return;
+        };
         if !matches!(view.state, TaskState::Done | TaskState::Failed) {
             return;
         }
         let rx = {
             let mut rt = self.rt.lock().unwrap();
-            let Some(t) = rt.tasks.get_mut(task) else { return };
+            let Some(t) = rt.tasks.get_mut(task) else {
+                return;
+            };
             t.idle_exit = true;
             t.idle_timer = None;
             t.exit_tx.subscribe()
@@ -885,7 +1078,10 @@ impl Manager {
         let wait = Duration::from_millis(self.cfg.interrupt_wait_ms);
         let grace = Duration::from_millis(self.cfg.stop_grace_ms);
         if interrupt {
-            let _ = self.host.write(child, proto::interrupt_request(&self.ctl_id()).as_bytes()).await;
+            let _ = self
+                .host
+                .write(child, proto::interrupt_request(&self.ctl_id()).as_bytes())
+                .await;
         }
         let _ = self.host.close_stdin(child).await;
         if !wait_exit(&mut exit_rx, wait).await {
@@ -909,13 +1105,23 @@ impl Manager {
         self.start_task_inner(p, None).await
     }
 
-    async fn start_task_inner(self: &Arc<Self>, p: api::StartParams, resume_session: Option<String>) -> ApiResult<api::StartResult> {
+    async fn start_task_inner(
+        self: &Arc<Self>,
+        p: api::StartParams,
+        resume_session: Option<String>,
+    ) -> ApiResult<api::StartResult> {
         if p.prompt.trim().is_empty() {
             return Err(ApiError(RpcError {
                 code: api::code::INVALID_PARAMS,
                 message: "the prompt is empty".into(),
                 data: None,
             }));
+        }
+        if self.capped() {
+            return Err(api_err(
+                kind::DAILY_CAP,
+                "the daily cost cap is reached; raise it or wait for tomorrow",
+            ));
         }
         if let Some(m) = &p.mode {
             if !MODES.contains(&m.as_str()) {
@@ -974,7 +1180,9 @@ impl Manager {
     pub async fn send(self: &Arc<Self>, task: &str, text: String) -> ApiResult<()> {
         let view = self.task_view(task)?;
         match view.state {
-            TaskState::Queued => return Err(api_err(kind::INVALID_STATE, "the task has not started yet")),
+            TaskState::Queued => {
+                return Err(api_err(kind::INVALID_STATE, "the task has not started yet"))
+            }
             TaskState::Stopped => return Err(api_err(kind::INVALID_STATE, "the task was stopped")),
             _ => {}
         }
@@ -987,14 +1195,22 @@ impl Manager {
                 .write(child, proto::user_message(&text).as_bytes())
                 .await
                 .map_err(|e| api_err(kind::AGENT_ERROR, format!("{e:#}")))?;
-            self.hub.publish(task, EventBody::UserMessage { text }).map_err(ApiError::from)?;
+            self.hub
+                .publish(task, EventBody::UserMessage { text })
+                .map_err(ApiError::from)?;
             return Ok(());
         }
         if view.session_id.is_none() {
-            return Err(api_err(kind::INVALID_STATE, "the task has no session to continue"));
+            return Err(api_err(
+                kind::INVALID_STATE,
+                "the task has no session to continue",
+            ));
         }
         if !self.rt.lock().unwrap().launching.insert(task.to_string()) {
-            return Err(api_err(kind::INVALID_STATE, "the agent is starting; try again in a moment"));
+            return Err(api_err(
+                kind::INVALID_STATE,
+                "the agent is starting; try again in a moment",
+            ));
         }
         let this = self.clone();
         let t = task.to_string();
@@ -1002,12 +1218,20 @@ impl Manager {
         Ok(())
     }
 
-    fn withdraw_events(&self, task: &str, reason: &str, include_resume_checks: bool) -> Vec<EventBody> {
+    fn withdraw_events(
+        &self,
+        task: &str,
+        reason: &str,
+        include_resume_checks: bool,
+    ) -> Vec<EventBody> {
         self.hub.view(|v| {
             v.open_requests_for(task)
                 .iter()
                 .filter(|r| include_resume_checks || r.info.kind != RequestKind::ResumeCheck)
-                .map(|r| EventBody::RequestWithdrawn { request: r.info.id.clone(), reason: reason.into() })
+                .map(|r| EventBody::RequestWithdrawn {
+                    request: r.info.id.clone(),
+                    reason: reason.into(),
+                })
                 .collect()
         })
     }
@@ -1019,7 +1243,9 @@ impl Manager {
         };
         let withdraw = self.withdraw_events(task, "interrupted", false);
         if !withdraw.is_empty() {
-            self.hub.commit(task, withdraw, None).map_err(ApiError::from)?;
+            self.hub
+                .commit(task, withdraw, None)
+                .map_err(ApiError::from)?;
         }
         if let Some(t) = self.rt.lock().unwrap().tasks.get_mut(task) {
             t.interrupted = true;
@@ -1031,9 +1257,15 @@ impl Manager {
         Ok(())
     }
 
-    async fn control(&self, task: &str, build: impl FnOnce(&str) -> String) -> ApiResult<Option<CtlReply>> {
+    async fn control(
+        &self,
+        task: &str,
+        build: impl FnOnce(&str) -> String,
+    ) -> ApiResult<Option<CtlReply>> {
         let view = self.task_view(task)?;
-        let Some(child) = view.child else { return Ok(None) };
+        let Some(child) = view.child else {
+            return Ok(None);
+        };
         let id = self.ctl_id();
         let (tx, rx) = oneshot::channel();
         self.ctl.lock().unwrap().insert(id.clone(), tx);
@@ -1046,7 +1278,10 @@ impl Manager {
             Ok(Ok(r)) => Ok(Some(r)),
             _ => {
                 self.ctl.lock().unwrap().remove(&id);
-                Err(api_err(kind::AGENT_ERROR, "the agent did not answer in time"))
+                Err(api_err(
+                    kind::AGENT_ERROR,
+                    "the agent did not answer in time",
+                ))
             }
         }
     }
@@ -1060,22 +1295,38 @@ impl Manager {
             }));
         }
         // With no agent running the mode applies when it next starts.
-        if let Some(r) = self.control(task, |id| proto::set_mode_request(id, &mode)).await? {
+        if let Some(r) = self
+            .control(task, |id| proto::set_mode_request(id, &mode))
+            .await?
+        {
             if !r.ok {
-                return Err(api_err(kind::AGENT_ERROR, r.error.unwrap_or_else(|| "the agent refused".into())));
+                return Err(api_err(
+                    kind::AGENT_ERROR,
+                    r.error.unwrap_or_else(|| "the agent refused".into()),
+                ));
             }
         }
-        self.hub.publish(task, EventBody::ModeChanged { mode }).map_err(ApiError::from)?;
+        self.hub
+            .publish(task, EventBody::ModeChanged { mode })
+            .map_err(ApiError::from)?;
         Ok(())
     }
 
     pub async fn set_model(self: &Arc<Self>, task: &str, model: String) -> ApiResult<()> {
-        if let Some(r) = self.control(task, |id| proto::set_model_request(id, &model)).await? {
+        if let Some(r) = self
+            .control(task, |id| proto::set_model_request(id, &model))
+            .await?
+        {
             if !r.ok {
-                return Err(api_err(kind::AGENT_ERROR, r.error.unwrap_or_else(|| "the agent refused".into())));
+                return Err(api_err(
+                    kind::AGENT_ERROR,
+                    r.error.unwrap_or_else(|| "the agent refused".into()),
+                ));
             }
         }
-        self.hub.publish(task, EventBody::ModelChanged { model }).map_err(ApiError::from)?;
+        self.hub
+            .publish(task, EventBody::ModelChanged { model })
+            .map_err(ApiError::from)?;
         Ok(())
     }
 
@@ -1099,7 +1350,9 @@ impl Manager {
         match (view.child.clone(), rx) {
             (Some(child), Some(rx)) => {
                 if !withdraw.is_empty() {
-                    self.hub.commit(task, withdraw, None).map_err(ApiError::from)?;
+                    self.hub
+                        .commit(task, withdraw, None)
+                        .map_err(ApiError::from)?;
                 }
                 // The reader publishes `Stopped` when the exit arrives.
                 self.terminate(&child, rx.clone(), true).await;
@@ -1109,7 +1362,9 @@ impl Manager {
             _ => {
                 let mut events = withdraw;
                 events.push(EventBody::Stopped {});
-                self.hub.commit(task, events, None).map_err(ApiError::from)?;
+                self.hub
+                    .commit(task, events, None)
+                    .map_err(ApiError::from)?;
                 self.pump();
             }
         }
@@ -1124,17 +1379,28 @@ impl Manager {
             .ok_or_else(|| api_err(kind::NOT_FOUND, format!("no such request: {}", p.request)))?;
         match req.status {
             RequestStatus::Answered => {
-                return Err(api_err(kind::ALREADY_ANSWERED, format!("request {} was already answered", p.request)))
+                return Err(api_err(
+                    kind::ALREADY_ANSWERED,
+                    format!("request {} was already answered", p.request),
+                ))
             }
             RequestStatus::Withdrawn => {
-                return Err(api_err(kind::WITHDRAWN, format!("request {} was withdrawn", p.request)))
+                return Err(api_err(
+                    kind::WITHDRAWN,
+                    format!("request {} was withdrawn", p.request),
+                ))
             }
             RequestStatus::Open | RequestStatus::Snoozed => {}
         }
         let info = req.info;
         if p.answer == AnswerKind::Later {
             self.hub
-                .publish(&info.task, EventBody::RequestSnoozed { request: info.id.clone() })
+                .publish(
+                    &info.task,
+                    EventBody::RequestSnoozed {
+                        request: info.id.clone(),
+                    },
+                )
                 .map_err(ApiError::from)?;
             return Ok(());
         }
@@ -1162,7 +1428,10 @@ impl Manager {
                          Check their state before repeating anything with side effects:",
                     );
                     for c in list {
-                        message.push_str(&format!("\n- {}", c["title"].as_str().unwrap_or("a tool call")));
+                        message.push_str(&format!(
+                            "\n- {}",
+                            c["title"].as_str().unwrap_or("a tool call")
+                        ));
                     }
                 }
             }
@@ -1178,14 +1447,17 @@ impl Manager {
             return Ok(());
         }
 
-        let (Some(child), Some(agent_req)) = (view.child.clone(), info.agent_request.clone()) else {
+        let (Some(child), Some(agent_req)) = (view.child.clone(), info.agent_request.clone())
+        else {
             return Err(api_err(kind::INVALID_STATE, "the agent is not running"));
         };
         let line = match p.answer {
             AnswerKind::Yes => {
                 let input = match (&p.input, &note, info.kind) {
                     (Some(i), _, _) => i.clone(),
-                    (None, Some(t), RequestKind::Question) => proto::question_answer_input(&info.input, t),
+                    (None, Some(t), RequestKind::Question) => {
+                        proto::question_answer_input(&info.input, t)
+                    }
                     _ => info.input.clone(),
                 };
                 let mut perms = None;
@@ -1204,14 +1476,21 @@ impl Manager {
             }
             AnswerKind::Change => proto::deny_response(
                 &agent_req,
-                &note.clone().unwrap_or_else(|| "The user wants this changed. Ask what they have in mind.".into()),
+                &note.clone().unwrap_or_else(|| {
+                    "The user wants this changed. Ask what they have in mind.".into()
+                }),
             ),
             AnswerKind::Later => unreachable!("handled above"),
         };
         self.host
             .write(&child, line.as_bytes())
             .await
-            .map_err(|e| api_err(kind::AGENT_ERROR, format!("could not reach the agent: {e:#}")))?;
+            .map_err(|e| {
+                api_err(
+                    kind::AGENT_ERROR,
+                    format!("could not reach the agent: {e:#}"),
+                )
+            })?;
         self.hub
             .publish(
                 &info.task,
@@ -1248,7 +1527,11 @@ impl Manager {
             version: env!("CARGO_PKG_VERSION").to_string(),
             active: v.active_count(),
             queued: v.queued().len(),
-            needs_you: v.tasks().iter().filter(|t| t.state == TaskState::NeedsYou).count(),
+            needs_you: v
+                .tasks()
+                .iter()
+                .filter(|t| t.state == TaskState::NeedsYou)
+                .count(),
             cost_today_usd: v.cost_on(&day),
             daily_cap_usd: self.cfg.daily_cap_usd,
             tasks: v
@@ -1286,7 +1569,12 @@ impl Manager {
         while (bytes.len() as u64) < want {
             let r = self
                 .host
-                .read(&p.child, Stream::Out, off, Some((want - bytes.len() as u64) as usize))
+                .read(
+                    &p.child,
+                    Stream::Out,
+                    off,
+                    Some((want - bytes.len() as u64) as usize),
+                )
                 .await
                 .map_err(|e| api_err(kind::NOT_FOUND, format!("{e:#}")))?;
             if r.bytes.is_empty() {
@@ -1335,8 +1623,14 @@ impl Manager {
                 ));
             }
             if let Some(t) = &s.task {
-                if self.hub.view(|v| v.task(t).is_some_and(|t| t.state.is_active())) {
-                    return Err(api_err(kind::INVALID_STATE, format!("session {} is already running as task {t}", s.session_id)));
+                if self
+                    .hub
+                    .view(|v| v.task(t).is_some_and(|t| t.state.is_active()))
+                {
+                    return Err(api_err(
+                        kind::INVALID_STATE,
+                        format!("session {} is already running as task {t}", s.session_id),
+                    ));
                 }
             }
         }
@@ -1344,12 +1638,19 @@ impl Manager {
             .cwd
             .clone()
             .or_else(|| found.and_then(|s| s.cwd.clone()))
-            .ok_or_else(|| api_err(kind::NOT_FOUND, format!("no folder known for session {}; pass one", p.session_id)))?;
+            .ok_or_else(|| {
+                api_err(
+                    kind::NOT_FOUND,
+                    format!("no folder known for session {}; pass one", p.session_id),
+                )
+            })?;
         self.start_task_inner(
             api::StartParams {
                 repo: cwd,
                 prompt: p.prompt.unwrap_or_else(|| "continue".into()),
-                title: found.and_then(|s| s.title.clone()).map(|t| truncate(&t, 60)),
+                title: found
+                    .and_then(|s| s.title.clone())
+                    .map(|t| truncate(&t, 60)),
                 in_place: true,
                 ..Default::default()
             },
@@ -1397,7 +1698,9 @@ async fn run_capture(cmd: &[String]) -> Result<String> {
         .stdin(std::process::Stdio::null())
         .kill_on_drop(true)
         .output();
-    let out = tokio::time::timeout(Duration::from_secs(15), fut).await.context("timed out")??;
+    let out = tokio::time::timeout(Duration::from_secs(15), fut)
+        .await
+        .context("timed out")??;
     if !out.status.success() {
         anyhow::bail!("{}", String::from_utf8_lossy(&out.stderr).trim());
     }
@@ -1431,7 +1734,12 @@ mod tests {
         v.task("t1").unwrap().clone()
     }
 
-    fn cx<'a>(view: &'a TaskView, policy: &'a Policy, open: &'a [RequestInfo], new_id: &'a dyn Fn() -> String) -> LineCtx<'a> {
+    fn cx<'a>(
+        view: &'a TaskView,
+        policy: &'a Policy,
+        open: &'a [RequestInfo],
+        new_id: &'a dyn Fn() -> String,
+    ) -> LineCtx<'a> {
         LineCtx {
             view,
             policy,
@@ -1471,7 +1779,9 @@ mod tests {
             slash_commands: vec![],
         };
         let plan = plan_line(&cx(&v, &p, &[], &id), init());
-        assert!(matches!(&plan.events[0], EventBody::SessionId { session_id } if session_id == "s1"));
+        assert!(
+            matches!(&plan.events[0], EventBody::SessionId { session_id } if session_id == "s1")
+        );
         assert!(matches!(&plan.events[1], EventBody::Init { .. }));
         v.session_id = Some("s1".into());
         let plan = plan_line(&cx(&v, &p, &[], &id), init());
@@ -1490,45 +1800,95 @@ mod tests {
                 blocks: vec![
                     Block::Text("  ".into()),
                     Block::Text("Hello".into()),
-                    Block::ToolUse { id: "a".into(), name: "TodoWrite".into(), input: json!({"todos":[{"content":"x","status":"pending"}]}) },
-                    Block::ToolUse { id: "b".into(), name: "Bash".into(), input: json!({"command":"cargo test"}) },
+                    Block::ToolUse {
+                        id: "a".into(),
+                        name: "TodoWrite".into(),
+                        input: json!({"todos":[{"content":"x","status":"pending"}]}),
+                    },
+                    Block::ToolUse {
+                        id: "b".into(),
+                        name: "Bash".into(),
+                        input: json!({"command":"cargo test"}),
+                    },
                 ],
             },
         );
         let kinds: Vec<&str> = plan.events.iter().map(|e| e.kind_name()).collect();
         assert_eq!(kinds, vec!["say", "plan", "step", "step"]);
-        assert!(matches!(&plan.events[3], EventBody::Step { parent: Some(p), tool, .. } if p == "toolu_parent" && tool == "Bash"));
+        assert!(
+            matches!(&plan.events[3], EventBody::Step { parent: Some(p), tool, .. } if p == "toolu_parent" && tool == "Bash")
+        );
     }
 
     #[test]
     fn tool_results_cut_big_output_and_refresh_files_for_edits() {
         let mut v = view();
-        v.open_steps.push(OpenStep { id: "e1".into(), tool: "Edit".into(), title: "Editing a".into(), detail: String::new() });
-        v.open_steps.push(OpenStep { id: "r1".into(), tool: "Read".into(), title: "Reading".into(), detail: String::new() });
+        v.open_steps.push(OpenStep {
+            id: "e1".into(),
+            tool: "Edit".into(),
+            title: "Editing a".into(),
+            detail: String::new(),
+        });
+        v.open_steps.push(OpenStep {
+            id: "r1".into(),
+            tool: "Read".into(),
+            title: "Reading".into(),
+            detail: String::new(),
+        });
         let p = Policy::default();
         let id = || "r1".to_string();
         let big = "x".repeat(500);
         let plan = plan_line(
             &cx(&v, &p, &[], &id),
             Incoming::ToolResults(vec![
-                proto::ToolResult { tool_use_id: "r1".into(), text: "small".into(), is_error: false },
-                proto::ToolResult { tool_use_id: "e1".into(), text: big, is_error: true },
+                proto::ToolResult {
+                    tool_use_id: "r1".into(),
+                    text: "small".into(),
+                    is_error: false,
+                },
+                proto::ToolResult {
+                    tool_use_id: "e1".into(),
+                    text: big,
+                    is_error: true,
+                },
             ]),
         );
         assert!(plan.refresh_files, "an edit finished");
         match (&plan.events[0], &plan.events[1]) {
-            (EventBody::StepDone { ok: true, output: Some(a), .. }, EventBody::StepDone { ok: false, output: Some(b), id }) => {
+            (
+                EventBody::StepDone {
+                    ok: true,
+                    output: Some(a),
+                    ..
+                },
+                EventBody::StepDone {
+                    ok: false,
+                    output: Some(b),
+                    id,
+                },
+            ) => {
                 assert_eq!(a.head, "small");
                 assert!(a.source.is_none());
                 assert_eq!(id, "e1");
                 assert!(b.tail.is_some());
-                assert_eq!(b.source, Some(OutputRef { child: "c1".into(), offset: 10, len: 20 }));
+                assert_eq!(
+                    b.source,
+                    Some(OutputRef {
+                        child: "c1".into(),
+                        offset: 10,
+                        len: 20
+                    })
+                );
             }
             other => panic!("{other:?}"),
         }
         let only_read = plan_line(
             &cx(&v, &p, &[], &id),
-            Incoming::ToolResults(vec![proto::ToolResult { tool_use_id: "r1".into(), text: "t".into(), is_error: false }]),
+            Incoming::ToolResults(vec![proto::ToolResult {
+                tool_use_id: "r1".into(),
+                text: "t".into(),
+                is_error: false,
+            }]),
         );
         assert!(!only_read.refresh_files);
     }
@@ -1539,33 +1899,46 @@ mod tests {
         v.last_total_cost = 0.25;
         let p = Policy::default();
         let id = || "r9".to_string();
-        let open = vec![
-            RequestInfo {
-                id: "r1".into(),
-                task: "t1".into(),
-                kind: RequestKind::Permission,
-                tool: "Bash".into(),
-                display_name: None,
-                description: None,
-                summary: String::new(),
-                input: Value::Null,
-                suggestions: vec![],
-                blocked_path: None,
-                tool_use_id: None,
-                agent_request: Some("a".into()),
-                revises: None,
-            },
-        ];
+        let open = vec![RequestInfo {
+            id: "r1".into(),
+            task: "t1".into(),
+            kind: RequestKind::Permission,
+            tool: "Bash".into(),
+            display_name: None,
+            description: None,
+            summary: String::new(),
+            input: Value::Null,
+            suggestions: vec![],
+            blocked_path: None,
+            tool_use_id: None,
+            agent_request: Some("a".into()),
+            revises: None,
+        }];
         let mut c = cx(&v, &p, &open, &id);
         c.interrupted = true;
         let plan = plan_line(
             &c,
-            Incoming::Result { ok: false, subtype: "error_during_execution".into(), text: "x".into(), turns: Some(2), duration_ms: Some(5), total_cost_usd: Some(0.75) },
+            Incoming::Result {
+                ok: false,
+                subtype: "error_during_execution".into(),
+                text: "x".into(),
+                turns: Some(2),
+                duration_ms: Some(5),
+                total_cost_usd: Some(0.75),
+            },
         );
         assert!(plan.turn_ended);
-        assert!(matches!(&plan.events[0], EventBody::RequestWithdrawn { request, .. } if request == "r1"));
+        assert!(
+            matches!(&plan.events[0], EventBody::RequestWithdrawn { request, .. } if request == "r1")
+        );
         match &plan.events[1] {
-            EventBody::Turn { interrupted: true, cost_usd: Some(c), cost_delta_usd, ok: false, .. } => {
+            EventBody::Turn {
+                interrupted: true,
+                cost_usd: Some(c),
+                cost_delta_usd,
+                ok: false,
+                ..
+            } => {
                 assert_eq!(*c, 0.75);
                 assert!((cost_delta_usd - 0.5).abs() < 1e-9);
             }
@@ -1576,9 +1949,18 @@ mod tests {
         v2.last_total_cost = 5.0;
         let plan = plan_line(
             &cx(&v2, &p, &[], &id),
-            Incoming::Result { ok: true, subtype: "success".into(), text: "ok".into(), turns: None, duration_ms: None, total_cost_usd: Some(0.1) },
+            Incoming::Result {
+                ok: true,
+                subtype: "success".into(),
+                text: "ok".into(),
+                turns: None,
+                duration_ms: None,
+                total_cost_usd: Some(0.1),
+            },
         );
-        assert!(matches!(&plan.events[0], EventBody::Turn { cost_delta_usd, .. } if *cost_delta_usd == 0.0));
+        assert!(
+            matches!(&plan.events[0], EventBody::Turn { cost_delta_usd, .. } if *cost_delta_usd == 0.0)
+        );
     }
 
     #[test]
@@ -1589,7 +1971,10 @@ mod tests {
         let id = || "r7".to_string();
         let mut c = cx(&v, &p, &[], &id);
         c.revises = Some("r3".into());
-        let plan = plan_line(&c, ask("Bash", json!({"command": "git push origin sphere/x"})));
+        let plan = plan_line(
+            &c,
+            ask("Bash", json!({"command": "git push origin sphere/x"})),
+        );
         assert!(plan.writes.is_empty(), "nothing is answered yet");
         match &plan.events[0] {
             EventBody::Request { request } => {
@@ -1624,8 +2009,13 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
-        let plan = plan_line(&cx(&v, &p, &[], &id), ask("ExitPlanMode", json!({"plan": "do it"})));
-        assert!(matches!(&plan.events[0], EventBody::Request { request } if request.kind == RequestKind::Plan));
+        let plan = plan_line(
+            &cx(&v, &p, &[], &id),
+            ask("ExitPlanMode", json!({"plan": "do it"})),
+        );
+        assert!(
+            matches!(&plan.events[0], EventBody::Request { request } if request.kind == RequestKind::Plan)
+        );
     }
 
     #[test]
@@ -1633,22 +2023,49 @@ mod tests {
         let mut v = view();
         v.branch = Some("sphere/x".into());
         let mut p = Policy::default();
-        p.auto.push(AutoRule { tool: "Bash".into(), pattern: Some("git push * {branch}".into()), decision: Decision::Allow, name: Some("push-own-branch".into()) });
-        p.auto.push(AutoRule { tool: "Bash".into(), pattern: Some("*prod*".into()), decision: Decision::Deny, name: None });
+        p.auto.push(AutoRule {
+            tool: "Bash".into(),
+            pattern: Some("git push * {branch}".into()),
+            decision: Decision::Allow,
+            name: Some("push-own-branch".into()),
+        });
+        p.auto.push(AutoRule {
+            tool: "Bash".into(),
+            pattern: Some("*prod*".into()),
+            decision: Decision::Deny,
+            name: None,
+        });
         let id = || "r1".to_string();
-        let plan = plan_line(&cx(&v, &p, &[], &id), ask("Bash", json!({"command": "git push origin sphere/x"})));
+        let plan = plan_line(
+            &cx(&v, &p, &[], &id),
+            ask("Bash", json!({"command": "git push origin sphere/x"})),
+        );
         let w: Value = serde_json::from_str(&plan.writes[0]).unwrap();
         assert_eq!(w["response"]["request_id"], "req_1");
         assert_eq!(w["response"]["response"]["behavior"], "allow");
-        assert_eq!(w["response"]["response"]["updatedInput"]["command"], "git push origin sphere/x");
-        assert!(matches!(&plan.events[0], EventBody::AutoAnswered { allow: true, rule, .. } if rule == "push-own-branch"));
+        assert_eq!(
+            w["response"]["response"]["updatedInput"]["command"],
+            "git push origin sphere/x"
+        );
+        assert!(
+            matches!(&plan.events[0], EventBody::AutoAnswered { allow: true, rule, .. } if rule == "push-own-branch")
+        );
 
-        let plan = plan_line(&cx(&v, &p, &[], &id), ask("Bash", json!({"command": "deploy prod"})));
+        let plan = plan_line(
+            &cx(&v, &p, &[], &id),
+            ask("Bash", json!({"command": "deploy prod"})),
+        );
         let w: Value = serde_json::from_str(&plan.writes[0]).unwrap();
         assert_eq!(w["response"]["response"]["behavior"], "deny");
-        assert!(w["response"]["response"]["message"].as_str().unwrap().contains("policy"));
+        assert!(w["response"]["response"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("policy"));
 
-        let plan = plan_line(&cx(&v, &p, &[], &id), ask("Bash", json!({"command": "git push origin main"})));
+        let plan = plan_line(
+            &cx(&v, &p, &[], &id),
+            ask("Bash", json!({"command": "git push origin main"})),
+        );
         assert!(plan.writes.is_empty());
         assert!(matches!(&plan.events[0], EventBody::Request { .. }));
     }
@@ -1675,21 +2092,53 @@ mod tests {
         }];
         let c = cx(&v, &p, &open, &id);
         assert_eq!(plan_line(&c, Incoming::Delta("hi".into())).live, vec!["hi"]);
-        let plan = plan_line(&c, Incoming::ControlCancel { request_id: "req_4".into() });
-        assert!(matches!(&plan.events[0], EventBody::RequestWithdrawn { request, .. } if request == "r4"));
-        let plan = plan_line(&c, Incoming::ControlResponse { request_id: "sphere-1".into(), ok: true, error: None, response: Value::Null });
+        let plan = plan_line(
+            &c,
+            Incoming::ControlCancel {
+                request_id: "req_4".into(),
+            },
+        );
+        assert!(
+            matches!(&plan.events[0], EventBody::RequestWithdrawn { request, .. } if request == "r4")
+        );
+        let plan = plan_line(
+            &c,
+            Incoming::ControlResponse {
+                request_id: "sphere-1".into(),
+                ok: true,
+                error: None,
+                response: Value::Null,
+            },
+        );
         assert_eq!(plan.ctl, Some(("sphere-1".into(), true, None)));
-        let plan = plan_line(&c, Incoming::OtherControl { request_id: "x".into(), subtype: "hook_callback".into() });
+        let plan = plan_line(
+            &c,
+            Incoming::OtherControl {
+                request_id: "x".into(),
+                subtype: "hook_callback".into(),
+            },
+        );
         assert!(plan.writes[0].contains("\"error\""));
-        assert!(plan_line(&c, Incoming::Other("weird".into())).events.is_empty());
+        assert!(plan_line(&c, Incoming::Other("weird".into()))
+            .events
+            .is_empty());
     }
 
     #[test]
     fn the_continue_message_lists_cut_off_calls_and_the_users_note() {
         let mut v = view();
         assert_eq!(continue_message(&v, None), "continue");
-        v.open_steps.push(OpenStep { id: "s".into(), tool: "Bash".into(), title: "Running cargo test".into(), detail: String::new() });
+        v.open_steps.push(OpenStep {
+            id: "s".into(),
+            tool: "Bash".into(),
+            title: "Running cargo test".into(),
+            detail: String::new(),
+        });
         let m = continue_message(&v, Some("skip the push".into()));
-        assert!(m.starts_with("continue") && m.contains("Running cargo test") && m.contains("skip the push"));
+        assert!(
+            m.starts_with("continue")
+                && m.contains("Running cargo test")
+                && m.contains("skip the push")
+        );
     }
 }

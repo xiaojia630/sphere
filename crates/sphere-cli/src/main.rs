@@ -110,17 +110,24 @@ enum AnswerArg {
 }
 
 fn socket_path(cli: &Cli) -> PathBuf {
-    cli.socket.clone().unwrap_or_else(sphere_proto::paths::default_socket)
+    cli.socket
+        .clone()
+        .unwrap_or_else(sphere_proto::paths::default_socket)
 }
 
 fn style() -> Style {
-    Style { color: unsafe { libc::isatty(1) } == 1 }
+    Style {
+        color: unsafe { libc::isatty(1) } == 1,
+    }
 }
 
 async fn connect(socket: &Path) -> Result<Client> {
-    let c = Client::connect(socket)
-        .await
-        .with_context(|| format!("is sphered running? (`sphere daemon`) socket: {}", socket.display()))?;
+    let c = Client::connect(socket).await.with_context(|| {
+        format!(
+            "is sphered running? (`sphere daemon`) socket: {}",
+            socket.display()
+        )
+    })?;
     c.hello(ClientKind::Cli).await?;
     Ok(c)
 }
@@ -135,7 +142,13 @@ fn print_lines(lines: Vec<String>) {
 
 /// Print events as they come. With `until`, stop when that task's first turn
 /// ends (exit code 0 if it went well).
-async fn watch(client: &Client, task: Option<String>, from: u64, typing: bool, until: Option<String>) -> Result<ExitCode> {
+async fn watch(
+    client: &Client,
+    task: Option<String>,
+    from: u64,
+    typing: bool,
+    until: Option<String>,
+) -> Result<ExitCode> {
     let st = style();
     let (_, mut sub) = client.subscribe(from, task).await?;
     while let Some(update) = sub.next().await {
@@ -144,10 +157,18 @@ async fn watch(client: &Client, task: Option<String>, from: u64, typing: bool, u
                 print_lines(render::event_lines(&e, &st));
                 if until.as_deref() == Some(e.task.as_str()) {
                     match &e.body {
-                        EventBody::Turn { ok, interrupted, .. } => {
-                            return Ok(if *ok || *interrupted { ExitCode::SUCCESS } else { ExitCode::FAILURE })
+                        EventBody::Turn {
+                            ok, interrupted, ..
+                        } => {
+                            return Ok(if *ok || *interrupted {
+                                ExitCode::SUCCESS
+                            } else {
+                                ExitCode::FAILURE
+                            })
                         }
-                        EventBody::Failed { .. } | EventBody::Stopped {} => return Ok(ExitCode::FAILURE),
+                        EventBody::Failed { .. } | EventBody::Stopped {} => {
+                            return Ok(ExitCode::FAILURE)
+                        }
                         _ => {}
                     }
                 }
@@ -194,7 +215,10 @@ async fn run() -> Result<ExitCode> {
         Command::Daemon { mut args } => {
             use std::os::unix::process::CommandExt;
             if let Some(s) = &cli.socket {
-                args.splice(0..0, ["--socket".to_string(), s.to_string_lossy().to_string()]);
+                args.splice(
+                    0..0,
+                    ["--socket".to_string(), s.to_string_lossy().to_string()],
+                );
             }
             let err = std::process::Command::new(find_sphered()).args(args).exec();
             bail!("could not start sphered: {err}");
@@ -204,14 +228,29 @@ async fn run() -> Result<ExitCode> {
             let checks = doctor::run_all(&agent, &dir, &socket).await;
             println!("{}", doctor::render(&checks));
             let failed = checks.iter().any(|c| c.level == doctor::Level::Fail);
-            return Ok(if failed { ExitCode::FAILURE } else { ExitCode::SUCCESS });
+            return Ok(if failed {
+                ExitCode::FAILURE
+            } else {
+                ExitCode::SUCCESS
+            });
         }
         _ => {}
     }
     let client = connect(&socket).await?;
     match cli.command {
-        Command::Run { repo, task, in_place, budget, title, mode, allow_rewrites, follow } => {
-            let repo = repo.canonicalize().with_context(|| format!("{} does not exist", repo.display()))?;
+        Command::Run {
+            repo,
+            task,
+            in_place,
+            budget,
+            title,
+            mode,
+            allow_rewrites,
+            follow,
+        } => {
+            let repo = repo
+                .canonicalize()
+                .with_context(|| format!("{} does not exist", repo.display()))?;
             let id = client
                 .start_task(StartParams {
                     repo: repo.to_string_lossy().to_string(),
@@ -245,8 +284,17 @@ async fn run() -> Result<ExitCode> {
             };
             return watch(&client, task, from, typing, None).await;
         }
-        Command::Answer { request, answer, text, always, input } => {
-            let input = input.map(|i| serde_json::from_str(&i)).transpose().context("--input is not JSON")?;
+        Command::Answer {
+            request,
+            answer,
+            text,
+            always,
+            input,
+        } => {
+            let input = input
+                .map(|i| serde_json::from_str(&i))
+                .transpose()
+                .context("--input is not JSON")?;
             client
                 .answer(sphere_client::AnswerParams {
                     request: request.clone(),
@@ -277,12 +325,19 @@ async fn run() -> Result<ExitCode> {
                     s.session_id,
                     if s.running { "running" } else { "idle   " },
                     s.cwd.as_deref().unwrap_or("-"),
-                    s.task.as_ref().map(|t| format!("  (task {t})")).unwrap_or_default(),
+                    s.task
+                        .as_ref()
+                        .map(|t| format!("  (task {t})"))
+                        .unwrap_or_default(),
                     s.title.as_deref().unwrap_or("")
                 );
             }
         }
-        Command::BringIn { session, cwd, prompt } => {
+        Command::BringIn {
+            session,
+            cwd,
+            prompt,
+        } => {
             let id = client
                 .bring_in(sphere_client::BringInParams {
                     session_id: session,

@@ -68,7 +68,11 @@ mod tests {
     #[test]
     fn a_child_descends_from_its_parent_and_a_stranger_does_not() {
         let me = std::process::id() as i32;
-        let mut child = Command::new("sleep").arg("5").stdout(Stdio::null()).spawn().unwrap();
+        let mut child = Command::new("sleep")
+            .arg("5")
+            .stdout(Stdio::null())
+            .spawn()
+            .unwrap();
         let pid = child.id() as i32;
         assert!(descends_from(pid, &[me]));
         assert!(descends_from(pid, &[pid]));
@@ -89,7 +93,9 @@ mod tests {
             .unwrap();
         use std::io::BufRead;
         let mut line = String::new();
-        std::io::BufReader::new(leader.stdout.take().unwrap()).read_line(&mut line).unwrap();
+        std::io::BufReader::new(leader.stdout.take().unwrap())
+            .read_line(&mut line)
+            .unwrap();
         let grandchild: i32 = line.trim().parse().unwrap();
         let sid = unsafe { libc::getsid(leader.id() as i32) };
         // Not a session leader here: the grandchild shares *our* session, so a

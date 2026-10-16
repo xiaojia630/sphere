@@ -21,7 +21,10 @@ fn is_transport(e: &anyhow::Error) -> bool {
 
 impl HostLink {
     pub fn new(cfg: Arc<Config>) -> HostLink {
-        HostLink { cfg, client: Mutex::new(None) }
+        HostLink {
+            cfg,
+            client: Mutex::new(None),
+        }
     }
 
     /// Connect, starting the host (detached) if nothing answers.
@@ -82,9 +85,17 @@ impl HostLink {
         }
     }
 
-    pub async fn read(&self, child: &str, stream: Stream, from: u64, max: Option<usize>) -> Result<sphere_host::DecodedRead> {
+    pub async fn read(
+        &self,
+        child: &str,
+        stream: Stream,
+        from: u64,
+        max: Option<usize>,
+    ) -> Result<sphere_host::DecodedRead> {
         match self.get().await?.read(child, stream, from, max).await {
-            Err(e) if is_transport(&e) => self.recover().await?.read(child, stream, from, max).await,
+            Err(e) if is_transport(&e) => {
+                self.recover().await?.read(child, stream, from, max).await
+            }
             other => other,
         }
     }

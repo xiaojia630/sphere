@@ -58,16 +58,25 @@ impl Store {
     }
 
     pub fn journal_mode(&self) -> Result<String> {
-        Ok(self.conn.pragma_query_value(None, "journal_mode", |r| r.get(0))?)
+        Ok(self
+            .conn
+            .pragma_query_value(None, "journal_mode", |r| r.get(0))?)
     }
 
     /// Append events (and move an offset) atomically. Returns the stored events.
-    pub fn append(&mut self, task: &str, bodies: &[EventBody], offset: Option<&OffsetUpdate>) -> Result<Vec<Event>> {
+    pub fn append(
+        &mut self,
+        task: &str,
+        bodies: &[EventBody],
+        offset: Option<&OffsetUpdate>,
+    ) -> Result<Vec<Event>> {
         let tx = self.conn.transaction()?;
         let at = now_rfc3339();
         let mut out = Vec::with_capacity(bodies.len());
         {
-            let mut stmt = tx.prepare_cached("INSERT INTO events (task, at, kind, body) VALUES (?1, ?2, ?3, ?4)")?;
+            let mut stmt = tx.prepare_cached(
+                "INSERT INTO events (task, at, kind, body) VALUES (?1, ?2, ?3, ?4)",
+            )?;
             for body in bodies {
                 let json = serde_json::to_string(body)?;
                 stmt.execute(params![task, at, body.kind_name(), json])?;
@@ -99,7 +108,12 @@ impl Store {
 
     fn row_to_event(seq: i64, task: String, at: String, body: String) -> Option<Event> {
         match serde_json::from_str::<EventBody>(&body) {
-            Ok(body) => Some(Event { seq: seq as u64, task, at, body }),
+            Ok(body) => Some(Event {
+                seq: seq as u64,
+                task,
+                at,
+                body,
+            }),
             Err(e) => {
                 tracing::warn!(seq, "skipping unreadable event: {e}");
                 None
@@ -108,15 +122,22 @@ impl Store {
     }
 
     /// Events with `since < seq <= upto`, oldest first, at most `limit`.
-    pub fn events_after(&self, since: u64, upto: u64, task: Option<&str>, limit: usize) -> Result<Vec<Event>> {
+    pub fn events_after(
+        &self,
+        since: u64,
+        upto: u64,
+        task: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<Event>> {
         let mut stmt = self.conn.prepare_cached(
             "SELECT seq, task, at, body FROM events
              WHERE seq > ?1 AND seq <= ?2 AND (?3 IS NULL OR task = ?3)
              ORDER BY seq LIMIT ?4",
         )?;
-        let rows = stmt.query_map(params![since as i64, upto as i64, task, limit as i64], |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
-        })?;
+        let rows = stmt.query_map(
+            params![since as i64, upto as i64, task, limit as i64],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )?;
         let mut out = vec![];
         for row in rows {
             let (seq, task, at, body) = row?;
@@ -126,7 +147,12 @@ impl Store {
     }
 
     /// The newest `limit` events older than `before`, oldest first.
-    pub fn history(&self, task: Option<&str>, before: Option<u64>, limit: usize) -> Result<Vec<Event>> {
+    pub fn history(
+        &self,
+        task: Option<&str>,
+        before: Option<u64>,
+        limit: usize,
+    ) -> Result<Vec<Event>> {
         let mut stmt = self.conn.prepare_cached(
             "SELECT seq, task, at, body FROM events
              WHERE seq < ?1 AND (?2 IS NULL OR task = ?2)
@@ -181,21 +207,35 @@ mod tests {
     fn queries_filter_and_page() {
         let mut s = Store::open_in_memory().unwrap();
         for i in 0..10 {
-            s.append(if i % 2 == 0 { "t1" } else { "t2" }, &[say(&i.to_string())], None).unwrap();
+            s.append(
+                if i % 2 == 0 { "t1" } else { "t2" },
+                &[say(&i.to_string())],
+                None,
+            )
+            .unwrap();
         }
         let all = s.events_after(0, 100, None, 100).unwrap();
         assert_eq!(all.len(), 10);
         let t1 = s.events_after(0, 100, Some("t1"), 100).unwrap();
         assert_eq!(t1.len(), 5);
         let window = s.events_after(3, 6, None, 100).unwrap();
-        assert_eq!(window.iter().map(|e| e.seq).collect::<Vec<_>>(), vec![4, 5, 6]);
+        assert_eq!(
+            window.iter().map(|e| e.seq).collect::<Vec<_>>(),
+            vec![4, 5, 6]
+        );
         let page = s.events_after(0, 100, None, 4).unwrap();
         assert_eq!(page.len(), 4);
 
         let hist = s.history(None, None, 3).unwrap();
-        assert_eq!(hist.iter().map(|e| e.seq).collect::<Vec<_>>(), vec![8, 9, 10]);
+        assert_eq!(
+            hist.iter().map(|e| e.seq).collect::<Vec<_>>(),
+            vec![8, 9, 10]
+        );
         let older = s.history(None, Some(8), 3).unwrap();
-        assert_eq!(older.iter().map(|e| e.seq).collect::<Vec<_>>(), vec![5, 6, 7]);
+        assert_eq!(
+            older.iter().map(|e| e.seq).collect::<Vec<_>>(),
+            vec![5, 6, 7]
+        );
         let h2 = s.history(Some("t2"), None, 2).unwrap();
         assert!(h2.iter().all(|e| e.task == "t2") && h2.len() == 2);
     }
@@ -204,7 +244,11 @@ mod tests {
     fn offsets_move_with_the_events_in_one_transaction() {
         let mut s = Store::open_in_memory().unwrap();
         assert_eq!(s.offset("c1", "out").unwrap(), 0);
-        let o = OffsetUpdate { child: "c1".into(), stream: "out", offset: 120 };
+        let o = OffsetUpdate {
+            child: "c1".into(),
+            stream: "out",
+            offset: 120,
+        };
         s.append("t1", &[say("x")], Some(&o)).unwrap();
         assert_eq!(s.offset("c1", "out").unwrap(), 120);
         let o2 = OffsetUpdate { offset: 200, ..o };

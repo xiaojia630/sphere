@@ -59,12 +59,18 @@ impl Daemon {
         let hub = Arc::new(hub::Hub::open(&cfg.db_path(), cfg.subscriber_queue)?);
         let mgr = manager::Manager::new(cfg.clone(), hub);
         mgr.start().await?;
-        let listener = UnixListener::bind(&socket).with_context(|| format!("bind {}", socket.display()))?;
+        let listener =
+            UnixListener::bind(&socket).with_context(|| format!("bind {}", socket.display()))?;
         std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600))?;
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let join = tokio::spawn(server::serve(mgr.clone(), listener, shutdown_rx));
         tracing::info!(socket = %socket.display(), "sphered ready");
-        Ok(Daemon { manager: mgr, socket, shutdown_tx, join })
+        Ok(Daemon {
+            manager: mgr,
+            socket,
+            shutdown_tx,
+            join,
+        })
     }
 
     /// Stop serving. Agents are not touched.

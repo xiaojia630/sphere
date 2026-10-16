@@ -8,7 +8,11 @@ use sphere_proto::{PlanItem, StepKind};
 #[derive(Debug, Clone, PartialEq)]
 pub enum Block {
     Text(String),
-    ToolUse { id: String, name: String, input: Value },
+    ToolUse {
+        id: String,
+        name: String,
+        input: Value,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -101,7 +105,11 @@ pub fn parse_line(line: &str) -> Result<Incoming, serde_json::Error> {
             slash_commands: v
                 .get("slash_commands")
                 .and_then(|a| a.as_array())
-                .map(|a| a.iter().filter_map(|c| c.as_str().map(str::to_string)).collect())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|c| c.as_str().map(str::to_string))
+                        .collect()
+                })
                 .unwrap_or_default(),
         },
         "assistant" => {
@@ -123,7 +131,10 @@ pub fn parse_line(line: &str) -> Result<Incoming, serde_json::Error> {
                         .collect()
                 })
                 .unwrap_or_default();
-            Incoming::Assistant { blocks, parent: s(&v, "parent_tool_use_id") }
+            Incoming::Assistant {
+                blocks,
+                parent: s(&v, "parent_tool_use_id"),
+            }
         }
         "user" => {
             let results: Vec<ToolResult> = v
@@ -137,7 +148,10 @@ pub fn parse_line(line: &str) -> Result<Incoming, serde_json::Error> {
                             Some(ToolResult {
                                 tool_use_id: s(b, "tool_use_id")?,
                                 text: content_text(b.get("content").unwrap_or(&Value::Null)),
-                                is_error: b.get("is_error").and_then(|e| e.as_bool()).unwrap_or(false),
+                                is_error: b
+                                    .get("is_error")
+                                    .and_then(|e| e.as_bool())
+                                    .unwrap_or(false),
                             })
                         })
                         .collect()
@@ -167,7 +181,12 @@ pub fn parse_line(line: &str) -> Result<Incoming, serde_json::Error> {
             let text = s(&v, "result").unwrap_or_else(|| {
                 v.get("errors")
                     .and_then(|e| e.as_array())
-                    .map(|a| a.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join("; "))
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|x| x.as_str())
+                            .collect::<Vec<_>>()
+                            .join("; ")
+                    })
                     .filter(|t| !t.is_empty())
                     .unwrap_or_else(|| subtype.clone())
             });
@@ -213,7 +232,9 @@ pub fn parse_line(line: &str) -> Result<Incoming, serde_json::Error> {
                 response: r.get("response").cloned().unwrap_or(Value::Null),
             }
         }
-        "control_cancel_request" => Incoming::ControlCancel { request_id: s(&v, "request_id").unwrap_or_default() },
+        "control_cancel_request" => Incoming::ControlCancel {
+            request_id: s(&v, "request_id").unwrap_or_default(),
+        },
         other => Incoming::Other(other.to_string()),
     })
 }
@@ -230,7 +251,11 @@ pub fn user_message(text: &str) -> String {
     line(json!({"type": "user", "message": {"role": "user", "content": text}}))
 }
 
-pub fn allow_response(request_id: &str, updated_input: &Value, updated_permissions: Option<Vec<Value>>) -> String {
+pub fn allow_response(
+    request_id: &str,
+    updated_input: &Value,
+    updated_permissions: Option<Vec<Value>>,
+) -> String {
     let mut resp = json!({"behavior": "allow", "updatedInput": updated_input});
     if let Some(p) = updated_permissions {
         resp["updatedPermissions"] = Value::Array(p);
@@ -259,7 +284,10 @@ pub fn interrupt_request(request_id: &str) -> String {
 }
 
 pub fn set_mode_request(request_id: &str, mode: &str) -> String {
-    control_request(request_id, json!({"subtype": "set_permission_mode", "mode": mode}))
+    control_request(
+        request_id,
+        json!({"subtype": "set_permission_mode", "mode": mode}),
+    )
 }
 
 pub fn set_model_request(request_id: &str, model: &str) -> String {
@@ -311,7 +339,10 @@ pub fn build_args(a: &AgentArgs) -> Vec<String> {
 /// first question.
 pub fn question_answer_input(input: &Value, answer: &str) -> Value {
     let mut out = input.clone();
-    if let Some(q) = input.pointer("/questions/0/question").and_then(|q| q.as_str()) {
+    if let Some(q) = input
+        .pointer("/questions/0/question")
+        .and_then(|q| q.as_str())
+    {
         out["answers"] = json!({ q: answer });
     }
     out
@@ -320,7 +351,11 @@ pub fn question_answer_input(input: &Value, answer: &str) -> Value {
 // ---- reading steps ----------------------------------------------------------
 
 fn first_line(s: &str, max: usize) -> String {
-    let l = s.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim();
+    let l = s
+        .lines()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or("")
+        .trim();
     let mut out: String = l.chars().take(max).collect();
     if l.chars().count() > max {
         out.push('…');
@@ -333,13 +368,41 @@ fn first_line(s: &str, max: usize) -> String {
 pub fn step_info(tool: &str, input: &Value) -> (StepKind, String, String) {
     let f = |k: &str| input.get(k).and_then(|v| v.as_str()).unwrap_or("");
     match tool {
-        "Read" => (StepKind::Read, format!("Reading {}", f("file_path")), f("file_path").into()),
-        "Edit" | "MultiEdit" | "Write" => (StepKind::Edit, format!("Editing {}", f("file_path")), f("file_path").into()),
-        "NotebookEdit" => (StepKind::Edit, format!("Editing {}", f("notebook_path")), f("notebook_path").into()),
-        "Bash" => (StepKind::Run, format!("Running {}", first_line(f("command"), 80)), f("command").into()),
-        "Grep" | "Glob" => (StepKind::Search, format!("Searching {}", f("pattern")), f("pattern").into()),
-        "WebFetch" => (StepKind::Web, format!("Fetching {}", f("url")), f("url").into()),
-        "WebSearch" => (StepKind::Web, format!("Searching the web for {}", f("query")), f("query").into()),
+        "Read" => (
+            StepKind::Read,
+            format!("Reading {}", f("file_path")),
+            f("file_path").into(),
+        ),
+        "Edit" | "MultiEdit" | "Write" => (
+            StepKind::Edit,
+            format!("Editing {}", f("file_path")),
+            f("file_path").into(),
+        ),
+        "NotebookEdit" => (
+            StepKind::Edit,
+            format!("Editing {}", f("notebook_path")),
+            f("notebook_path").into(),
+        ),
+        "Bash" => (
+            StepKind::Run,
+            format!("Running {}", first_line(f("command"), 80)),
+            f("command").into(),
+        ),
+        "Grep" | "Glob" => (
+            StepKind::Search,
+            format!("Searching {}", f("pattern")),
+            f("pattern").into(),
+        ),
+        "WebFetch" => (
+            StepKind::Web,
+            format!("Fetching {}", f("url")),
+            f("url").into(),
+        ),
+        "WebSearch" => (
+            StepKind::Web,
+            format!("Searching the web for {}", f("query")),
+            f("query").into(),
+        ),
         "Task" | "Agent" => (
             StepKind::Delegate,
             format!("Delegating: {}", first_line(f("description"), 80)),
@@ -351,7 +414,13 @@ pub fn step_info(tool: &str, input: &Value) -> (StepKind, String, String) {
             StepKind::Other,
             format!(
                 "Asking: {}",
-                first_line(input.pointer("/questions/0/question").and_then(|q| q.as_str()).unwrap_or(""), 80)
+                first_line(
+                    input
+                        .pointer("/questions/0/question")
+                        .and_then(|q| q.as_str())
+                        .unwrap_or(""),
+                    80
+                )
             ),
             String::new(),
         ),
@@ -370,7 +439,11 @@ pub fn plan_items(input: &Value) -> Vec<PlanItem> {
                 .filter_map(|t| {
                     Some(PlanItem {
                         text: t.get("content").and_then(|c| c.as_str())?.to_string(),
-                        status: t.get("status").and_then(|c| c.as_str()).unwrap_or("pending").to_string(),
+                        status: t
+                            .get("status")
+                            .and_then(|c| c.as_str())
+                            .unwrap_or("pending")
+                            .to_string(),
                     })
                 })
                 .collect()
@@ -380,11 +453,15 @@ pub fn plan_items(input: &Value) -> Vec<PlanItem> {
 
 /// Tools that can change files, which makes "files touched" worth refreshing.
 pub fn may_change_files(tool: &str) -> bool {
-    matches!(tool, "Edit" | "MultiEdit" | "Write" | "NotebookEdit" | "Bash")
+    matches!(
+        tool,
+        "Edit" | "MultiEdit" | "Write" | "NotebookEdit" | "Bash"
+    )
 }
 
 const OUTBOUND_COMMANDS: &[&str] = &[
-    "curl", "wget", "ssh", "scp", "rsync", "gh", "nc", "ncat", "sftp", "ftp", "telnet", "sendmail", "mail",
+    "curl", "wget", "ssh", "scp", "rsync", "gh", "nc", "ncat", "sftp", "ftp", "telnet", "sendmail",
+    "mail",
 ];
 const OUTBOUND_PREFIXES: &[&str] = &[
     "git push",
@@ -396,7 +473,18 @@ const OUTBOUND_PREFIXES: &[&str] = &[
     "twine upload",
 ];
 const OUTBOUND_MCP_WORDS: &[&str] = &[
-    "send", "post", "message", "email", "mail", "slack", "publish", "tweet", "notify", "comment", "merge", "pull_request",
+    "send",
+    "post",
+    "message",
+    "email",
+    "mail",
+    "slack",
+    "publish",
+    "tweet",
+    "notify",
+    "comment",
+    "merge",
+    "pull_request",
 ];
 
 /// Does this tool call send something off the machine? Used to decide whether
@@ -410,12 +498,14 @@ pub fn is_outbound(tool: &str, detail_or_input: &Value) -> bool {
                 .and_then(|c| c.as_str())
                 .or_else(|| detail_or_input.as_str())
                 .unwrap_or("");
-            cmd.split(|c| matches!(c, ';' | '&' | '|' | '\n' | '(' | ')' | '`'))
+            cmd.split([';', '&', '|', '\n', '(', ')', '`'])
                 .map(|seg| {
                     let mut words = seg.split_whitespace().peekable();
                     // Skip `VAR=x`, `sudo`, `time`, `then` ...
                     while let Some(w) = words.peek() {
-                        if w.contains('=') || matches!(*w, "sudo" | "time" | "then" | "do" | "exec" | "command") {
+                        if w.contains('=')
+                            || matches!(*w, "sudo" | "time" | "then" | "do" | "exec" | "command")
+                        {
                             words.next();
                         } else {
                             break;
@@ -425,7 +515,8 @@ pub fn is_outbound(tool: &str, detail_or_input: &Value) -> bool {
                 })
                 .any(|seg| {
                     let first = seg.split(' ').next().unwrap_or("");
-                    OUTBOUND_COMMANDS.contains(&first) || OUTBOUND_PREFIXES.iter().any(|p| seg.starts_with(p))
+                    OUTBOUND_COMMANDS.contains(&first)
+                        || OUTBOUND_PREFIXES.iter().any(|p| seg.starts_with(p))
                 })
         }
         t if t.starts_with("mcp__") => {
@@ -483,7 +574,14 @@ mod tests {
             {"type":"tool_result","tool_use_id":"b","is_error":true,"content":[{"type":"text","text":"l1"},{"type":"text","text":"l2"}]}]}}"#;
         match parse_line(l).unwrap() {
             Incoming::ToolResults(r) => {
-                assert_eq!(r[0], ToolResult { tool_use_id: "a".into(), text: "plain".into(), is_error: false });
+                assert_eq!(
+                    r[0],
+                    ToolResult {
+                        tool_use_id: "a".into(),
+                        text: "plain".into(),
+                        is_error: false
+                    }
+                );
                 assert_eq!(r[1].text, "l1\nl2");
                 assert!(r[1].is_error);
             }
@@ -500,7 +598,10 @@ mod tests {
         let d = r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"He"}}}"#;
         assert_eq!(parse_line(d).unwrap(), Incoming::Delta("He".into()));
         let other = r#"{"type":"stream_event","event":{"type":"message_start"}}"#;
-        assert_eq!(parse_line(other).unwrap(), Incoming::Other("stream_event".into()));
+        assert_eq!(
+            parse_line(other).unwrap(),
+            Incoming::Other("stream_event".into())
+        );
 
         let r = r#"{"type":"result","subtype":"success","is_error":false,"result":"All done","num_turns":3,"duration_ms":1200,"total_cost_usd":0.0123,"session_id":"s"}"#;
         assert_eq!(
@@ -522,7 +623,10 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
-        assert_eq!(parse_line(r#"{"type":"brand_new","x":1}"#).unwrap(), Incoming::Other("brand_new".into()));
+        assert_eq!(
+            parse_line(r#"{"type":"brand_new","x":1}"#).unwrap(),
+            Incoming::Other("brand_new".into())
+        );
         assert!(parse_line("not json").is_err());
     }
 
@@ -544,14 +648,20 @@ mod tests {
         let bare = r#"{"type":"control_request","request_id":"r","request":{"subtype":"can_use_tool","tool_name":"Edit","input":{}}}"#;
         match parse_line(bare).unwrap() {
             Incoming::CanUseTool(c) => {
-                assert!(c.display_name.is_none() && c.description.is_none() && c.suggestions.is_empty());
+                assert!(
+                    c.display_name.is_none() && c.description.is_none() && c.suggestions.is_empty()
+                );
             }
             other => panic!("{other:?}"),
         }
-        let other = r#"{"type":"control_request","request_id":"r","request":{"subtype":"hook_callback"}}"#;
+        let other =
+            r#"{"type":"control_request","request_id":"r","request":{"subtype":"hook_callback"}}"#;
         assert_eq!(
             parse_line(other).unwrap(),
-            Incoming::OtherControl { request_id: "r".into(), subtype: "hook_callback".into() }
+            Incoming::OtherControl {
+                request_id: "r".into(),
+                subtype: "hook_callback".into()
+            }
         );
     }
 
@@ -568,39 +678,71 @@ mod tests {
             }
         );
         let err = r#"{"type":"control_response","response":{"subtype":"error","request_id":"x","error":"nope"}}"#;
-        assert!(matches!(parse_line(err).unwrap(), Incoming::ControlResponse { ok: false, error: Some(e), .. } if e == "nope"));
+        assert!(
+            matches!(parse_line(err).unwrap(), Incoming::ControlResponse { ok: false, error: Some(e), .. } if e == "nope")
+        );
         assert_eq!(
             parse_line(r#"{"type":"control_cancel_request","request_id":"req_1"}"#).unwrap(),
-            Incoming::ControlCancel { request_id: "req_1".into() }
+            Incoming::ControlCancel {
+                request_id: "req_1".into()
+            }
         );
     }
 
     #[test]
     fn builds_the_lines_we_write() {
         let u: Value = serde_json::from_str(&user_message("hi")).unwrap();
-        assert_eq!(u, json!({"type":"user","message":{"role":"user","content":"hi"}}));
-        assert!(user_message("a\nb").trim_end().lines().count() == 1, "one JSON per line");
+        assert_eq!(
+            u,
+            json!({"type":"user","message":{"role":"user","content":"hi"}})
+        );
+        assert!(
+            user_message("a\nb").trim_end().lines().count() == 1,
+            "one JSON per line"
+        );
 
-        let a: Value = serde_json::from_str(&allow_response("req_1", &json!({"command": "ls"}), Some(vec![json!({"type":"addRules"})]))).unwrap();
+        let a: Value = serde_json::from_str(&allow_response(
+            "req_1",
+            &json!({"command": "ls"}),
+            Some(vec![json!({"type":"addRules"})]),
+        ))
+        .unwrap();
         assert_eq!(a["type"], "control_response");
         assert_eq!(a["response"]["subtype"], "success");
         assert_eq!(a["response"]["request_id"], "req_1");
         assert_eq!(a["response"]["response"]["behavior"], "allow");
         assert_eq!(a["response"]["response"]["updatedInput"]["command"], "ls");
-        assert_eq!(a["response"]["response"]["updatedPermissions"][0]["type"], "addRules");
+        assert_eq!(
+            a["response"]["response"]["updatedPermissions"][0]["type"],
+            "addRules"
+        );
 
         let plain: Value = serde_json::from_str(&allow_response("r", &json!({}), None)).unwrap();
-        assert!(plain["response"]["response"].get("updatedPermissions").is_none());
+        assert!(plain["response"]["response"]
+            .get("updatedPermissions")
+            .is_none());
 
         let d: Value = serde_json::from_str(&deny_response("req_2", "no thanks")).unwrap();
-        assert_eq!(d["response"]["response"], json!({"behavior":"deny","message":"no thanks"}));
+        assert_eq!(
+            d["response"]["response"],
+            json!({"behavior":"deny","message":"no thanks"})
+        );
 
         let i: Value = serde_json::from_str(&interrupt_request("sphere-1")).unwrap();
-        assert_eq!(i, json!({"type":"control_request","request_id":"sphere-1","request":{"subtype":"interrupt"}}));
+        assert_eq!(
+            i,
+            json!({"type":"control_request","request_id":"sphere-1","request":{"subtype":"interrupt"}})
+        );
         let m: Value = serde_json::from_str(&set_mode_request("x", "plan")).unwrap();
-        assert_eq!(m["request"], json!({"subtype":"set_permission_mode","mode":"plan"}));
+        assert_eq!(
+            m["request"],
+            json!({"subtype":"set_permission_mode","mode":"plan"})
+        );
         let m: Value = serde_json::from_str(&set_model_request("x", "some-model")).unwrap();
-        assert_eq!(m["request"], json!({"subtype":"set_model","model":"some-model"}));
+        assert_eq!(
+            m["request"],
+            json!({"subtype":"set_model","model":"some-model"})
+        );
     }
 
     #[test]
@@ -617,8 +759,17 @@ mod tests {
         assert!(joined.contains("--settings /s.json --max-budget-usd 2.5"));
         assert!(joined.ends_with("--resume sess"));
         assert!(!joined.contains("--model"));
-        let with_model = build_args(&AgentArgs { settings: "s", budget_usd: 1.0, mode: "plan", model: Some("m"), resume: None });
-        assert!(with_model.join(" ").contains("--model m") && !with_model.join(" ").contains("--resume"));
+        let with_model = build_args(&AgentArgs {
+            settings: "s",
+            budget_usd: 1.0,
+            mode: "plan",
+            model: Some("m"),
+            resume: None,
+        });
+        assert!(
+            with_model.join(" ").contains("--model m")
+                && !with_model.join(" ").contains("--resume")
+        );
     }
 
     #[test]
@@ -632,10 +783,17 @@ mod tests {
 
     #[test]
     fn step_titles() {
-        assert_eq!(step_info("Bash", &json!({"command": "npx playwright test\nmore"})).1, "Running npx playwright test");
-        assert_eq!(step_info("Edit", &json!({"file_path": "/a.rs"})), (StepKind::Edit, "Editing /a.rs".into(), "/a.rs".into()));
+        assert_eq!(
+            step_info("Bash", &json!({"command": "npx playwright test\nmore"})).1,
+            "Running npx playwright test"
+        );
+        assert_eq!(
+            step_info("Edit", &json!({"file_path": "/a.rs"})),
+            (StepKind::Edit, "Editing /a.rs".into(), "/a.rs".into())
+        );
         assert_eq!(step_info("mcp__x__y", &json!({})).0, StepKind::Other);
-        let plan = plan_items(&json!({"todos":[{"content":"a","status":"completed"},{"content":"b"}]}));
+        let plan =
+            plan_items(&json!({"todos":[{"content":"a","status":"completed"},{"content":"b"}]}));
         assert_eq!(plan.len(), 2);
         assert_eq!(plan[1].status, "pending");
         assert!(may_change_files("Bash") && !may_change_files("Read"));
@@ -659,6 +817,9 @@ mod tests {
         assert!(!is_outbound("mcp__files__read", &json!({})));
         assert!(!is_outbound("Edit", &json!({})));
         // A step's stored detail (the bare command) works too.
-        assert!(is_outbound("Bash", &Value::String("git push -u origin x".into())));
+        assert!(is_outbound(
+            "Bash",
+            &Value::String("git push -u origin x".into())
+        ));
     }
 }

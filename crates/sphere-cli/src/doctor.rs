@@ -19,7 +19,11 @@ pub struct Check {
 }
 
 fn check(level: Level, name: &'static str, detail: impl Into<String>) -> Check {
-    Check { level, name, detail: detail.into() }
+    Check {
+        level,
+        name,
+        detail: detail.into(),
+    }
 }
 
 /// Find `name` on `PATH` (or use it as a path).
@@ -37,24 +41,48 @@ pub fn which(name: &str) -> Option<PathBuf> {
 
 fn run(cmd: &str, args: &[&str]) -> Option<String> {
     let out = Command::new(cmd).args(args).output().ok()?;
-    out.status.success().then(|| format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr)))
+    out.status.success().then(|| {
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        )
+    })
 }
 
 fn claude_checks(agent: &str) -> Vec<Check> {
     let mut out = vec![];
     let Some(path) = which(agent) else {
-        out.push(check(Level::Fail, "claude", format!("`{agent}` not found on PATH; install Claude Code")));
+        out.push(check(
+            Level::Fail,
+            "claude",
+            format!("`{agent}` not found on PATH; install Claude Code"),
+        ));
         return out;
     };
     match run(&path.to_string_lossy(), &["--version"]) {
         Some(text) => match version::parse(&text) {
-            Some(v) if version::in_tested_range(v) => {
-                out.push(check(Level::Ok, "claude", format!("{} at {}", text.trim(), path.display())))
-            }
-            Some(v) => out.push(check(Level::Warn, "claude", version::out_of_range_message(v))),
-            None => out.push(check(Level::Warn, "claude", format!("could not read a version from `{}`", text.trim()))),
+            Some(v) if version::in_tested_range(v) => out.push(check(
+                Level::Ok,
+                "claude",
+                format!("{} at {}", text.trim(), path.display()),
+            )),
+            Some(v) => out.push(check(
+                Level::Warn,
+                "claude",
+                version::out_of_range_message(v),
+            )),
+            None => out.push(check(
+                Level::Warn,
+                "claude",
+                format!("could not read a version from `{}`", text.trim()),
+            )),
         },
-        None => out.push(check(Level::Fail, "claude", format!("`{} --version` failed", path.display()))),
+        None => out.push(check(
+            Level::Fail,
+            "claude",
+            format!("`{} --version` failed", path.display()),
+        )),
     }
     match run(&path.to_string_lossy(), &["auth", "status"]) {
         Some(text) => {
@@ -63,11 +91,23 @@ fn claude_checks(agent: &str) -> Vec<Check> {
                 .and_then(|v| v.get("loggedIn").and_then(|l| l.as_bool()));
             match signed {
                 Some(true) => out.push(check(Level::Ok, "sign-in", "signed in")),
-                Some(false) => out.push(check(Level::Warn, "sign-in", "signed out; run `claude auth login`")),
-                None => out.push(check(Level::Warn, "sign-in", "could not tell from `claude auth status`")),
+                Some(false) => out.push(check(
+                    Level::Warn,
+                    "sign-in",
+                    "signed out; run `claude auth login`",
+                )),
+                None => out.push(check(
+                    Level::Warn,
+                    "sign-in",
+                    "could not tell from `claude auth status`",
+                )),
             }
         }
-        None => out.push(check(Level::Warn, "sign-in", "`claude auth status` failed; run `claude auth login` if needed")),
+        None => out.push(check(
+            Level::Warn,
+            "sign-in",
+            "`claude auth status` failed; run `claude auth login` if needed",
+        )),
     }
     out
 }
@@ -78,11 +118,19 @@ fn sandbox_checks() -> Vec<Check> {
     let bwrap = which("bwrap");
     out.push(match &bwrap {
         Some(p) => check(Level::Ok, "bubblewrap", p.display().to_string()),
-        None => check(Level::Warn, "bubblewrap", "not installed; Claude Code's sandbox needs `bwrap` (apt install bubblewrap)"),
+        None => check(
+            Level::Warn,
+            "bubblewrap",
+            "not installed; Claude Code's sandbox needs `bwrap` (apt install bubblewrap)",
+        ),
     });
     out.push(match which("socat") {
         Some(p) => check(Level::Ok, "socat", p.display().to_string()),
-        None => check(Level::Warn, "socat", "not installed; the sandbox's network proxy needs it (apt install socat)"),
+        None => check(
+            Level::Warn,
+            "socat",
+            "not installed; the sandbox's network proxy needs it (apt install socat)",
+        ),
     });
     // The sandbox (and its seccomp helper, which ships inside Claude Code)
     // runs in unprivileged user namespaces.
@@ -118,8 +166,16 @@ fn state_dir_check(dir: &Path) -> Check {
     let result = std::fs::create_dir_all(dir).and_then(|_| std::fs::write(&probe, b"ok"));
     let _ = std::fs::remove_file(&probe);
     match result {
-        Ok(()) => check(Level::Ok, "state dir", format!("{} is writable", dir.display())),
-        Err(e) => check(Level::Fail, "state dir", format!("{} is not writable: {e}", dir.display())),
+        Ok(()) => check(
+            Level::Ok,
+            "state dir",
+            format!("{} is writable", dir.display()),
+        ),
+        Err(e) => check(
+            Level::Fail,
+            "state dir",
+            format!("{} is not writable: {e}", dir.display()),
+        ),
     }
 }
 
@@ -127,7 +183,14 @@ pub async fn run_all(agent: &str, state_dir: &Path, socket: &Path) -> Vec<Check>
     let mut out = claude_checks(agent);
     out.extend(sandbox_checks());
     out.push(match which("git") {
-        Some(_) => check(Level::Ok, "git", run("git", &["--version"]).unwrap_or_default().trim().to_string()),
+        Some(_) => check(
+            Level::Ok,
+            "git",
+            run("git", &["--version"])
+                .unwrap_or_default()
+                .trim()
+                .to_string(),
+        ),
         None => check(Level::Fail, "git", "not found; worktrees need git"),
     });
     out.push(state_dir_check(state_dir));
@@ -137,7 +200,13 @@ pub async fn run_all(agent: &str, state_dir: &Path, socket: &Path) -> Vec<Check>
                 out.push(check(
                     Level::Ok,
                     "sphered",
-                    format!("answering on {} (v{}, {} active, {} queued)", socket.display(), s.version, s.active, s.queued),
+                    format!(
+                        "answering on {} (v{}, {} active, {} queued)",
+                        socket.display(),
+                        s.version,
+                        s.active,
+                        s.queued
+                    ),
                 ));
                 out.push(match s.host_pid {
                     Some(pid) => check(Level::Ok, "sphere-host", format!("running, pid {pid}")),
@@ -147,12 +216,19 @@ pub async fn run_all(agent: &str, state_dir: &Path, socket: &Path) -> Vec<Check>
                     out.push(check(Level::Warn, "sphered", w));
                 }
             }
-            Err(e) => out.push(check(Level::Fail, "sphered", format!("connected but status failed: {e}"))),
+            Err(e) => out.push(check(
+                Level::Fail,
+                "sphered",
+                format!("connected but status failed: {e}"),
+            )),
         },
         Err(e) => out.push(check(
             Level::Fail,
             "sphered",
-            format!("not reachable at {} ({e}); start it with `sphere daemon`", socket.display()),
+            format!(
+                "not reachable at {} ({e}); start it with `sphere daemon`",
+                socket.display()
+            ),
         )),
     }
     out
@@ -198,12 +274,19 @@ mod tests {
         assert_eq!(state_dir_check(&dir).level, Level::Ok);
         assert!(std::fs::read_dir(&dir).unwrap().next().is_none());
         std::fs::write(tmp.path().join("file"), "x").unwrap();
-        assert_eq!(state_dir_check(&tmp.path().join("file/sub")).level, Level::Fail);
+        assert_eq!(
+            state_dir_check(&tmp.path().join("file/sub")).level,
+            Level::Fail
+        );
     }
 
     #[test]
     fn rendering_tags_each_level() {
-        let text = render(&[check(Level::Ok, "a", "fine"), check(Level::Warn, "b", "hm"), check(Level::Fail, "c", "bad")]);
+        let text = render(&[
+            check(Level::Ok, "a", "fine"),
+            check(Level::Warn, "b", "hm"),
+            check(Level::Fail, "c", "bad"),
+        ]);
         assert!(text.lines().next().unwrap().starts_with("ok   a"));
         assert!(text.contains("warn b") && text.contains("FAIL c"));
     }

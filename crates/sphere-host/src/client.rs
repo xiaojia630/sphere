@@ -34,7 +34,10 @@ async fn open(path: &Path) -> Result<Conn> {
         .await
         .with_context(|| format!("connect {}", path.display()))?;
     let (r, w) = s.into_split();
-    Ok(Conn { r: BufReader::new(r), w })
+    Ok(Conn {
+        r: BufReader::new(r),
+        w,
+    })
 }
 
 impl HostClient {
@@ -59,7 +62,11 @@ impl HostClient {
     }
 
     /// Call a method. A dropped connection is re-opened once.
-    pub async fn call<T: DeserializeOwned>(&self, method: &str, params: impl Serialize) -> Result<T> {
+    pub async fn call<T: DeserializeOwned>(
+        &self,
+        method: &str,
+        params: impl Serialize,
+    ) -> Result<T> {
         let req = Request {
             id: self.next.fetch_add(1, Ordering::SeqCst),
             method: method.to_string(),
@@ -103,26 +110,48 @@ impl HostClient {
 
     pub async fn write(&self, id: &str, bytes: &[u8]) -> Result<()> {
         let _: Value = self
-            .call(method::WRITE, WriteParams { id: id.into(), bytes: B64.encode(bytes) })
+            .call(
+                method::WRITE,
+                WriteParams {
+                    id: id.into(),
+                    bytes: B64.encode(bytes),
+                },
+            )
             .await?;
         Ok(())
     }
 
     pub async fn close_stdin(&self, id: &str) -> Result<()> {
-        let _: Value = self.call(method::CLOSE_STDIN, IdParams { id: id.into() }).await?;
+        let _: Value = self
+            .call(method::CLOSE_STDIN, IdParams { id: id.into() })
+            .await?;
         Ok(())
     }
 
     pub async fn resize(&self, id: &str, cols: u16, rows: u16) -> Result<()> {
         let _: Value = self
-            .call(method::RESIZE, ResizeParams { id: id.into(), cols, rows })
+            .call(
+                method::RESIZE,
+                ResizeParams {
+                    id: id.into(),
+                    cols,
+                    rows,
+                },
+            )
             .await?;
         Ok(())
     }
 
     pub async fn signal(&self, id: &str, sig: Value, group: bool) -> Result<()> {
         let _: Value = self
-            .call(method::SIGNAL, SignalParams { id: id.into(), sig, group })
+            .call(
+                method::SIGNAL,
+                SignalParams {
+                    id: id.into(),
+                    sig,
+                    group,
+                },
+            )
             .await?;
         Ok(())
     }
@@ -132,9 +161,23 @@ impl HostClient {
     }
 
     /// One read, decoded.
-    pub async fn read(&self, id: &str, stream: Stream, from_offset: u64, max: Option<usize>) -> Result<DecodedRead> {
+    pub async fn read(
+        &self,
+        id: &str,
+        stream: Stream,
+        from_offset: u64,
+        max: Option<usize>,
+    ) -> Result<DecodedRead> {
         let r: ReadResult = self
-            .call(method::READ, ReadParams { id: id.into(), stream, from_offset, max })
+            .call(
+                method::READ,
+                ReadParams {
+                    id: id.into(),
+                    stream,
+                    from_offset,
+                    max,
+                },
+            )
             .await?;
         let bytes = B64.decode(&r.data)?;
         Ok(DecodedRead {
@@ -146,7 +189,9 @@ impl HostClient {
     }
 
     pub async fn forget(&self, id: &str) -> Result<()> {
-        let _: Value = self.call(method::FORGET, IdParams { id: id.into() }).await?;
+        let _: Value = self
+            .call(method::FORGET, IdParams { id: id.into() })
+            .await?;
         Ok(())
     }
 
@@ -161,7 +206,12 @@ impl HostClient {
         let req = Request {
             id: self.next.fetch_add(1, Ordering::SeqCst),
             method: method::FOLLOW.into(),
-            params: serde_json::to_value(ReadParams { id: id.into(), stream, from_offset, max: None })?,
+            params: serde_json::to_value(ReadParams {
+                id: id.into(),
+                stream,
+                from_offset,
+                max: None,
+            })?,
         };
         let resp = Self::roundtrip(&mut conn, &req).await?;
         if let Some(e) = resp.error {
