@@ -5,27 +5,21 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Sphere OS</title>
 <style>
-  html, body { margin: 0; height: 100%; background: #02040a; overflow: hidden; }
+  html, body { margin: 0; height: 100%; background: #03070d; overflow: hidden; }
   #sphere { width: 100%; height: 100%; display: block; outline: none; touch-action: none; }
-  #loading { position: fixed; inset: 0; display: grid; place-items: center; color: #7cc8ff;
+  #loading { position: fixed; inset: 0; display: grid; place-items: center; color: #5fd4ff;
     font: 13px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .2em; pointer-events: none; }
 </style>
 </head>
 <body>
 <canvas id="sphere"></canvas>
-<div id="loading">INITIALISING…</div>
+<div id="loading">STARTING SPHERE OS…</div>
 <script type="module">
   import init from "./pkg/sphere_os.js";
   init().catch((e) => {
-    // Bevy uses an exception to hand control to the browser's event loop.
-    if (!String(e).includes("Using exceptions for control flow")) {
-      document.getElementById("loading").textContent = "Could not start: " + e;
-      throw e;
-    }
+    document.getElementById("loading").textContent = "Could not start: " + e;
+    throw e;
   });
-  const hide = () => document.getElementById("loading").remove();
-  new MutationObserver((_, o) => { o.disconnect(); setTimeout(hide, 300); })
-    .observe(document.getElementById("sphere"), { attributes: true });
 </script>
 </body>
 </html>

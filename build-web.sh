@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Builds the browser version into web/. Needs: rustup target wasm32-unknown-unknown,
+# Builds the browser version into web/pkg. Needs: rustup target wasm32-unknown-unknown,
 # wasm-bindgen-cli (same version as the wasm-bindgen crate in Cargo.lock), and
 # optionally wasm-opt from binaryen to shrink the output.
 set -euo pipefail
