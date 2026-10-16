@@ -9,6 +9,6 @@ pub mod client;
 pub mod proto;
 pub mod server;
 
-pub use client::{ensure_running, Follow, FollowItem, HostClient};
+pub use client::{ensure_running, DecodedRead, Follow, FollowItem, HostClient};
 pub use proto::*;
 pub use server::{serve, ServeOptions};

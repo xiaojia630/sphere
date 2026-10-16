@@ -303,6 +303,14 @@ impl Excerpt {
 const AT_FORMAT: &[FormatItem<'static>] =
     format_description!("[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:3]Z");
 
+/// A time given as milliseconds since the Unix epoch, in the `at` format.
+pub fn rfc3339_from_unix_ms(ms: u64) -> String {
+    OffsetDateTime::from_unix_timestamp_nanos(ms as i128 * 1_000_000)
+        .ok()
+        .and_then(|t| t.format(AT_FORMAT).ok())
+        .unwrap_or_else(|| "1970-01-01T00:00:00.000Z".to_string())
+}
+
 /// The current time in the `at` format.
 pub fn now_rfc3339() -> String {
     OffsetDateTime::now_utc()
@@ -359,6 +367,12 @@ mod tests {
             }
             other => panic!("unexpected {other:?}"),
         }
+    }
+
+    #[test]
+    fn unix_ms_formats() {
+        assert_eq!(rfc3339_from_unix_ms(0), "1970-01-01T00:00:00.000Z");
+        assert_eq!(rfc3339_from_unix_ms(1_700_000_000_123), "2023-11-14T22:13:20.123Z");
     }
 
     #[test]
