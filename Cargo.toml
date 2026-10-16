@@ -1,0 +1,54 @@
+[package]
+name = "sphere-os"
+version = "0.1.0"
+edition = "2021"
+description = "An agent-first operating surface: a sphere you can rotate, zoom and expand."
+license = "MIT"
+
+[dependencies]
+bevy = { version = "0.16.1", default-features = false, features = [
+    "std",
+    "async_executor",
+    "bevy_asset",
+    "bevy_color",
+    "bevy_core_pipeline",
+    "bevy_log",
+    "bevy_pbr",
+    "bevy_picking",
+    "bevy_mesh_picking_backend",
+    "bevy_render",
+    "bevy_text",
+    "bevy_ui",
+    "bevy_window",
+    "bevy_winit",
+    "default_font",
+    "multi_threaded",
+    "tonemapping_luts",
+    "ktx2",
+    "zstd",
+    "webgl2",
+    "x11",
+] }
+chrono = { version = "0.4.45", default-features = false, features = ["clock", "wasmbind"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.3", features = ["wasm_js"] }
+
+# Fast-ish dev builds: optimise dependencies, keep our crate quick to compile.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+
+# Smaller binaries for the browser build.
+[profile.wasm-release]
+inherits = "release"
+opt-level = "z"
+lto = "fat"
+strip = true
+panic = "abort"
