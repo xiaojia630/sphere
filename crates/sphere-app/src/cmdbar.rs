@@ -32,6 +32,8 @@ pub enum BarTarget {
     Commit(String, String),
     /// the Git app: a branch to switch to in this repo (path)
     Branch(String),
+    /// the Files app: what to filter the folder by
+    Filter,
 }
 
 impl CmdBar {
@@ -424,6 +426,7 @@ pub fn draw(
                     Some(BarTarget::Task(_, title)) if bar.open => format!("Ask “{title}” for a change  ·  Enter sends, Esc cancels"),
                     Some(BarTarget::Commit(_, branch)) if bar.open => format!("Commit message for {branch}  ·  Enter commits, Esc cancels"),
                     Some(BarTarget::Branch(_)) if bar.open => "Switch to branch…  ·  Enter switches, Esc cancels".to_string(),
+                    Some(BarTarget::Filter) if bar.open => "Filter this folder…  ·  Enter filters, Esc cancels".to_string(),
                     _ => PLACEHOLDER.into(),
                 };
                 c.0 = with_alpha(line, 0.55);

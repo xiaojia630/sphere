@@ -35,7 +35,7 @@ pub fn apply(
     mut open: ResMut<Open>,
     mut focus: ResMut<Focus>,
     mut working: ResMut<crate::working::Working>,
-    (mut code, mut git, mut ctr, mut ports, mut sys): (ResMut<crate::codeapp::CodeApp>, ResMut<crate::gitapp::GitApp>, ResMut<crate::containers::ContainersApp>, ResMut<crate::ports::PortsApp>, ResMut<crate::sysapp::SysApp>),
+    (mut code, mut git, mut ctr, mut ports, mut sys, mut files): (ResMut<crate::codeapp::CodeApp>, ResMut<crate::gitapp::GitApp>, ResMut<crate::containers::ContainersApp>, ResMut<crate::ports::PortsApp>, ResMut<crate::sysapp::SysApp>, ResMut<crate::filesapp::FilesApp>),
     mut sound: ResMut<crate::sound::Sound>,
     mut orb: ResMut<crate::orbit::Orb>,
 ) {
@@ -45,13 +45,14 @@ pub fn apply(
     let Some(i) = open.pending.take() else { return };
     sound.play_with("open", 0.8, 0.0);
     // one app at a time
-    if matches!(i, 2..=5 | SYSTEM) {
+    if matches!(i, 2..=6 | SYSTEM) {
         working.close();
         code.close();
         git.close();
         ctr.close();
         ports.close();
         sys.close();
+        files.close();
         sound.play_with("whoosh", 0.7, 0.0);
     }
     match i {
@@ -65,6 +66,7 @@ pub fn apply(
             }
         }
         5 => ports.open(),
+        6 => files.open(),
         SYSTEM => sys.open(),
         _ => working.open_latest(),
     }

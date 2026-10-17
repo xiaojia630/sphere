@@ -6,6 +6,7 @@ mod codeapp;
 mod containers;
 mod cmdbar;
 mod core;
+mod filesapp;
 mod fonts;
 mod fx;
 mod home;
@@ -188,10 +189,11 @@ fn main() {
         .init_resource::<containers::ContainersApp>()
         .init_resource::<ports::PortsApp>()
         .init_resource::<sysapp::SysApp>()
+        .init_resource::<filesapp::FilesApp>()
         .init_resource::<working::Working>()
         .init_resource::<momentfx::MomentFx>()
         .init_resource::<hud::FrameStats>()
-        .add_systems(Startup, (sound::setup, setup_core, setup_cameras, hud::setup_panels, hud::setup_backdrop, hud::setup_overlay, cmdbar::setup, visor::setup, fx::setup, homepanels::setup, orbit::setup, working::setup, (codeapp::setup, gitapp::setup, containers::setup, ports::setup, sysapp::setup).chain(), momentfx::setup, callouts::setup, mouse::setup, mouse::setup_reticle).chain())
+        .add_systems(Startup, (sound::setup, setup_core, setup_cameras, hud::setup_panels, hud::setup_backdrop, hud::setup_overlay, cmdbar::setup, visor::setup, fx::setup, homepanels::setup, orbit::setup, working::setup, (codeapp::setup, gitapp::setup, containers::setup, ports::setup, sysapp::setup, filesapp::setup).chain(), momentfx::setup, callouts::setup, mouse::setup, mouse::setup_reticle).chain())
         .add_systems(First, (tick_sim, theme::animate))
         .add_systems(
             Update,
@@ -199,8 +201,8 @@ fn main() {
                 (keys, stage_view, camera_rig, update_core, spin_system, update_materials, panel::update_panels, hud::update_readout, hud::update_backdrop)
                     .chain(),
                 (live::sync, live::transitions, moment::update, summon::notify, live::tick_toasts, panel::rebuild_agents_ui, hud::update_readout_text, hud::update_clock, panel::blink_system, homepanels::update, homepanels::draw_rolodex, homepanels::draw_say).chain(),
-                (term::pump, cmdbar::keys, moment::keys, term::read_keys, home::keys, orbit::keys, working::keys, (codeapp::keys, gitapp::keys, containers::keys, ports::keys, sysapp::keys).chain(), momentfx::keys, visor::buttons, mouse::update, home::apply, apps::apply).chain(),
-                (working::update, working::place_panels, working::draw, (codeapp::update, codeapp::place, codeapp::draw, gitapp::update, gitapp::place, gitapp::draw, containers::update, containers::place, containers::draw, ports::update, ports::place, ports::draw, sysapp::update, sysapp::place, sysapp::draw).chain(), momentfx::flows, momentfx::draw, momentfx::draw_sats, callouts::update).chain(),
+                (term::pump, cmdbar::keys, moment::keys, term::read_keys, home::keys, orbit::keys, working::keys, (codeapp::keys, gitapp::keys, containers::keys, ports::keys, sysapp::keys, filesapp::keys).chain(), momentfx::keys, visor::buttons, mouse::update, home::apply, apps::apply).chain(),
+                (working::update, working::place_panels, working::draw, (codeapp::update, codeapp::place, codeapp::draw, gitapp::update, gitapp::place, gitapp::draw, containers::update, containers::place, containers::draw, ports::update, ports::place, ports::draw, sysapp::update, sysapp::place, sysapp::draw, filesapp::update, filesapp::place, filesapp::draw).chain(), momentfx::flows, momentfx::draw, momentfx::draw_sats, callouts::update).chain(),
                 (orbit::update, mouse::draw_reticle, visor::draw_buttons, visor::ticker, visor::toasts, home::landed_sound, home::step_view, fx::update, term::draw, cmdbar::draw, moment::draw).chain(),
                 (hud::frame_stats, hud::bench, hud::shot).chain(),
             )
