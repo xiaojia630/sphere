@@ -29,7 +29,8 @@ pub enum BarTarget {
     /// the Code app's "ask for a change": a message to this task (id, title)
     Task(String, String),
     /// the Git app: a commit message for this repo (path, branch)
-    Commit(String, String),
+    /// (path, branch, amend): with amend an empty message keeps the previous one
+    Commit(String, String, bool),
     /// the Git app: a branch to switch to in this repo (path)
     Branch(String),
     /// the Files app: what to filter the folder by
@@ -195,7 +196,7 @@ pub fn keys(
                             toasts.push(format!("Asked {title} for a change"));
                             sound.play("confirm");
                         }
-                        other if !t.is_empty() => bar.out = Some((other, t.to_string())),
+                        other if !t.is_empty() || matches!(other, BarTarget::Commit(_, _, true)) => bar.out = Some((other, t.to_string())),
                         _ => {}
                     }
                 } else if !home_command(t, &mut acts, &mut open, &mut toasts) {
@@ -424,7 +425,8 @@ pub fn draw(
             if bar.text.is_empty() && (!bar.open || bar.target.is_some()) {
                 t.0 = match &bar.target {
                     Some(BarTarget::Task(_, title)) if bar.open => format!("Ask “{title}” for a change  ·  Enter sends, Esc cancels"),
-                    Some(BarTarget::Commit(_, branch)) if bar.open => format!("Commit message for {branch}  ·  Enter commits, Esc cancels"),
+                    Some(BarTarget::Commit(_, branch, true)) if bar.open => format!("Amend {branch}  ·  Enter keeps the message, or type a new one  ·  Esc cancels"),
+                    Some(BarTarget::Commit(_, branch, false)) if bar.open => format!("Commit message for {branch}  ·  Enter commits, Esc cancels"),
                     Some(BarTarget::Branch(_)) if bar.open => "Switch to branch…  ·  Enter switches, Esc cancels".to_string(),
                     Some(BarTarget::Filter) if bar.open => "Filter this folder…  ·  Enter filters, Esc cancels".to_string(),
                     _ => PLACEHOLDER.into(),

@@ -467,7 +467,7 @@ pub fn keys(
                     toasts.push("Stage something first (S, or A for everything)");
                 } else if let (Some(d), Some(r)) = (app.dir(), &app.repo) {
                     let b = r.card.branch.clone();
-                    bar.prompt(BarTarget::Commit(d.to_string_lossy().to_string(), b), &mut focus);
+                    bar.prompt(BarTarget::Commit(d.to_string_lossy().to_string(), b, app.amend), &mut focus);
                     sound.play("open");
                 }
             }
@@ -518,7 +518,7 @@ pub fn update(sim: Res<crate::core::Sim>, mut atlases: ResMut<AppAtlases>, mut a
     if !app.busy {
         if let Some((t, text)) = bar.out.take() {
             match t {
-                BarTarget::Commit(dir, _) => {
+                BarTarget::Commit(dir, _, _) => {
                     let amend = app.amend;
                     app.act_at(PathBuf::from(dir), Op::Commit { msg: text, amend });
                     app.amend = false;
@@ -1019,6 +1019,8 @@ fn draw_commit(c: &mut Commands, ui: &Ui, root: Entity, r: &Repo, amend: bool, b
         "Detached HEAD: a commit here belongs to no branch. B switches to one first"
     } else if r.staged.is_empty() && !amend {
         "Nothing staged. S stages the selected file, A everything"
+    } else if amend {
+        "C amends the last commit: Enter in the bar keeps its message, or type a new one"
     } else {
         "C writes the commit message (in the bar below)"
     };

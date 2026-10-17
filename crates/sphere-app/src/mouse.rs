@@ -287,7 +287,7 @@ pub fn update(
                 // a click: double within 300 ms, else a single after 260 ms
                 if let Some((p0, t0)) = ms.down_at {
                     let app_pane = match hit {
-                        Hit::Panel(e, PanelId::App | PanelId::AppBare | PanelId::AppFrame) => Some(e),
+                        Hit::Panel(e, PanelId::App | PanelId::AppBare | PanelId::AppFrame | PanelId::Moment) => Some(e),
                         _ => None,
                     };
                     if let (Some(e), true) = (app_pane, (pos - p0).length() <= 4.0) {

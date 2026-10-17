@@ -85,6 +85,8 @@ pub struct CodeApp {
     scroll: usize,
     tests: Option<TestRun>,
     tests_rx: Option<Mutex<mpsc::Receiver<TestRun>>>,
+    /// set to stop the running tests
+    tests_cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     /// an action that asks twice: armed until this sim time
     armed: Option<(Act, f32)>,
     notes: (mpsc::Sender<String>, Mutex<mpsc::Receiver<String>>),
@@ -111,6 +113,7 @@ impl Default for CodeApp {
             scroll: 0,
             tests: None,
             tests_rx: None,
+            tests_cancel: None,
             armed: None,
             notes: (tx, Mutex::new(rx)),
             busy: false,
@@ -398,7 +401,11 @@ pub fn keys(
             KeyCode::KeyR => match task.as_ref().and_then(|t| t.workdir.clone()) {
                 Some(wd) => {
                     if app.tests.as_ref().is_some_and(|t| !t.done) {
-                        toasts.push_quiet("Tests are already running");
+                        if let Some(c) = &app.tests_cancel {
+                            c.store(true, std::sync::atomic::Ordering::Relaxed);
+                        }
+                        toasts.push_quiet("Stopping the tests");
+                        sound.play("toggle");
                     } else {
                         run_tests(&mut app, wd, &mut toasts);
                         sound.play("progress");
@@ -571,57 +578,20 @@ fn open_in_zed(wd: &str, path: &str, line: u32) -> Result<(), String> {
 }
 
 fn run_tests(app: &mut CodeApp, wd: String, toasts: &mut crate::live::Toasts) {
-    let Some(cmd) = review::test_command(&wd) else {
-        toasts.push("No test command for this repo yet (Cargo projects run cargo test)");
-        return;
+    let cmd = match review::detect_tests(&wd) {
+        Ok(c) => c,
+        Err(e) => {
+            toasts.push(e);
+            return;
+        }
     };
     let (tx, rx) = mpsc::channel();
+    let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     app.tests_rx = Some(Mutex::new(rx));
+    app.tests_cancel = Some(cancel.clone());
     app.tests = Some(TestRun { command: cmd.join(" "), ..Default::default() });
     app.version += 1;
-    std::thread::spawn(move || {
-        use std::io::BufRead;
-        let mut run = TestRun { command: cmd.join(" "), ..Default::default() };
-        let child = std::process::Command::new(&cmd[0]).args(&cmd[1..]).current_dir(&wd).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn();
-        let mut child = match child {
-            Ok(c) => c,
-            Err(e) => {
-                run.error = Some(e.to_string());
-                run.done = true;
-                let _ = tx.send(run);
-                return;
-            }
-        };
-        // build errors arrive on stderr, results on stdout
-        let err = child.stderr.take().map(|s| std::thread::spawn(move || {
-        // read it all, or a chatty build fills the pipe and cargo waits for us
-        let mut first = String::new();
-        for l in std::io::BufReader::new(s).lines().map_while(Result::ok) {
-            if first.is_empty() && l.starts_with("error") {
-                first = l;
-            }
-        }
-        first
-    }));
-        let mut last = std::time::Instant::now();
-        if let Some(out) = child.stdout.take() {
-            for line in std::io::BufReader::new(out).lines().map_while(Result::ok) {
-                review::test_line(&mut run, &line);
-                if last.elapsed().as_millis() > 250 {
-                    last = std::time::Instant::now();
-                    let _ = tx.send(run.clone());
-                }
-            }
-        }
-        let ok = child.wait().map(|s| s.success()).unwrap_or(false);
-        if let Some(Ok(e)) = err.map(|h| h.join()) {
-            if !ok && run.tests.is_empty() && !e.is_empty() {
-                run.error = Some(e);
-            }
-        }
-        run.done = true;
-        let _ = tx.send(run);
-    });
+    std::thread::spawn(move || review::run_tests(&cmd, &wd, &tx, &cancel, review::TEST_TIMEOUT, review::KILL_GRACE));
 }
 
 /// Springs, the core's corner, reading the review in the background, test progress and action results.
@@ -647,7 +617,11 @@ pub fn update(sim: Res<crate::core::Sim>, mut atlases: ResMut<AppAtlases>, mut a
     let got = app.tests_rx.as_ref().and_then(|r| r.lock().ok()?.try_iter().last());
     if let Some(t) = got {
         if t.done {
-            sound.play(if t.failed > 0 || t.error.is_some() { "error" } else { "done" });
+            sound.play(match t.status() {
+                review::RunStatus::Passed => "done",
+                review::RunStatus::Cancelled => "collapse",
+                _ => "error",
+            });
         }
         app.tests = Some(t);
         app.version += 1;
@@ -1155,19 +1129,23 @@ fn draw_tests(c: &mut Commands, ui: &Ui, root: Entity, t: &TaskView, run: Option
     let inner = c.spawn(Node { flex_direction: FlexDirection::Column, row_gap: px(6), padding: UiRect { left: px(18), right: px(16), top: px(12), bottom: px(10) }, flex_grow: 1.0, ..default() }).id();
     c.entity(b).add_children(&[h, inner]);
     let Some(r) = run else {
-        let m = c.spawn((Text::new("Not run yet. R (or click) runs the repo's tests in the agent's worktree."), font(&ui.f.ui500, 13.0, 0.4), TextColor(ui.line), LineHeight::Px(17.0), Click::Key(KeyCode::KeyR))).id();
+        let msg = match t.workdir.as_deref().map(review::detect_tests) {
+            Some(Err(e)) => e,
+            _ => "Not run yet. R (or click) runs the repo's tests in the agent's worktree.".to_string(),
+        };
+        let m = c.spawn((Text::new(msg), font(&ui.f.ui500, 13.0, 0.4), TextColor(ui.line), LineHeight::Px(17.0), Click::Key(KeyCode::KeyR))).id();
         c.entity(inner).add_child(m);
         return;
     };
-    let total = r.tests.len();
-    let (state, sc) = if !r.done {
-        ("RUNNING", Role::Hot)
-    } else if r.error.is_some() && total == 0 {
-        ("BUILD FAILED", Role::Bad)
-    } else if r.failed > 0 {
-        ("FAILED", Role::Bad)
-    } else {
-        ("PASSED", Role::Ok)
+    let total = r.total();
+    let (state, sc) = match r.status() {
+        review::RunStatus::Running => ("RUNNING", Role::Hot),
+        review::RunStatus::Cancelling => ("CANCELLING", Role::Hot),
+        review::RunStatus::Cancelled => ("CANCELLED", Role::Acc),
+        review::RunStatus::TimedOut => ("TIMED OUT", Role::Bad),
+        review::RunStatus::CouldNotRun => (if r.command.starts_with("cargo") { "BUILD FAILED" } else { "COULD NOT RUN" }, Role::Bad),
+        review::RunStatus::Failed => ("FAILED", Role::Bad),
+        review::RunStatus::Passed => ("PASSED", Role::Ok),
     };
     let top = c.spawn(Node { flex_direction: FlexDirection::Row, align_items: AlignItems::FlexEnd, column_gap: px(6), ..default() }).id();
     let big = c.spawn((Text::new(format!("{}", r.passed)), font(&ui.f.display, 26.0, 0.5), TextColor(ui.hot), LineHeight::Px(30.0))).id();
@@ -1179,8 +1157,7 @@ fn draw_tests(c: &mut Commands, ui: &Ui, root: Entity, t: &TaskView, run: Option
     let cells = c.spawn(Node { flex_direction: FlexDirection::Row, flex_wrap: FlexWrap::Wrap, column_gap: px(2), row_gap: px(2), margin: UiRect { top: px(4), bottom: px(6), ..default() }, ..default() }).id();
     let n = total.clamp(24, 48);
     for i in 0..n {
-        let k = if total > 0 { i * total / n } else { usize::MAX };
-        let col = match r.tests.get(k).map(|x| x.1) {
+        let col = match r.cell(i, n) {
             Some(review::TestState::Pass) => role_color(Role::Fill),
             Some(review::TestState::Fail) => role_color(Role::Bad),
             Some(review::TestState::Ignored) => with_alpha(ui.line, 0.4),
@@ -1190,7 +1167,14 @@ fn draw_tests(c: &mut Commands, ui: &Ui, root: Entity, t: &TaskView, run: Option
         c.entity(cells).add_child(cell);
     }
     c.entity(inner).add_children(&[top, cells]);
-    if let Some(e) = r.error.as_ref().filter(|_| total == 0) {
+    let why = match r.status() {
+        review::RunStatus::Cancelled => Some("Stopped. Nothing was kept from this run".to_string()),
+        review::RunStatus::TimedOut => Some(format!("Stopped after {} min", review::TEST_TIMEOUT.as_secs() / 60)),
+        _ if total == 0 || r.status() == review::RunStatus::Failed && r.failed == 0 => r.error.clone().or_else(|| r.note.clone()),
+        review::RunStatus::Failed => r.note.clone(),
+        _ => None,
+    };
+    if let Some(e) = why.as_ref() {
         let t = c.spawn((Text::new(clip(e, 120)), font(&ui.f.mono, 11.0, 0.0), TextColor(role_color(Role::Bad)), LineHeight::Px(15.0))).id();
         c.entity(inner).add_child(t);
     }
@@ -1209,7 +1193,7 @@ fn draw_tests(c: &mut Commands, ui: &Ui, root: Entity, t: &TaskView, run: Option
     }
     let sp = c.spawn(Node { flex_grow: 1.0, ..default() }).id();
     let foot = c.spawn((Node { padding: UiRect::top(px(8)), border: UiRect::top(px(1)), ..default() }, BorderColor::all(with_alpha(ui.line, 0.2)), Click::Key(KeyCode::KeyR))).id();
-    let ft = ui.text(c, if r.done { "R RUN AGAIN" } else { "RUNNING IN THE WORKTREE" }, &ui.f.ui600, 10.5, 2.0, ui.dim);
+    let ft = ui.text(c, if r.done { "R RUN AGAIN" } else if r.cancelling { "STOPPING…" } else { "R CANCEL" }, &ui.f.ui600, 10.5, 2.0, ui.dim);
     c.entity(foot).add_child(ft);
     c.entity(inner).add_children(&[sp, foot]);
 }
@@ -1218,10 +1202,15 @@ fn draw_acts(c: &mut Commands, ui: &Ui, root: Entity, app: &CodeApp) {
     let b = ui.body(c, root);
     let (a, d) = app.review.as_ref().map(|r| (r.added(), r.removed())).unwrap_or((0, 0));
     let tests = match &app.tests {
-        Some(t) if !t.done => "tests running".to_string(),
-        Some(t) if t.failed > 0 => format!("{} failing", t.failed),
-        Some(t) if t.error.is_some() && t.tests.is_empty() => "build failed".into(),
-        Some(_) => "tests pass".into(),
+        Some(t) => match t.status() {
+            review::RunStatus::Running | review::RunStatus::Cancelling => "tests running".to_string(),
+            review::RunStatus::Cancelled => "tests cancelled".into(),
+            review::RunStatus::TimedOut => "tests timed out".into(),
+            review::RunStatus::CouldNotRun => "tests could not run".into(),
+            review::RunStatus::Failed if t.failed > 0 => format!("{} failing", t.failed),
+            review::RunStatus::Failed => "tests failed".into(),
+            review::RunStatus::Passed => "tests pass".into(),
+        },
         None => "tests not run".into(),
     };
     let h = ui.header(c, "Review", &format!("+{a} −{d} · {tests}"), ui.dim);
