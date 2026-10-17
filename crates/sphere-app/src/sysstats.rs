@@ -179,7 +179,8 @@ pub fn gpu() -> f32 {
 
 /// Bytes in and out across the physical interfaces (en*), from the link-level rows of `netstat -ib`.
 fn net_bytes() -> Option<u64> {
-    let out = sh("netstat", &["-ib"]);
+    // -n: no DNS lookups (with them this took seconds)
+    let out = sh("netstat", &["-inb"]);
     let mut lines = out.lines();
     let header: Vec<&str> = lines.next()?.split_whitespace().collect();
     let ib = header.iter().position(|h| *h == "Ibytes")?;
