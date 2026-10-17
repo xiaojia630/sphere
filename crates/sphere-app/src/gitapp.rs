@@ -2,7 +2,7 @@
 //! working tree with staging, a commit box, branches and the remote, over the agents' strip. Everything is read
 //! and done with git in the background. Keys: [ ] repo, J K file, S stage, U unstage, A stage all, X unstage all,
 //! C commit (with M toggling amend), B switch branch, L pull, P push, Esc closes.
-use crate::appframe::{clip, Ui};
+use crate::appframe::{clip, Click, Ui};
 use crate::cmdbar::{BarTarget, CmdBar};
 use crate::core::CoreCtl;
 use crate::fonts::UiFonts;
@@ -168,7 +168,7 @@ pub fn setup(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut atlas
         let ui = spawn_ui_panel(c, &mut atlas, w, h);
         let id = if pane == Pane::Top { PanelId::AppBare } else { PanelId::App };
         let e = spawn_panel_quad(c, &mut meshes, &mut pmats, &ui, &PanelSpec { id, w, h, home: at(x, y, w, h, z), home_scale: K, side: 0.0, phase: 0.4 + i as f32 * 1.1, show_at: 0.0, unframed: false });
-        c.entity(e).insert(GitPart(Some(pane)));
+        c.entity(e).insert((GitPart(Some(pane)), crate::appframe::AppPart { app: 1, pane: Some(i as u8) }, crate::appframe::PaneRoot(ui.root)));
         panes.push((pane, ui.root));
     }
     let (lw, lh) = (300.0, 40.0);
@@ -188,6 +188,7 @@ pub fn keys(
     mut app: ResMut<GitApp>,
     mut sound: ResMut<crate::sound::Sound>,
     mut toasts: ResMut<crate::live::Toasts>,
+    mut clicks: ResMut<crate::appframe::AppClicks>,
     mut cmd_was: Local<bool>,
 ) {
     let mut focus = focus;
@@ -198,13 +199,36 @@ pub fn keys(
         ev.clear();
         return;
     }
+    let mut codes: Vec<KeyCode> = Vec::new();
     for e in ev.read() {
         if e.state != bevy::input::ButtonState::Pressed || mods || bar_busy || focus.terminal || moment.shown || (e.repeat && !matches!(e.key_code, KeyCode::KeyJ | KeyCode::KeyK)) {
             continue;
         }
+        codes.push(e.key_code);
+    }
+    // clicks on the panes: a button presses its key, a row picks its item
+    for c in clicks.take(1) {
+        match c {
+            Click::Key(k) => codes.push(k),
+            Click::Pick(i) => {
+                app.cursor = i;
+                app.version += 1;
+            }
+            Click::Alt(i) => {
+                if i < app.repos.len() && i != app.sel {
+                    app.sel = i;
+                    app.repo = None;
+                    app.cursor = 0;
+                    app.load_t = -99.0;
+                    app.version += 1;
+                }
+            }
+        }
+    }
+    for key in codes {
         let n = app.changes().len();
         let sel = app.changes().get(app.cursor).map(|(c, staged)| (c.path.clone(), *staged));
-        match e.key_code {
+        match key {
             KeyCode::Escape => {
                 app.close();
                 sound.play_with("collapse", 0.7, 0.0);
@@ -446,7 +470,7 @@ pub fn draw(mut commands: Commands, app: Res<GitApp>, svc: Res<Service>, roots: 
     c.entity(roots.corelab).add_child(lab);
     draw_top(c, &ui, root(Pane::Top), &app);
     for i in 0..REPOS {
-        draw_card(c, &ui, root(Pane::Repo(i as u8)), app.cards.get(i), i == app.sel);
+        draw_card(c, &ui, root(Pane::Repo(i as u8)), app.cards.get(i), i == app.sel, i);
     }
     draw_strip(c, &ui, root(Pane::Strip), &agents);
     let Some(r) = &app.repo else {
@@ -483,19 +507,20 @@ fn draw_top(c: &mut Commands, ui: &Ui, root: Entity, app: &GitApp) {
     let sub = ui.text(c, names.join(" · "), &ui.f.ui500, 11.0, 2.6, ui.dim);
     let sp = c.spawn(Node { flex_grow: 1.0, ..default() }).id();
     let credit = ui.text(c, "git UI after gitui (MIT) · git", &ui.f.ui500, 10.5, 1.0, ui.dim);
-    let esc = c.spawn((Node { padding: UiRect { left: px(6), right: px(6), top: px(3), bottom: px(2) }, border: UiRect::all(px(1)), ..default() }, BorderColor::all(with_alpha(ui.line, 0.55)))).id();
+    let esc = c.spawn((Node { padding: UiRect { left: px(6), right: px(6), top: px(3), bottom: px(2) }, border: UiRect::all(px(1)), ..default() }, BorderColor::all(with_alpha(ui.line, 0.55)), Click::Key(KeyCode::Escape))).id();
     let et = ui.text(c, "ESC", &ui.f.ui700, 10.0, 1.6, ui.hot);
     c.entity(esc).add_child(et);
     c.entity(r).add_children(&[name, sub, sp, credit, esc]);
 }
 
-fn draw_card(c: &mut Commands, ui: &Ui, root: Entity, card: Option<&RepoCard>, sel: bool) {
+fn draw_card(c: &mut Commands, ui: &Ui, root: Entity, card: Option<&RepoCard>, sel: bool, index: usize) {
     let Some(k) = card else { return };
     let b = c
         .spawn((
             Node { width: percent(100), height: percent(100), flex_direction: FlexDirection::Column, row_gap: px(4), padding: UiRect { left: px(14), right: px(12), top: px(10), bottom: px(8) }, border: UiRect::left(px(if sel { 2.0 } else { 0.0 })), ..default() },
             BorderColor::all(ui.hot),
             BackgroundColor(if sel { with_alpha(ui.line, 0.07) } else { Color::NONE }),
+            Click::Alt(index),
         ))
         .id();
     c.entity(root).add_child(b);
@@ -519,7 +544,7 @@ fn draw_card(c: &mut Commands, ui: &Ui, root: Entity, card: Option<&RepoCard>, s
 fn draw_branches(c: &mut Commands, ui: &Ui, root: Entity, r: &Repo) {
     let b = ui.body(c, root);
     let h = ui.header(c, "Branches", &format!("{} local", r.branches.len()), ui.dim);
-    let sw = c.spawn((Node { flex_direction: FlexDirection::Row, align_items: AlignItems::Center, height: px(28), margin: UiRect { left: px(12), right: px(12), top: px(10), bottom: px(6) }, padding: UiRect::horizontal(px(10)), border: UiRect::all(px(1)), column_gap: px(8), ..default() }, BorderColor::all(with_alpha(ui.line, 0.4)))).id();
+    let sw = c.spawn((Node { flex_direction: FlexDirection::Row, align_items: AlignItems::Center, height: px(28), margin: UiRect { left: px(12), right: px(12), top: px(10), bottom: px(6) }, padding: UiRect::horizontal(px(10)), border: UiRect::all(px(1)), column_gap: px(8), ..default() }, BorderColor::all(with_alpha(ui.line, 0.4)), Click::Key(KeyCode::KeyB))).id();
     let st = ui.text(c, "› Switch branch…", &ui.f.ui500, 12.5, 0.5, ui.dim);
     let sp = c.spawn(Node { flex_grow: 1.0, ..default() }).id();
     let kb = c.spawn((Node { padding: UiRect { left: px(4), right: px(4), top: px(1), bottom: px(0) }, border: UiRect::all(px(1)), ..default() }, BorderColor::all(with_alpha(ui.line, 0.5)))).id();
@@ -590,16 +615,16 @@ fn draw_commit(c: &mut Commands, ui: &Ui, root: Entity, r: &Repo, amend: bool, b
     let h = ui.header(c, "Commit", &format!("{repo} · {}", r.card.branch), ui.dim);
     let inner = c.spawn(Node { flex_direction: FlexDirection::Column, row_gap: px(10), padding: UiRect { left: px(16), right: px(16), top: px(12), bottom: px(10) }, flex_grow: 1.0, ..default() }).id();
     c.entity(b).add_children(&[h, inner]);
-    let box_ = c.spawn((Node { height: px(84), padding: UiRect::all(px(12)), border: UiRect::all(px(1)), ..default() }, BorderColor::all(with_alpha(ui.line, 0.4)), BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.3)))).id();
+    let box_ = c.spawn((Node { height: px(84), padding: UiRect::all(px(12)), border: UiRect::all(px(1)), ..default() }, BorderColor::all(with_alpha(ui.line, 0.4)), BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.3)), Click::Key(KeyCode::KeyC))).id();
     let ph = ui.text(c, "C writes the commit message (in the bar below)", &ui.f.ui500, 14.0, 0.6, ui.dim);
     c.entity(box_).add_child(ph);
     let row = ui.row(c, 14.0);
     let n = r.staged.len();
     let what = ui.text(c, format!("{n} FILE{} TO {}", if n == 1 { "" } else { "S" }, r.card.branch.to_uppercase()), &ui.f.ui600, 11.0, 1.8, ui.hot);
     let sp = c.spawn(Node { flex_grow: 1.0, ..default() }).id();
-    let am_box = c.spawn((Node { width: px(10), height: px(10), border: UiRect::all(px(1)), ..default() }, BorderColor::all(ui.line), BackgroundColor(if amend { ui.hot } else { Color::NONE }))).id();
-    let am = ui.text(c, "AMEND  M", &ui.f.ui600, 10.5, 1.8, if amend { ui.hot } else { ui.dim });
-    let btn = c.spawn((Node { height: px(30), padding: UiRect::horizontal(px(14)), align_items: AlignItems::Center, column_gap: px(14), ..default() }, BackgroundColor(if n > 0 || amend { ui.hot } else { with_alpha(ui.line, 0.2) }))).id();
+    let am_box = c.spawn((Node { width: px(10), height: px(10), border: UiRect::all(px(1)), ..default() }, BorderColor::all(ui.line), BackgroundColor(if amend { ui.hot } else { Color::NONE }), Click::Key(KeyCode::KeyM))).id();
+    let am = c.spawn((Text::new("AMEND  M"), font(&ui.f.ui600, 10.5, 1.8), TextColor(if amend { ui.hot } else { ui.dim }), Click::Key(KeyCode::KeyM))).id();
+    let btn = c.spawn((Node { height: px(30), padding: UiRect::horizontal(px(14)), align_items: AlignItems::Center, column_gap: px(14), ..default() }, BackgroundColor(if n > 0 || amend { ui.hot } else { with_alpha(ui.line, 0.2) }), Click::Key(KeyCode::KeyC))).id();
     let bt = ui.text(c, if busy { "WORKING…" } else { "COMMIT" }, &ui.f.ui700, 11.5, 2.6, Color::BLACK);
     let bk = ui.text(c, "C", &ui.f.ui700, 10.0, 0.5, Color::BLACK);
     c.entity(btn).add_children(&[bt, bk]);
@@ -622,7 +647,7 @@ fn draw_status(c: &mut Commands, ui: &Ui, root: Entity, r: &Repo, cursor: usize,
         let hr = c.spawn(Node { flex_direction: FlexDirection::Row, align_items: AlignItems::Center, height: px(24), margin: UiRect::top(px(4)), ..default() }).id();
         let t = ui.text(c, format!("{title}  {}", list.len()), &ui.f.ui600, 10.5, 2.6, ui.hot);
         let sp = c.spawn(Node { flex_grow: 1.0, ..default() }).id();
-        let a = c.spawn((Node { padding: UiRect { left: px(5), right: px(5), top: px(2), bottom: px(1) }, border: UiRect::all(px(1)), ..default() }, BorderColor::all(with_alpha(ui.line, 0.5)))).id();
+        let a = c.spawn((Node { padding: UiRect { left: px(5), right: px(5), top: px(2), bottom: px(1) }, border: UiRect::all(px(1)), ..default() }, BorderColor::all(with_alpha(ui.line, 0.5)), Click::Key(if staged { KeyCode::KeyX } else { KeyCode::KeyA }))).id();
         let at = ui.text(c, act, &ui.f.ui700, 9.5, 1.2, ui.line);
         c.entity(a).add_child(at);
         c.entity(hr).add_children(&[t, sp, a]);
@@ -639,6 +664,7 @@ fn draw_status(c: &mut Commands, ui: &Ui, root: Entity, r: &Repo, cursor: usize,
                     Node { flex_direction: FlexDirection::Row, align_items: AlignItems::Center, height: px(22), column_gap: px(8), padding: UiRect::left(px(6)), border: UiRect::left(px(if sel { 2.0 } else { 0.0 })), ..default() },
                     BorderColor::all(ui.hot),
                     BackgroundColor(if sel { with_alpha(ui.line, 0.10) } else { Color::NONE }),
+                    Click::Pick(i),
                 ))
                 .id();
             let cc = match ch.code {
@@ -697,7 +723,7 @@ fn draw_remote(c: &mut Commands, ui: &Ui, root: Entity, r: &Repo) {
     c.entity(b).add_children(&[h, inner]);
     let row = ui.row(c, 10.0);
     for (label, n, key, col) in [("PULL", r.card.behind, "L", role_color(Role::Acc)), ("PUSH", r.card.ahead, "P", role_color(Role::Ok))] {
-        let btn = c.spawn((Node { flex_grow: 1.0, height: px(32), padding: UiRect::horizontal(px(12)), align_items: AlignItems::Center, column_gap: px(8), border: UiRect::all(px(1)), ..default() }, BorderColor::all(with_alpha(ui.line, 0.55)), BackgroundColor(with_alpha(ui.line, 0.05)))).id();
+        let btn = c.spawn((Node { flex_grow: 1.0, height: px(32), padding: UiRect::horizontal(px(12)), align_items: AlignItems::Center, column_gap: px(8), border: UiRect::all(px(1)), ..default() }, BorderColor::all(with_alpha(ui.line, 0.55)), BackgroundColor(with_alpha(ui.line, 0.05)), Click::Key(if label == "PULL" { KeyCode::KeyL } else { KeyCode::KeyP }))).id();
         let t = ui.text(c, label, &ui.f.ui600, 11.5, 2.3, ui.hot);
         let nt = ui.text(c, if n > 0 { format!("{}{n}", if label == "PULL" { "↓" } else { "↑" }) } else { String::new() }, &ui.f.mono, 11.5, 0.0, col);
         let sp = c.spawn(Node { flex_grow: 1.0, ..default() }).id();

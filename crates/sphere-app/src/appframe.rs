@@ -93,7 +93,7 @@ pub fn spawn_workspace(c: &mut Commands, meshes: &mut Assets<Mesh>, atlas: &mut 
         let ui = spawn_ui_panel(c, atlas, *w, *h);
         let id = if *bare { PanelId::AppBare } else { PanelId::App };
         let e = spawn_panel_quad(c, meshes, pmats, &ui, &PanelSpec { id, w: *w, h: *h, home: at(*x, *y, *w, *h, *z), home_scale: K, side: 0.0, phase: 0.4 + i as f32 * 1.1 + app as f32, show_at: 0.0, unframed: false });
-        c.entity(e).insert(AppPart { app, pane: Some(i as u8) });
+        c.entity(e).insert((AppPart { app, pane: Some(i as u8) }, PaneRoot(ui.root)));
         panes.push(ui.root);
     }
     let (lw, lh) = (300.0, 40.0);
@@ -143,7 +143,7 @@ impl Ui<'_> {
         let s = self.text(c, sub, &self.f.ui500, 11.0, 2.0, self.dim);
         let sp = c.spawn(Node { flex_grow: 1.0, ..default() }).id();
         let cr = self.text(c, credit, &self.f.ui500, 10.5, 1.0, self.dim);
-        let esc = c.spawn((Node { padding: UiRect { left: px(6), right: px(6), top: px(3), bottom: px(2) }, border: UiRect::all(px(1)), ..default() }, BorderColor::all(with_alpha(self.line, 0.55)))).id();
+        let esc = c.spawn((Node { padding: UiRect { left: px(6), right: px(6), top: px(3), bottom: px(2) }, border: UiRect::all(px(1)), ..default() }, BorderColor::all(with_alpha(self.line, 0.55)), Click::Key(KeyCode::Escape))).id();
         let et = self.text(c, "ESC", &self.f.ui700, 10.0, 1.6, self.hot);
         c.entity(esc).add_child(et);
         c.entity(r).add_children(&[n, s, sp, cr, esc]);
@@ -223,5 +223,88 @@ impl Ui<'_> {
         let k = self.text(c, key, &self.f.ui700, 9.5, 0.5, with_alpha(fg, 0.7));
         c.entity(btn).add_children(&[t, k]);
         btn
+    }
+}
+
+// ------------------------------------------------------------------ clicks
+
+/// What clicking a node in an app's pane does: press a key, or pick the nth item (and `Alt`, a second kind of
+/// item in the same app: a repo card, a filter tab, a pinned place).
+#[derive(Component, Clone, Copy, Debug, PartialEq)]
+pub enum Click {
+    Key(KeyCode),
+    Pick(usize),
+    Alt(usize),
+}
+
+/// On an app pane's quad: the root of its UI, to find what a click landed on.
+#[derive(Component)]
+pub struct PaneRoot(pub Entity);
+
+/// Clicks on app panes this frame: the quad and where on it (pane px from the top-left).
+#[derive(Resource, Default)]
+pub struct PanelClicks(pub Vec<(Entity, Vec2)>);
+
+/// Clicks resolved to what they do, per app, until the app takes them.
+#[derive(Resource, Default)]
+pub struct AppClicks(Vec<(u8, Click)>);
+
+impl AppClicks {
+    pub fn take(&mut self, app: u8) -> Vec<Click> {
+        let (mine, rest): (Vec<_>, Vec<_>) = self.0.drain(..).partition(|c| c.0 == app);
+        self.0 = rest;
+        mine.into_iter().map(|c| c.1).collect()
+    }
+}
+
+/// Finds the clickable node under each click: the smallest one whose rect holds the point.
+#[allow(clippy::type_complexity)]
+pub fn route_clicks(
+    mut clicks: ResMut<PanelClicks>,
+    mut out: ResMut<AppClicks>,
+    quads: Query<(&PaneRoot, &Panel, &AppPart)>,
+    nodes: Query<(&ComputedNode, &UiGlobalTransform)>,
+    clickable: Query<(Entity, &Click)>,
+    children: Query<&Children>,
+    mut sound: ResMut<crate::sound::Sound>,
+) {
+    for (quad, at) in clicks.0.drain(..) {
+        let Ok((root, panel, part)) = quads.get(quad) else { continue };
+        let Ok((rn, rt)) = nodes.get(root.0) else { continue };
+        let size = rn.size();
+        let scale = size.x / panel.w.max(1.0);
+        let p = rt.translation - size / 2.0 + at * scale;
+        let mut best: Option<(f32, Click)> = None;
+        for e in children.iter_descendants(root.0) {
+            let Ok((_, c)) = clickable.get(e) else { continue };
+            let Ok((n, t)) = nodes.get(e) else { continue };
+            let (half, centre) = (n.size() / 2.0, t.translation);
+            if (p - centre).abs().cmple(half).all() {
+                let area = n.size().x * n.size().y;
+                if best.is_none_or(|b| area < b.0) {
+                    best = Some((area, *c));
+                }
+            }
+        }
+        if let Some((_, c)) = best {
+            out.0.push((part.app, c));
+            sound.play_q("click", 40);
+        }
+    }
+}
+
+/// Look tests: SPHERE_TEST_CLICK="app,pane,x,y" clicks there (pane px) once, four seconds in.
+pub fn test_click(sim: Res<crate::core::Sim>, mut clicks: ResMut<PanelClicks>, quads: Query<(Entity, &AppPart), With<PaneRoot>>, mut done: Local<bool>) {
+    if *done || sim.t < 4.0 {
+        return;
+    }
+    *done = true;
+    let Ok(v) = std::env::var("SPHERE_TEST_CLICK") else { return };
+    let f: Vec<f32> = v.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+    if f.len() != 4 {
+        return;
+    }
+    if let Some((e, _)) = quads.iter().find(|(_, p)| p.app == f[0] as u8 && p.pane == Some(f[1] as u8)) {
+        clicks.0.push((e, Vec2::new(f[2], f[3])));
     }
 }

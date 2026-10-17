@@ -98,6 +98,7 @@ pub fn keys(
     sim: Res<crate::core::Sim>,
     mut sound: ResMut<crate::sound::Sound>,
     mut toasts: ResMut<crate::live::Toasts>,
+    mut clicks: ResMut<crate::appframe::AppClicks>,
     mut cmd_was: Local<bool>,
 ) {
     let mods = keys.any_pressed([KeyCode::SuperLeft, KeyCode::SuperRight, KeyCode::ControlLeft, KeyCode::ControlRight, KeyCode::AltLeft, KeyCode::AltRight]);
@@ -107,13 +108,33 @@ pub fn keys(
         ev.clear();
         return;
     }
+    let mut codes: Vec<KeyCode> = Vec::new();
     for e in ev.read() {
         if e.state != bevy::input::ButtonState::Pressed || mods || bar_busy || focus.terminal || moment.shown || e.repeat {
             continue;
         }
+        codes.push(e.key_code);
+    }
+    // clicks on the panes: a button presses its key, a row picks its item
+    for c in clicks.take(3) {
+        match c {
+            Click::Key(k) => codes.push(k),
+            Click::Pick(i) => {
+                app.sel = i;
+                app.armed = None;
+                app.version += 1;
+            }
+            Click::Alt(i) => {
+                app.filter = i;
+                app.sel = 0;
+                app.version += 1;
+            }
+        }
+    }
+    for key in codes {
         let n = app.shown().len();
         let sel = app.selected();
-        match e.key_code {
+        match key {
             KeyCode::Escape => {
                 app.close();
                 sound.play_with("collapse", 0.7, 0.0);
@@ -124,7 +145,7 @@ pub fn keys(
                 app.version += 1;
                 sound.play_q("tick", 40);
             }
-            KeyCode::ArrowLeft | KeyCode::KeyK | KeyCode::ArrowUp if n > 0 && e.key_code != KeyCode::KeyK => {
+            KeyCode::ArrowLeft | KeyCode::KeyK | KeyCode::ArrowUp if n > 0 && key != KeyCode::KeyK => {
                 app.sel = (app.sel + n - 1) % n;
                 app.armed = None;
                 app.version += 1;
@@ -307,7 +328,7 @@ pub fn draw(mut commands: Commands, app: Res<PortsApp>, svc: Res<Service>, roots
     c.entity(r).add_child(sp);
     for (i, k) in FILTERS.iter().enumerate() {
         let on = i == app.filter;
-        let t = c.spawn((Node { padding: UiRect { left: px(9), right: px(9), top: px(4), bottom: px(3) }, border: UiRect::all(px(1)), ..default() }, BorderColor::all(with_alpha(ui.line, 0.4)), BackgroundColor(if on { ui.hot } else { Color::NONE }))).id();
+        let t = c.spawn((Node { padding: UiRect { left: px(9), right: px(9), top: px(4), bottom: px(3) }, border: UiRect::all(px(1)), ..default() }, BorderColor::all(with_alpha(ui.line, 0.4)), BackgroundColor(if on { ui.hot } else { Color::NONE }), Click::Alt(i))).id();
         let tx = ui.text(c, *k, &f.ui600, 9.5, 1.8, if on { Color::BLACK } else { ui.line });
         c.entity(t).add_child(tx);
         c.entity(r).add_child(t);
@@ -343,7 +364,7 @@ pub fn draw(mut commands: Commands, app: Res<PortsApp>, svc: Res<Service>, roots
     let first = app.sel.saturating_sub(5).min(shown.len().saturating_sub(6));
     for (i, l) in shown.iter().enumerate().skip(first).take(6) {
         let sel = i == app.sel;
-        let row = c.spawn((Node { flex_direction: FlexDirection::Row, align_items: AlignItems::Center, height: px(20), column_gap: px(10), padding: UiRect::left(px(6)), border: UiRect::left(px(if sel { 2.0 } else { 0.0 })), ..default() }, BorderColor::all(ui.hot), BackgroundColor(if sel { with_alpha(ui.line, 0.1) } else { Color::NONE }))).id();
+        let row = c.spawn((Node { flex_direction: FlexDirection::Row, align_items: AlignItems::Center, height: px(20), column_gap: px(10), padding: UiRect::left(px(6)), border: UiRect::left(px(if sel { 2.0 } else { 0.0 })), ..default() }, BorderColor::all(ui.hot), BackgroundColor(if sel { with_alpha(ui.line, 0.1) } else { Color::NONE }), Click::Pick(i))).id();
         let p = c.spawn((Text::new(format!(":{}", l.port)), font(&f.mono, 12.0, 0.0), TextColor(ui.hot), Node { width: px(62), ..default() })).id();
         let who = ui.text(c, clip(l.container.as_deref().unwrap_or(&l.command), 22), &f.mono, 11.5, 0.0, ui.line);
         let sp = c.spawn(Node { flex_grow: 1.0, ..default() }).id();
@@ -386,6 +407,7 @@ fn draw_map(c: &mut Commands, ui: &Ui, map: Entity, app: &PortsApp) {
                 Node { position_type: PositionType::Absolute, left: px(x - w / 2.0), top: px(y - h / 2.0), width: px(w), height: px(h), flex_direction: FlexDirection::Column, align_items: AlignItems::Center, justify_content: JustifyContent::Center, border: UiRect::all(px(if sel { 2.0 } else { 1.0 })), ..default() },
                 BorderColor::all(if sel { ui.hot } else { with_alpha(col, 0.5) }),
                 BackgroundColor(Color::srgba(0.0, 0.0, 0.0, if sel { 0.65 } else { 0.45 })),
+                Click::Pick(i),
             ))
             .id();
         let p = ui.text(c, l.port.to_string(), &ui.f.mono, 13.5, 0.0, ui.hot);
@@ -424,6 +446,9 @@ fn draw_detail(c: &mut Commands, ui: &Ui, root: Entity, l: &Listener, conns: Opt
     let o = ui.button(c, "Open in browser", "O", ui.hot, true);
     let t = ui.button(c, "Tail logs", "T", ui.hot, false);
     let k = ui.button(c, if armed { "Press K again" } else { "Stop" }, "K", role_color(Role::Bad), armed);
+    for (e, key) in [(o, KeyCode::KeyO), (t, KeyCode::KeyT), (k, KeyCode::KeyK)] {
+        c.entity(e).insert(Click::Key(key));
+    }
     c.entity(btns).add_children(&[o, t, k]);
     c.entity(inner).add_child(btns);
 }

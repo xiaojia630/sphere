@@ -114,7 +114,7 @@ fn pick(win: &Window, pos: Vec2, cam: (&Camera, &GlobalTransform), panels: &Pane
 
 pub const DECK_NAMES: [&str; 6] = ["Timeline", "System load", "Agents", "Signal", "Voice", "Sphere core"];
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn update(
     time: Res<Time<Real>>,
     buttons: Res<ButtonInput<MouseButton>>,
@@ -130,7 +130,7 @@ pub fn update(
     mut ctl: ResMut<CoreCtl>,
     mut ms: ResMut<MouseState>,
     (mut acts, mut sound, mut toasts): (ResMut<Acts>, ResMut<crate::sound::Sound>, ResMut<crate::live::Toasts>),
-    (mut rolo, mut fx, mut open, sv): (ResMut<crate::homepanels::Rolodex>, ResMut<crate::fx::Fx>, ResMut<crate::apps::Open>, Res<crate::core::StageView>),
+    (mut rolo, mut fx, mut open, sv, mut pclicks): (ResMut<crate::homepanels::Rolodex>, ResMut<crate::fx::Fx>, ResMut<crate::apps::Open>, Res<crate::core::StageView>, ResMut<crate::appframe::PanelClicks>),
 ) {
     let dt = time.delta_secs();
     ms.t += dt;
@@ -286,7 +286,19 @@ pub fn update(
             Drag::None => {
                 // a click: double within 300 ms, else a single after 260 ms
                 if let Some((p0, t0)) = ms.down_at {
-                    if (pos - p0).length() <= 4.0 && now - t0 < 0.45 {
+                    let app_pane = match hit {
+                        Hit::Panel(e, PanelId::App | PanelId::AppBare | PanelId::AppFrame) => Some(e),
+                        _ => None,
+                    };
+                    if let (Some(e), true) = (app_pane, (pos - p0).length() <= 4.0) {
+                        // an app's pane: the click goes to what's under it, now (apps have no double-click)
+                        if let (Ok(ray), Ok((_, p, gt, _))) = (cam.0.viewport_to_world(cam.1, pos), panels.p0().get(e)) {
+                            if let Some(d) = ray.intersect_plane(gt.translation(), InfinitePlane3d::new(gt.back())) {
+                                let local = gt.affine().inverse().transform_point3(ray.get_point(d));
+                                pclicks.0.push((e, Vec2::new(local.x + p.w / 2.0, p.h / 2.0 - local.y)));
+                            }
+                        }
+                    } else if (pos - p0).length() <= 4.0 && now - t0 < 0.45 {
                         let dbl = !orb.open && ms.last_click.is_some_and(|(lp, lt)| now - lt < 0.3 && (pos - lp).length() < 8.0);
                         if orb.open {
                             // open: a tile opens its app, the sphere closes the orbit

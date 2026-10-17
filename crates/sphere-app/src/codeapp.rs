@@ -9,7 +9,7 @@ use crate::fonts::UiFonts;
 use crate::panel::*;
 use crate::review::{self, FileDiff, LineKind, Review, TestRun};
 use crate::service::{Cmd, Service};
-use crate::appframe::{clip, Ui};
+use crate::appframe::{clip, Click, Ui};
 use crate::util::*;
 use bevy::prelude::*;
 use bevy::text::LineHeight;
@@ -207,7 +207,7 @@ pub fn setup(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut atlas
         let ui = spawn_ui_panel(c, &mut atlas, w, h);
         let id = if *pane == Pane::Top { PanelId::AppBare } else { PanelId::App };
         let e = spawn_panel_quad(c, &mut meshes, &mut pmats, &ui, &PanelSpec { id, w, h, home: at(x, y, w, h, z), home_scale: K, side: 0.0, phase: 0.7 + i as f32 * 1.3, show_at: 0.0, unframed: false });
-        c.entity(e).insert(CodePane(*pane));
+        c.entity(e).insert((CodePane(*pane), crate::appframe::AppPart { app: 0, pane: Some(i as u8) }, crate::appframe::PaneRoot(ui.root)));
         panes.push((*pane, ui.root));
     }
     // "CODE · 1 agent needs you" beside the small core
@@ -230,6 +230,7 @@ pub fn keys(
     sim: Res<crate::core::Sim>,
     mut sound: ResMut<crate::sound::Sound>,
     mut toasts: ResMut<crate::live::Toasts>,
+    mut clicks: ResMut<crate::appframe::AppClicks>,
     mut cmd_was: Local<bool>,
 ) {
     let mut focus = focus;
@@ -241,12 +242,33 @@ pub fn keys(
         ev.clear();
         return;
     }
+    let mut codes: Vec<KeyCode> = Vec::new();
     for e in ev.read() {
         if e.state != bevy::input::ButtonState::Pressed || mods || bar_busy || focus.terminal || moment.shown || e.repeat && !matches!(e.key_code, KeyCode::KeyJ | KeyCode::KeyK) {
             continue;
         }
+        codes.push(e.key_code);
+    }
+    // clicks on the panes: a button presses its key, a row picks its item
+    for c in clicks.take(0) {
+        match c {
+            Click::Key(k) => codes.push(k),
+            Click::Pick(i) => {
+                if app.review.as_ref().is_some_and(|r| i < r.files.len()) {
+                    app.file = i;
+                    app.hunk = 0;
+                    app.version += 1;
+                }
+            }
+            Click::Alt(i) => {
+                app.hunk = i;
+                app.version += 1;
+            }
+        }
+    }
+    for key in codes {
         let task = { pick(&app, &svc.shared.lock().unwrap().tasks).cloned() };
-        match e.key_code {
+        match key {
             KeyCode::Escape => {
                 app.close();
                 sound.play_with("collapse", 0.7, 0.0);
@@ -663,7 +685,7 @@ fn draw_top(c: &mut Commands, ui: &Ui, root: Entity, t: Option<&TaskView>) {
     let sub = ui.text(c, format!("{repo} · REVIEW"), &ui.f.ui500, 11.0, 2.6, ui.dim);
     let sp = c.spawn(Node { flex_grow: 1.0, ..default() }).id();
     let credit = ui.text(c, "diff after delta (MIT) · git · editor: Zed (GPL-3.0)", &ui.f.ui500, 10.5, 1.0, ui.dim);
-    let esc = c.spawn((Node { padding: UiRect { left: px(6), right: px(6), top: px(3), bottom: px(2) }, border: UiRect::all(px(1)), ..default() }, BorderColor::all(with_alpha(ui.line, 0.55)))).id();
+    let esc = c.spawn((Node { padding: UiRect { left: px(6), right: px(6), top: px(3), bottom: px(2) }, border: UiRect::all(px(1)), ..default() }, BorderColor::all(with_alpha(ui.line, 0.55)), Click::Key(KeyCode::Escape))).id();
     let et = ui.text(c, "ESC", &ui.f.ui700, 10.0, 1.6, ui.hot);
     c.entity(esc).add_child(et);
     c.entity(r).add_children(&[ic, name, sub, sp, credit, esc]);
@@ -787,6 +809,7 @@ fn draw_tree(c: &mut Commands, ui: &Ui, root: Entity, app: &CodeApp) {
                 Node { flex_direction: FlexDirection::Row, align_items: AlignItems::Center, height: px(22), padding: UiRect { left: px(10), right: px(4), ..default() }, border: UiRect::left(px(2)), column_gap: px(8), ..default() },
                 BackgroundColor(if sel { with_alpha(ui.line, 0.10) } else { Color::NONE }),
                 BorderColor::all(if sel { ui.hot } else { Color::NONE }),
+                Click::Pick(i),
             ))
             .id();
         let (dir, name) = match fd.path.rsplit_once('/') {
@@ -841,6 +864,7 @@ fn draw_diff(c: &mut Commands, ui: &Ui, root: Entity, app: &CodeApp) {
                 Node { flex_direction: FlexDirection::Row, align_items: AlignItems::Center, height: px(24), padding: UiRect { left: px(10), right: px(10), ..default() }, column_gap: px(10), border: UiRect::all(px(1)), margin: UiRect { top: px(if hi == app.hunk { 0.0 } else { 6.0 }), ..default() }, ..default() },
                 BackgroundColor(with_alpha(ui.line, if sel { 0.08 } else { 0.03 })),
                 BorderColor::all(with_alpha(ui.line, if sel { 0.55 } else { 0.2 })),
+                Click::Alt(hi),
             ))
             .id();
         let at = ui.text(c, format!("{}:", hk.new_start), &ui.f.mono, 12.0, 0.0, role_color(Role::Acc));
@@ -892,7 +916,7 @@ fn draw_tests(c: &mut Commands, ui: &Ui, root: Entity, t: &TaskView, run: Option
     let inner = c.spawn(Node { flex_direction: FlexDirection::Column, row_gap: px(6), padding: UiRect { left: px(18), right: px(16), top: px(12), bottom: px(10) }, flex_grow: 1.0, ..default() }).id();
     c.entity(b).add_children(&[h, inner]);
     let Some(r) = run else {
-        let m = c.spawn((Text::new("Not run yet. R runs the repo's tests in the agent's worktree."), font(&ui.f.ui500, 13.0, 0.4), TextColor(ui.line), LineHeight::Px(17.0))).id();
+        let m = c.spawn((Text::new("Not run yet. R (or click) runs the repo's tests in the agent's worktree."), font(&ui.f.ui500, 13.0, 0.4), TextColor(ui.line), LineHeight::Px(17.0), Click::Key(KeyCode::KeyR))).id();
         c.entity(inner).add_child(m);
         return;
     };
@@ -941,7 +965,7 @@ fn draw_tests(c: &mut Commands, ui: &Ui, root: Entity, t: &TaskView, run: Option
         c.entity(inner).add_child(row);
     }
     let sp = c.spawn(Node { flex_grow: 1.0, ..default() }).id();
-    let foot = c.spawn((Node { padding: UiRect::top(px(8)), border: UiRect::top(px(1)), ..default() }, BorderColor::all(with_alpha(ui.line, 0.2)))).id();
+    let foot = c.spawn((Node { padding: UiRect::top(px(8)), border: UiRect::top(px(1)), ..default() }, BorderColor::all(with_alpha(ui.line, 0.2)), Click::Key(KeyCode::KeyR))).id();
     let ft = ui.text(c, if r.done { "R RUN AGAIN" } else { "RUNNING IN THE WORKTREE" }, &ui.f.ui600, 10.5, 2.0, ui.dim);
     c.entity(foot).add_child(ft);
     c.entity(inner).add_children(&[sp, foot]);
@@ -978,6 +1002,13 @@ fn draw_acts(c: &mut Commands, ui: &Ui, root: Entity, app: &CodeApp) {
                 Node { height: px(34), flex_direction: FlexDirection::Row, align_items: AlignItems::Center, padding: UiRect { left: px(12), right: px(10), ..default() }, border: UiRect::all(px(1)), ..default() },
                 BackgroundColor(if fill { if is_armed && role == Role::Bad { col } else { with_alpha(col, if is_armed { 1.0 } else { 0.92 }) } } else { with_alpha(ui.line, 0.06) }),
                 BorderColor::all(if fill { col } else { with_alpha(col, 0.55) }),
+                Click::Key(match key {
+                    "M" => KeyCode::KeyM,
+                    "P" => KeyCode::KeyP,
+                    "E" => KeyCode::KeyE,
+                    "Z" => KeyCode::KeyZ,
+                    _ => KeyCode::KeyD,
+                }),
             ))
             .id();
         let text = if is_armed { format!("PRESS {key} AGAIN") } else { label.to_string() };

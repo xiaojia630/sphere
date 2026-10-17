@@ -113,6 +113,7 @@ pub fn keys(
     sim: Res<crate::core::Sim>,
     mut sound: ResMut<crate::sound::Sound>,
     mut toasts: ResMut<crate::live::Toasts>,
+    mut clicks: ResMut<crate::appframe::AppClicks>,
     mut cmd_was: Local<bool>,
 ) {
     let mods = keys.any_pressed([KeyCode::SuperLeft, KeyCode::SuperRight, KeyCode::ControlLeft, KeyCode::ControlRight, KeyCode::AltLeft, KeyCode::AltRight]);
@@ -122,13 +123,30 @@ pub fn keys(
         ev.clear();
         return;
     }
+    let mut codes: Vec<KeyCode> = Vec::new();
     for e in ev.read() {
         if e.state != bevy::input::ButtonState::Pressed || mods || bar_busy || focus.terminal || moment.shown || e.repeat {
             continue;
         }
+        codes.push(e.key_code);
+    }
+    // clicks on the panes: a button presses its key, a row picks its item
+    for c in clicks.take(2) {
+        match c {
+            Click::Key(k) => codes.push(k),
+            Click::Pick(i) => {
+                app.sel = i;
+                app.logs_t = -99.0;
+                app.armed = None;
+                app.version += 1;
+            }
+            Click::Alt(_) => {}
+        }
+    }
+    for key in codes {
         let n = app.shown().len();
         let sel = app.selected().cloned();
-        match e.key_code {
+        match key {
             KeyCode::Escape => {
                 app.close();
                 sound.play_with("collapse", 0.7, 0.0);
@@ -419,6 +437,7 @@ fn draw_map(c: &mut Commands, ui: &Ui, map: Entity, app: &ContainersApp) {
                 Node { position_type: PositionType::Absolute, left: px(x - w / 2.0), top: px(y - h / 2.0), width: px(w), height: px(h), flex_direction: FlexDirection::Column, justify_content: JustifyContent::Center, row_gap: px(3), padding: UiRect::horizontal(px(14)), border: UiRect::all(px(if sel { 2.0 } else { 1.0 })), border_radius: BorderRadius::all(px(28)), ..default() },
                 BorderColor::all(if sel { col } else { with_alpha(ui.line, 0.4) }),
                 BackgroundColor(Color::srgba(0.0, 0.0, 0.0, if sel { 0.6 } else { 0.4 })),
+                Click::Pick(i),
             ))
             .id();
         let top = ui.row(c, 7.0);
@@ -479,6 +498,9 @@ fn draw_detail(c: &mut Commands, ui: &Ui, root: Entity, ct: &Container, hist: &[
     let r = ui.button(c, "Restart", "R", ui.hot, false);
     let p = ui.button(c, "Pull", "P", ui.hot, false);
     let d = ui.button(c, if armed { "Press D again" } else { "Remove" }, "D", role_color(Role::Bad), armed);
+    for (e, k) in [(a, KeyCode::KeyS), (r, KeyCode::KeyR), (p, KeyCode::KeyP), (d, KeyCode::KeyD)] {
+        c.entity(e).insert(Click::Key(k));
+    }
     c.entity(btns).add_children(&[a, r, p, d]);
     c.entity(inner).add_child(btns);
 }
@@ -486,6 +508,7 @@ fn draw_detail(c: &mut Commands, ui: &Ui, root: Entity, ct: &Container, hist: &[
 fn draw_logs(c: &mut Commands, ui: &Ui, root: Entity, ct: &Container, logs: &[String], follow: bool) {
     let b = ui.body(c, root);
     let h = ui.header(c, "Logs", &format!("{} · {}", ct.name, if follow { "following" } else { "paused (F)" }), ui.dim);
+    c.entity(h).insert(Click::Key(KeyCode::KeyF));
     let list = c.spawn(Node { flex_direction: FlexDirection::Column, padding: UiRect { left: px(16), right: px(16), top: px(6), ..default() }, ..default() }).id();
     c.entity(b).add_children(&[h, list]);
     if logs.is_empty() {

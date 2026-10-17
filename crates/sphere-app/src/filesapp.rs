@@ -250,6 +250,7 @@ pub fn keys(
     sim: Res<crate::core::Sim>,
     mut sound: ResMut<crate::sound::Sound>,
     mut toasts: ResMut<crate::live::Toasts>,
+    mut clicks: ResMut<crate::appframe::AppClicks>,
     mut cmd_was: Local<bool>,
 ) {
     let mut focus = focus;
@@ -260,13 +261,37 @@ pub fn keys(
         ev.clear();
         return;
     }
+    let mut codes: Vec<KeyCode> = Vec::new();
     for e in ev.read() {
         if e.state != bevy::input::ButtonState::Pressed || mods || bar_busy || focus.terminal || moment.shown || (e.repeat && !matches!(e.key_code, KeyCode::KeyJ | KeyCode::KeyK | KeyCode::ArrowDown | KeyCode::ArrowUp)) {
             continue;
         }
+        codes.push(e.key_code);
+    }
+    // clicks on the panes: a button presses its key, a row picks its item
+    for c in clicks.take(5) {
+        match c {
+            Click::Key(k) => codes.push(k),
+            Click::Pick(i) => {
+                // a second click on the same row opens it
+                if i == app.cursor {
+                    codes.push(KeyCode::Enter);
+                } else {
+                    app.cursor = i;
+                    app.version += 1;
+                }
+            }
+            Click::Alt(i) => {
+                if let Some((_, p)) = app.pins.get(i).cloned() {
+                    app.go(p, None);
+                }
+            }
+        }
+    }
+    for key in codes {
         let n = app.shown().len();
         let cur = app.current();
-        match e.key_code {
+        match key {
             KeyCode::Escape => {
                 if !app.filter.is_empty() {
                     app.filter.clear();
@@ -300,7 +325,7 @@ pub fn keys(
                     app.go(p, None);
                     sound.play_q("tick", 30);
                 }
-                Some(p) if e.key_code == KeyCode::Enter => {
+                Some(p) if key == KeyCode::Enter => {
                     let _ = std::process::Command::new("open").arg(&p).spawn();
                     toasts.push_quiet(format!("Opening {}", p.file_name().unwrap_or_default().to_string_lossy()));
                     sound.play("open");
@@ -502,7 +527,7 @@ pub fn draw(mut commands: Commands, app: Res<FilesApp>, svc: Res<Service>, roots
     for (i, (name, p)) in app.pins.iter().enumerate() {
         let on = app.cwd.starts_with(p);
         let agent = p.to_string_lossy().contains("/.sphere/");
-        let chip = c.spawn((Node { height: px(36), flex_direction: FlexDirection::Row, align_items: AlignItems::Center, column_gap: px(8), padding: UiRect::horizontal(px(9)), border: UiRect::all(px(1)), ..default() }, BorderColor::all(with_alpha(if on { ui.hot } else { ui.line }, if on { 0.9 } else { 0.35 })), BackgroundColor(if on { with_alpha(ui.line, 0.08) } else { Color::NONE }))).id();
+        let chip = c.spawn((Node { height: px(36), flex_direction: FlexDirection::Row, align_items: AlignItems::Center, column_gap: px(8), padding: UiRect::horizontal(px(9)), border: UiRect::all(px(1)), ..default() }, BorderColor::all(with_alpha(if on { ui.hot } else { ui.line }, if on { 0.9 } else { 0.35 })), BackgroundColor(if on { with_alpha(ui.line, 0.08) } else { Color::NONE }), Click::Alt(i))).id();
         let k = ui.text(c, format!("{}", i + 1), &f.mono, 10.5, 0.0, ui.dim);
         let col = c.spawn(Node { flex_direction: FlexDirection::Column, ..default() }).id();
         let n = ui.text(c, clip(name, 16), &f.ui600, 12.0, 0.4, if agent { role_color(Role::Fill) } else { ui.hot });
@@ -524,7 +549,7 @@ pub fn draw(mut commands: Commands, app: Res<FilesApp>, svc: Res<Service>, roots
         Some(p) => {
             let name = p.file_name().unwrap_or_default().to_string_lossy().to_string();
             match preview(&p, app.hidden) {
-                Preview::Dir(v) => column_into(c, &ui, b, &name, &v, None, &[], &p, false),
+                Preview::Dir(v) => column_into(c, &ui, b, &name, &v, None, &[], &p, false, KeyCode::KeyL),
                 Preview::Text(lines, total) => {
                     let ext = p.extension().map(|e| e.to_string_lossy().to_uppercase()).unwrap_or_else(|| "TEXT".into());
                     let size = p.metadata().map(|m| m.len()).unwrap_or(0);
@@ -595,11 +620,11 @@ pub fn draw(mut commands: Commands, app: Res<FilesApp>, svc: Res<Service>, roots
 #[allow(clippy::too_many_arguments)]
 fn column(c: &mut Commands, ui: &Ui, root: Entity, title: &str, entries: &[Entry], cursor: Option<usize>, selected: &[PathBuf], dir: &Path, active: bool) {
     let b = ui.body(c, root);
-    column_into(c, ui, b, title, entries, cursor, selected, dir, active);
+    column_into(c, ui, b, title, entries, cursor, selected, dir, active, KeyCode::KeyH);
 }
 
 #[allow(clippy::too_many_arguments)]
-fn column_into(c: &mut Commands, ui: &Ui, b: Entity, title: &str, entries: &[Entry], cursor: Option<usize>, selected: &[PathBuf], dir: &Path, active: bool) {
+fn column_into(c: &mut Commands, ui: &Ui, b: Entity, title: &str, entries: &[Entry], cursor: Option<usize>, selected: &[PathBuf], dir: &Path, active: bool, other: KeyCode) {
     let h = ui.header(c, title, &entries.len().to_string(), ui.dim);
     let list = c.spawn(Node { flex_direction: FlexDirection::Column, padding: UiRect { left: px(8), right: px(10), top: px(8), ..default() }, ..default() }).id();
     c.entity(b).add_children(&[h, list]);
@@ -619,6 +644,8 @@ fn column_into(c: &mut Commands, ui: &Ui, b: Entity, title: &str, entries: &[Ent
                 BackgroundColor(if on { with_alpha(ui.line, if active { 0.12 } else { 0.07 }) } else if picked { with_alpha(role_color(Role::Acc), 0.12) } else { Color::NONE }),
             ))
             .id();
+        // rows where you are pick (twice opens); the parent column goes up, the preview goes in
+        c.entity(row).insert(if active { Click::Pick(i) } else { Click::Key(other) });
         let ic = c.spawn((Text::new(icon(e)), font(&ui.f.mono, 11.0, 0.0), TextColor(if e.dir { ui.hot } else { ui.dim }), Node { width: px(16), flex_shrink: 0.0, ..default() })).id();
         let nm = c.spawn((Text::new(if e.dir { format!("{}/", e.name) } else { e.name.clone() }), font(&ui.f.mono, 12.5, 0.0), TextColor(if picked { role_color(Role::Acc) } else if on { ui.hot } else { ui.line }), TextLayout { linebreak: LineBreak::NoWrap, ..default() }, Node { flex_grow: 1.0, flex_shrink: 1.0, overflow: Overflow::clip(), ..default() })).id();
         let sz = ui.text(c, if e.dir { String::new() } else { human(e.size) }, &ui.f.mono, 10.5, 0.0, ui.dim);

@@ -110,6 +110,7 @@ pub fn keys(
     sim: Res<crate::core::Sim>,
     mut sound: ResMut<crate::sound::Sound>,
     mut toasts: ResMut<crate::live::Toasts>,
+    mut clicks: ResMut<crate::appframe::AppClicks>,
     mut cmd_was: Local<bool>,
 ) {
     let mods = keys.any_pressed([KeyCode::SuperLeft, KeyCode::SuperRight, KeyCode::ControlLeft, KeyCode::ControlRight, KeyCode::AltLeft, KeyCode::AltRight]);
@@ -119,12 +120,28 @@ pub fn keys(
         ev.clear();
         return;
     }
+    let mut codes: Vec<KeyCode> = Vec::new();
     for e in ev.read() {
         if e.state != bevy::input::ButtonState::Pressed || mods || bar_busy || focus.terminal || moment.shown || e.repeat {
             continue;
         }
+        codes.push(e.key_code);
+    }
+    // clicks on the panes: a button presses its key, a row picks its item
+    for c in clicks.take(4) {
+        match c {
+            Click::Key(k) => codes.push(k),
+            Click::Pick(i) => {
+                app.sel = i;
+                app.armed = None;
+                app.version += 1;
+            }
+            Click::Alt(_) => {}
+        }
+    }
+    for key in codes {
         let procs = app.procs();
-        match e.key_code {
+        match key {
             KeyCode::Escape => {
                 app.close();
                 sound.play_with("collapse", 0.7, 0.0);
@@ -341,11 +358,12 @@ pub fn draw(mut commands: Commands, app: Res<SysApp>, svc: Res<Service>, roots: 
     // processes
     let b = ui.body(c, ws.panes[PROCS]);
     let h = ui.header(c, "Processes", if app.by_mem { "by memory · S" } else { "by CPU · S" }, ui.dim);
+    c.entity(h).insert(Click::Key(KeyCode::KeyS));
     let list = c.spawn(Node { flex_direction: FlexDirection::Column, padding: UiRect { left: px(14), right: px(14), top: px(4), ..default() }, ..default() }).id();
     c.entity(b).add_children(&[h, list]);
     for (i, p) in app.procs().iter().enumerate() {
         let sel = i == app.sel;
-        let row = c.spawn((Node { flex_direction: FlexDirection::Row, align_items: AlignItems::Center, height: px(20), column_gap: px(14), padding: UiRect::left(px(6)), border: UiRect::left(px(if sel { 2.0 } else { 0.0 })), ..default() }, BorderColor::all(ui.hot), BackgroundColor(if sel { with_alpha(ui.line, 0.1) } else { Color::NONE }))).id();
+        let row = c.spawn((Node { flex_direction: FlexDirection::Row, align_items: AlignItems::Center, height: px(20), column_gap: px(14), padding: UiRect::left(px(6)), border: UiRect::left(px(if sel { 2.0 } else { 0.0 })), ..default() }, BorderColor::all(ui.hot), BackgroundColor(if sel { with_alpha(ui.line, 0.1) } else { Color::NONE }), Click::Pick(i))).id();
         let nm = c.spawn((Text::new(clip(&p.name, 40)), font(&f.mono, 12.0, 0.0), TextColor(if sel { ui.hot } else { ui.line }), Node { width: px(380), overflow: Overflow::clip(), ..default() })).id();
         let pid = c.spawn((Text::new(p.pid.to_string()), font(&f.mono, 11.5, 0.0), TextColor(ui.dim), Node { width: px(80), ..default() })).id();
         let bar = ui.bar(c, p.cpu / 200.0, role_color(Role::Fill), 220.0);
@@ -353,6 +371,9 @@ pub fn draw(mut commands: Commands, app: Res<SysApp>, svc: Res<Service>, roots: 
         let mem = ui.text(c, if p.rss_mb > 1024.0 { format!("{:.1} GB", p.rss_mb / 1024.0) } else { format!("{:.0} MB", p.rss_mb) }, &f.mono, 11.5, 0.0, ui.line);
         let sp = c.spawn(Node { flex_grow: 1.0, ..default() }).id();
         let k = ui.text(c, if sel && app.armed.is_some() { "PRESS K AGAIN" } else if sel { "K STOP" } else { "" }, &f.ui700, 9.5, 1.6, role_color(Role::Bad));
+        if sel {
+            c.entity(k).insert(Click::Key(KeyCode::KeyK));
+        }
         c.entity(row).add_children(&[nm, pid, bar, cpu, mem, sp, k]);
         c.entity(list).add_child(row);
     }
