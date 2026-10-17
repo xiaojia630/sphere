@@ -95,7 +95,6 @@ pub enum PanelId {
     Terminal,
     Readout,
     Clock,
-    #[allow(dead_code)] // the Agent moment card (next)
     Moment,
 }
 
@@ -209,15 +208,17 @@ pub fn spawn_panel_quad(
     ui: &UiPanel,
     s: &PanelSpec,
 ) -> Entity {
+    // The Agent moment card: darker glass (it sits over the core's flare) and an amber LED and bar.
+    let card = s.id == PanelId::Moment;
     let mat = mats.add(PanelMaterial {
         u: PanelUniform {
             size: Vec4::new(s.w, s.h, PAD, 0.0),
             line: lin(Role::Line),
             hot: lin(Role::Hot),
-            fill: lin(Role::Fill),
+            fill: if card { lin(Role::Acc) } else { lin(Role::Fill) },
             acc: lin(Role::Acc),
             // 1 framed glass, 2 the core readout (dark backdrop), 3 bare text (the clock)
-            p: Vec4::new(if s.id == PanelId::Clock { 3.0 } else if s.unframed { 2.0 } else { 1.0 }, 0.36, 1.0, 1.0),
+            p: Vec4::new(if s.id == PanelId::Clock { 3.0 } else if s.unframed { 2.0 } else { 1.0 }, if card { 0.86 } else { 0.36 }, 1.0, 1.0),
         },
         content: Some(ui.image.clone()),
     });
@@ -262,11 +263,13 @@ pub fn update_panels(
     sim: Res<Sim>,
     mut ctl: ResMut<CoreCtl>,
     focus: Res<Focus>,
+    moment: Res<crate::moment::Moment>,
     mut mats: ResMut<Assets<PanelMaterial>>,
     mut q: Query<(&mut Panel, &mut Transform, &mut Visibility), Without<ReadoutLink>>,
 ) {
     let (dt, t) = (sim.dt, sim.t);
-    let ft = if focus.terminal { 1.0 } else { 0.0 };
+    // the core fades back for the focused terminal, and partly for the Agent moment card so its text reads
+    let ft = if focus.terminal { 1.0 } else if moment.shown { 0.75 } else { 0.0 };
     ctl.focus_amt += (ft - ctl.focus_amt) * (1.0 - (-6.0 * dt).exp());
     for (mut p, mut tr, mut vis) in &mut q {
         let depth = ctl.mode == Mode::Depth;
@@ -295,6 +298,19 @@ pub fn update_panels(
             }
         }
         let focused_me = p.id == PanelId::Terminal && focus.terminal;
+        if p.id == PanelId::Moment {
+            // the card: up while a request waits, flat and still so its text reads cleanly
+            top = if moment.shown && !focus.terminal { 1.0 } else { 0.0 };
+            tx = p.home.x;
+            ty = p.home.y;
+            tz = p.home.z + if moment.shown { 0.0 } else { -120.0 };
+            trx = 0.0;
+            try_ = 0.0;
+        } else if moment.shown && !focus.terminal {
+            // other panels step back while the card is up
+            top *= 0.45;
+            tz -= 40.0;
+        }
         if focused_me {
             tx = 0.0;
             ty = CORE_Y;

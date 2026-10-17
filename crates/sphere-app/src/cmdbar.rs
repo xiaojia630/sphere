@@ -29,7 +29,7 @@ pub struct CmdCaret;
 #[derive(Component)]
 pub struct ToastText;
 
-const PLACEHOLDER: &str = "Start a task, or repo: task";
+const PLACEHOLDER: &str = "Start a task  ·  repo: task  ·  > reply to the last agent";
 
 pub fn setup(mut commands: Commands, f: Res<UiFonts>, root: Res<crate::hud::OverlayRoot>) {
     let line = role_color(Role::Line);
@@ -173,6 +173,21 @@ fn run(text: &str, svc: &Service, toasts: &mut Toasts, terms: &mut crate::term::
             return;
         }
         _ => {}
+    }
+    if let Some(msg) = text.strip_prefix('>') {
+        // `> message` talks to the agent you heard from last
+        let latest = {
+            let s = svc.shared.lock().unwrap();
+            s.tasks.iter().filter(|t| t.session_id.is_some()).max_by(|a, b| a.updated_at.cmp(&b.updated_at)).map(|t| (t.id.clone(), t.title.clone()))
+        };
+        match latest {
+            Some((task, title)) => {
+                toasts.push(format!("To {title}"));
+                svc.send(Cmd::Send { task, text: msg.trim().to_string() });
+            }
+            None => toasts.push("No agent to talk to yet"),
+        }
+        return;
     }
     match resolve(text) {
         Ok((repo, prompt)) => {

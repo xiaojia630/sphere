@@ -16,7 +16,6 @@ pub struct Live {
     seen: u64,
 }
 
-#[allow(dead_code)] // the Agent moment card (next) uses it
 impl Live {
     pub fn title<'a>(&'a self, task: &'a str) -> &'a str {
         self.titles.iter().find(|(id, _)| id == task).map(|(_, t)| t.as_str()).unwrap_or(task)
@@ -82,6 +81,9 @@ fn pick(tasks: &[TaskView]) -> Vec<Agent> {
 
 pub fn sync(svc: Res<Service>, mut live: ResMut<Live>, mut agents: ResMut<Agents>, mut toasts: ResMut<Toasts>, args: Res<crate::Args>) {
     if args.offline() {
+        if args.moment && live.requests.is_empty() {
+            demo_request(&mut live);
+        }
         return;
     }
     let mut s = svc.shared.lock().unwrap();
@@ -107,6 +109,28 @@ pub fn sync(svc: Res<Service>, mut live: ResMut<Live>, mut agents: ResMut<Agents
         live.titles = titles;
         live.version += 1;
     }
+}
+
+/// The prototype's kind of moment, for `--moment` screenshots: an agent asking to run a command.
+fn demo_request(live: &mut Live) {
+    let info = sphere_proto::RequestInfo {
+        id: "r1".into(),
+        task: "t1".into(),
+        kind: sphere_proto::RequestKind::Permission,
+        tool: "Bash".into(),
+        display_name: None,
+        description: Some("Run the login tests against staging".into()),
+        summary: "The login test is flaky, not broken. I'd like to run it against staging to confirm the fix.".into(),
+        input: serde_json::json!({"command": "npm test -- --grep login --env staging", "description": "Run the login tests against staging"}),
+        suggestions: vec![],
+        blocked_path: None,
+        tool_use_id: None,
+        agent_request: None,
+        revises: None,
+    };
+    live.requests = vec![RequestView { info, status: sphere_proto::RequestStatus::Open, opened_at: "2026-10-16T17:52:00Z".into() }];
+    live.titles = vec![("t1".into(), "Fix flaky login test".into())];
+    live.version += 1;
 }
 
 pub fn tick_toasts(time: Res<Time<Real>>, mut toasts: ResMut<Toasts>) {

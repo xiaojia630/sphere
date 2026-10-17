@@ -29,7 +29,6 @@ pub struct Shared {
     pub notes: Vec<String>,
 }
 
-#[allow(dead_code)] // Answer and Send: the Agent moment card (next)
 pub enum Cmd {
     Start { repo: String, prompt: String },
     Answer { request: String, answer: AnswerKind, text: Option<String> },
@@ -119,8 +118,11 @@ fn spawn_sphered() -> Result<(), String> {
 }
 
 async fn connect(sh: &Mutex<Shared>) -> Client {
-    let socket = sphere_proto::paths::default_socket();
-    let mut started = false;
+    // SPHERE_SOCKET points the app at another sphered (tests, a second state dir); the app then never
+    // starts one itself.
+    let custom = std::env::var_os("SPHERE_SOCKET").map(PathBuf::from);
+    let socket = custom.clone().unwrap_or_else(sphere_proto::paths::default_socket);
+    let mut started = custom.is_some();
     let mut backoff = Duration::from_millis(100);
     loop {
         match Client::connect(&socket).await {

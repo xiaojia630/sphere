@@ -41,6 +41,8 @@ pub struct Args {
     pub demo: bool,
     /// `--live`: screenshots and benches use sphered too.
     pub live: bool,
+    /// `--moment`: the demo shows the Agent moment card with a sample request.
+    pub moment: bool,
 }
 
 impl Args {
@@ -51,7 +53,7 @@ impl Args {
 }
 
 fn parse_args() -> Args {
-    let mut a = Args { cmd: None, bench: None, shot: None, frames: 120, depth: false, focus_term: false, msaa: true, size: (1600, 1000), dt: 1.0 / 20.0, demo: false, live: false };
+    let mut a = Args { cmd: None, bench: None, shot: None, frames: 120, depth: false, focus_term: false, msaa: true, size: (1600, 1000), dt: 1.0 / 20.0, demo: false, live: false, moment: false };
     let mut it = std::env::args().skip(1);
     while let Some(s) = it.next() {
         match s.as_str() {
@@ -64,6 +66,7 @@ fn parse_args() -> Args {
             "--no-msaa" => a.msaa = false,
             "--demo" => a.demo = true,
             "--live" => a.live = true,
+            "--moment" => a.moment = true,
             "--dt" => a.dt = it.next().and_then(|v| v.parse().ok()).unwrap_or(0.05),
             "--size" => {
                 if let Some(v) = it.next() {
@@ -74,7 +77,7 @@ fn parse_args() -> Args {
                 }
             }
             "-h" | "--help" => {
-                println!("sphere-app [--demo] [--live] [--cmd \"<command>\"] [--bench <seconds>] [--shot <png> [--frames N] [--depth] [--term]] [--size WxH] [--no-msaa]");
+                println!("sphere-app [--demo] [--live] [--moment] [--cmd \"<command>\"] [--bench <seconds>] [--shot <png> [--frames N] [--depth] [--term]] [--size WxH] [--no-msaa]");
                 std::process::exit(0);
             }
             other => eprintln!("ignoring unknown argument {other}"),
@@ -113,8 +116,8 @@ fn main() {
             (
                 (keys, stage_view, camera_rig, update_core, spin_system, update_materials, panel::update_panels, hud::update_readout, hud::update_backdrop)
                     .chain(),
-                (live::sync, live::tick_toasts, panel::rebuild_agents_ui, hud::update_readout_text, hud::update_clock, panel::blink_system).chain(),
-                (term::pump, cmdbar::keys, term::read_keys, term::draw, cmdbar::draw).chain(),
+                (live::sync, moment::update, live::tick_toasts, panel::rebuild_agents_ui, hud::update_readout_text, hud::update_clock, panel::blink_system).chain(),
+                (term::pump, cmdbar::keys, moment::keys, term::read_keys, term::draw, cmdbar::draw, moment::draw).chain(),
                 (hud::frame_stats, hud::bench, hud::shot).chain(),
             )
                 .chain(),

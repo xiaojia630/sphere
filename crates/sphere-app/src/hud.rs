@@ -91,6 +91,20 @@ pub fn setup_panels(
         &PanelSpec { id: PanelId::Clock, w: cw, h: ch, home, home_scale: 1.0, side: -1.0, phase: 2.2, show_at: 0.7, unframed: true },
     );
 
+    // ---- Agent moment card: centred over the core (prototype x 800, y 500, middle), in front of it
+    let ui = spawn_ui_panel(&mut commands, &mut images, crate::moment::CARD_W, crate::moment::CARD_H, scale, -6);
+    commands.insert_resource(crate::moment::CardRoot(ui.root));
+    let mut home = stage_to_world(800.0, 500.0);
+    home.z = 230.0;
+    let e = spawn_panel_quad(
+        &mut commands,
+        &mut meshes,
+        &mut pmats,
+        &ui,
+        &PanelSpec { id: PanelId::Moment, w: crate::moment::CARD_W, h: crate::moment::CARD_H, home, home_scale: 1.0, side: 0.0, phase: 0.4, show_at: 0.0, unframed: false },
+    );
+    let _ = e;
+
     // ---- Core readout, riding on the sphere deck
     let (rw, rh) = (272.0, 96.0);
     let ui = spawn_ui_panel(&mut commands, &mut images, rw, rh, scale, -8);
