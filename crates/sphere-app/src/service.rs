@@ -27,6 +27,8 @@ pub struct Shared {
     pub version: u64,
     /// Toasts for the overlay: errors from commands, "started", ...
     pub notes: Vec<String>,
+    /// how long the last snapshot took to come back
+    pub rtt_ms: Option<f32>,
 }
 
 pub enum Cmd {
@@ -165,6 +167,7 @@ async fn session(sh: &Arc<Mutex<Shared>>, c: &Client, rx: &mut mpsc::UnboundedRe
     let (_, mut sub) = c.subscribe(seq, None).await.map_err(|e| e.to_string())?;
     set_link(sh, Link::Connected);
     let mut dirty = false;
+    let mut ping = std::time::Instant::now();
     let mut tick = tokio::time::interval(Duration::from_millis(80));
     loop {
         tokio::select! {
@@ -177,7 +180,17 @@ async fn session(sh: &Arc<Mutex<Shared>>, c: &Client, rx: &mut mpsc::UnboundedRe
             _ = tick.tick() => {
                 if dirty {
                     dirty = false;
-                    apply(sh, c.snapshot().await.map_err(|e| e.to_string())?);
+                    let t0 = std::time::Instant::now();
+                    let snap = c.snapshot().await.map_err(|e| e.to_string())?;
+                    sh.lock().unwrap().rtt_ms = Some(t0.elapsed().as_secs_f32() * 1000.0);
+                    apply(sh, snap);
+                } else if ping.elapsed() > Duration::from_secs(2) {
+                    // the System panel's response time
+                    ping = std::time::Instant::now();
+                    let t0 = std::time::Instant::now();
+                    if c.status().await.is_ok() {
+                        sh.lock().unwrap().rtt_ms = Some(t0.elapsed().as_secs_f32() * 1000.0);
+                    }
                 }
             }
             cmd = rx.recv() => {

@@ -99,8 +99,12 @@ impl PanelId {
         match self {
             PanelId::Agents => Some(Hue::Agents),
             PanelId::Clock => Some(Hue::Clock),
-            PanelId::Readout | PanelId::Moment => Some(Hue::Neutral),
-            PanelId::Terminal => None,
+            PanelId::Readout | PanelId::Moment | PanelId::Say => Some(Hue::Neutral),
+            PanelId::System => Some(Hue::System),
+            PanelId::Apps => Some(Hue::Apps),
+            PanelId::Tele => Some(Hue::Tele),
+            PanelId::Rail => Some(Hue::Rail),
+            PanelId::Terminal | PanelId::Brand => None,
         }
     }
 }
@@ -136,6 +140,12 @@ pub enum PanelId {
     Readout,
     Clock,
     Moment,
+    Brand,
+    System,
+    Apps,
+    Tele,
+    Rail,
+    Say,
 }
 
 #[derive(Component)]
@@ -259,7 +269,7 @@ pub fn spawn_panel_quad(
             fill: if card { lin(Role::Acc) } else { lin(Role::Fill) },
             acc: lin(Role::Acc),
             // 1 framed glass, 2 the core readout (dark backdrop), 3 bare text (the clock)
-            p: Vec4::new(if s.id == PanelId::Clock { 3.0 } else if s.unframed { 2.0 } else { 1.0 }, if card { 0.86 } else { 0.36 }, 1.0, 1.0),
+            p: Vec4::new(if matches!(s.id, PanelId::Clock | PanelId::Brand | PanelId::Apps | PanelId::Rail | PanelId::Say) { 3.0 } else if s.unframed { 2.0 } else { 1.0 }, if card { 0.86 } else { 0.36 }, 1.0, 1.0),
             from_c,
             to_c,
         },
@@ -346,6 +356,11 @@ pub fn update_panels(
             top *= 0.5;
         }
         let focused_me = p.id == PanelId::Terminal && focus.terminal;
+        if p.id == PanelId::Terminal && !focus.terminal {
+            // the terminal isn't on the home: T (or its app) brings it forward
+            top = 0.0;
+            tz -= 120.0;
+        }
         if p.id == PanelId::Moment {
             // the card: up while a request waits, flat and still so its text reads cleanly
             top = if moment.shown && !focus.terminal { 1.0 } else { 0.0 };

@@ -4,6 +4,7 @@ mod core;
 mod fonts;
 mod fx;
 mod home;
+mod homepanels;
 mod geo;
 mod glow;
 mod hud;
@@ -17,6 +18,7 @@ mod sysstats;
 mod theme;
 mod term;
 mod util;
+mod visor;
 
 use bevy::{
     camera::{visibility::RenderLayers, CameraOutputMode, ClearColorConfig},
@@ -127,15 +129,15 @@ fn main() {
         .init_resource::<home::View>()
         .init_resource::<fx::Fx>()
         .init_resource::<hud::FrameStats>()
-        .add_systems(Startup, (sound::setup, setup_core, setup_cameras, hud::setup_panels, hud::setup_backdrop, hud::setup_overlay, cmdbar::setup, fx::setup).chain())
+        .add_systems(Startup, (sound::setup, setup_core, setup_cameras, hud::setup_panels, hud::setup_backdrop, hud::setup_overlay, cmdbar::setup, visor::setup, fx::setup, homepanels::setup).chain())
         .add_systems(First, (tick_sim, theme::animate))
         .add_systems(
             Update,
             (
                 (keys, stage_view, camera_rig, update_core, spin_system, update_materials, panel::update_panels, hud::update_readout, hud::update_backdrop)
                     .chain(),
-                (live::sync, moment::update, summon::notify, live::tick_toasts, panel::rebuild_agents_ui, hud::update_readout_text, hud::update_clock, panel::blink_system).chain(),
-                (term::pump, cmdbar::keys, moment::keys, term::read_keys, home::keys, home::apply, home::landed_sound, home::step_view, fx::update, term::draw, cmdbar::draw, moment::draw).chain(),
+                (live::sync, moment::update, summon::notify, live::tick_toasts, panel::rebuild_agents_ui, hud::update_readout_text, hud::update_clock, panel::blink_system, homepanels::update, homepanels::draw_rolodex, homepanels::draw_say).chain(),
+                (term::pump, cmdbar::keys, moment::keys, term::read_keys, home::keys, visor::buttons, home::apply, visor::draw_buttons, visor::ticker, visor::toasts, home::landed_sound, home::step_view, fx::update, term::draw, cmdbar::draw, moment::draw).chain(),
                 (hud::frame_stats, hud::bench, hud::shot).chain(),
             )
                 .chain(),

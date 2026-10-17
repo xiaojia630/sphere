@@ -51,7 +51,7 @@ pub fn setup_panels(
         &mut meshes,
         &mut pmats,
         &ui,
-        &PanelSpec { id: PanelId::Agents, w: aw, h: ah, home, home_scale: 1.0, side: -1.0, phase: 1.3, show_at: 0.9, unframed: false },
+        &PanelSpec { id: PanelId::Agents, w: aw, h: ah, home, home_scale: 1.0, side: -1.0, phase: 1.3, show_at: crate::homepanels::show_at(6), unframed: false },
     );
 
     // ---- Terminal panel: left column
@@ -88,7 +88,7 @@ pub fn setup_panels(
         &mut meshes,
         &mut pmats,
         &ui,
-        &PanelSpec { id: PanelId::Clock, w: cw, h: ch, home, home_scale: 1.0, side: -1.0, phase: 2.2, show_at: 0.7, unframed: true },
+        &PanelSpec { id: PanelId::Clock, w: cw, h: ch, home, home_scale: 1.0, side: -1.0, phase: 2.2, show_at: crate::homepanels::show_at(4), unframed: true },
     );
 
     // ---- Agent moment card: centred over the core (prototype x 800, y 500, middle), in front of it
@@ -362,16 +362,7 @@ pub fn setup_overlay(mut commands: Commands, f: Res<UiFonts>, off: Res<Offscreen
             Node { position_type: PositionType::Absolute, left: px(18), top: px(14), ..default() },
         ))
         .id();
-    let hint = commands
-        .spawn((
-            Text::new("/ COMMAND   ·   T TERMINAL   ·   CMD T NEW TAB   ·   D DEPTH   ·   ESC RELEASE"),
-            font(&f.ui600, 10.5, 3.2),
-            TextColor(with_alpha(role_color(Role::Dim), 0.95)),
-            TextLayout { justify: Justify::Center, ..default() },
-            Node { position_type: PositionType::Absolute, left: px(0), right: px(0), bottom: px(18), ..default() },
-        ))
-        .id();
-    commands.entity(root).add_children(&[stats, hint]);
+commands.entity(root).add_child(stats);
     commands.insert_resource(OverlayRoot(root));
 }
 

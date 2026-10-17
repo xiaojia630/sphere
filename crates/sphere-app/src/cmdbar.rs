@@ -29,30 +29,65 @@ pub struct CmdCaret;
 #[derive(Component)]
 pub struct ToastText;
 
-const PLACEHOLDER: &str = "Start a task  ·  repo: task  ·  > reply to the last agent";
+const PLACEHOLDER: &str = "Ask Sphere or start a task  ·  repo: task  ·  > reply to the last agent";
 
 pub fn setup(mut commands: Commands, f: Res<UiFonts>, root: Res<crate::hud::OverlayRoot>) {
     let line = role_color(Role::Line);
+    // the dock: centred above the ticker, min(1300, 100% - 32) wide, the command line then the controls
+    let wrap = commands
+        .spawn(Node { position_type: PositionType::Absolute, left: px(0), right: px(0), bottom: px(34), justify_content: JustifyContent::Center, ..default() })
+        .id();
+    let dock = commands
+        .spawn((
+            crate::visor::Dock,
+            Node {
+                width: percent(100),
+                max_width: px(1300),
+                margin: UiRect::horizontal(px(16)),
+                flex_direction: FlexDirection::Row,
+                flex_wrap: FlexWrap::Wrap,
+                justify_content: JustifyContent::Center,
+                align_items: AlignItems::Center,
+                column_gap: px(18),
+                row_gap: px(10),
+                ..default()
+            },
+        ))
+        .id();
+    commands.entity(wrap).add_child(dock);
     let bar = commands
         .spawn((
             CmdFrame,
             Node {
-                position_type: PositionType::Absolute,
-                left: percent(50),
-                bottom: px(44),
-                width: px(720),
+                flex_grow: 1.0,
+                flex_shrink: 1.0,
+                flex_basis: px(440),
+                min_width: px(0),
                 height: px(48),
-                margin: UiRect { left: px(-360), ..default() },
-                padding: UiRect { left: px(16), right: px(14), ..default() },
+                padding: UiRect { left: px(8), right: px(14), ..default() },
                 column_gap: px(12),
                 align_items: AlignItems::Center,
                 border: UiRect::all(px(1)),
                 ..default()
             },
-            BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.55)),
+            BackgroundGradient(vec![Gradient::Linear(LinearGradient::to_bottom(vec![
+                ColorStop::percent(Color::srgba(0.07, 0.09, 0.1, 0.6), 0.0),
+                ColorStop::percent(Color::srgba(0.03, 0.04, 0.05, 0.7), 100.0),
+            ]))]),
             BorderColor::all(with_alpha(line, 0.34)),
         ))
         .id();
+    // the mic (voice arrives with M5): a 32 px ring with a small capsule
+    let mic = commands
+        .spawn((
+            Node { width: px(32), height: px(32), flex_shrink: 0.0, border: UiRect::all(px(1)), border_radius: BorderRadius::MAX, justify_content: JustifyContent::Center, align_items: AlignItems::Center, ..default() },
+            BorderColor::all(with_alpha(line, 0.34)),
+        ))
+        .id();
+    let cap = commands
+        .spawn((Node { width: px(5), height: px(9), border: UiRect::all(px(1)), border_radius: BorderRadius::all(px(2.5)), ..default() }, BorderColor::all(role_color(Role::Hot))))
+        .id();
+    commands.entity(mic).add_child(cap);
     let prompt = commands.spawn((Text::new("›"), font(&f.mono, 18.0, 0.0), TextColor(role_color(Role::Fill)))).id();
     let text = commands
         .spawn((
@@ -61,6 +96,8 @@ pub fn setup(mut commands: Commands, f: Res<UiFonts>, root: Res<crate::hud::Over
             font(&f.ui500, 16.0, 0.96),
             TextColor(with_alpha(line, 0.55)),
             LineHeight::Px(18.0),
+            TextLayout { linebreak: LineBreak::NoWrap, ..default() },
+            Node { overflow: Overflow::clip(), flex_shrink: 1.0, min_width: px(0), ..default() },
         ))
         .id();
     let caret = commands
@@ -73,20 +110,11 @@ pub fn setup(mut commands: Commands, f: Res<UiFonts>, root: Res<crate::hud::Over
             BorderColor::all(with_alpha(line, 0.13)),
         ))
         .id();
-    let hint_t = commands.spawn((Text::new("CMD K"), font(&f.ui700, 9.5, 1.9), TextColor(role_color(Role::Dim)), LineHeight::Px(9.5))).id();
+    let hint_t = commands.spawn((Text::new("ENTER"), font(&f.ui700, 9.5, 1.9), TextColor(role_color(Role::Dim)), LineHeight::Px(9.5))).id();
     commands.entity(hint).add_child(hint_t);
-    commands.entity(bar).add_children(&[prompt, text, caret, spacer, hint]);
-    let toast = commands
-        .spawn((
-            ToastText,
-            Text::new(""),
-            font(&f.ui600, 11.0, 2.64),
-            TextColor(role_color(Role::Hot)),
-            TextLayout { justify: Justify::Center, ..default() },
-            Node { position_type: PositionType::Absolute, left: px(0), right: px(0), bottom: px(104), justify_content: JustifyContent::Center, ..default() },
-        ))
-        .id();
-    commands.entity(root.0).add_children(&[bar, toast]);
+    commands.entity(bar).add_children(&[mic, prompt, text, caret, spacer, hint]);
+    commands.entity(dock).add_child(bar);
+    commands.entity(root.0).add_child(wrap);
 }
 
 fn super_down(keys: &ButtonInput<KeyCode>) -> bool {
@@ -257,13 +285,11 @@ pub fn resolve(text: &str) -> Result<(String, String), String> {
 pub fn draw(
     bar: Res<CmdBar>,
     sim: Res<crate::core::Sim>,
-    toasts: Res<Toasts>,
     mut seen: Local<(u64, u64)>,
     mut q: ParamSet<(
         Query<(&mut Text, &mut TextColor), With<CmdText>>,
         Query<&mut BorderColor, With<CmdFrame>>,
         Query<&mut BackgroundColor, With<CmdCaret>>,
-        Query<&mut Text, With<ToastText>>,
     )>,
 ) {
     let line = role_color(Role::Line);
@@ -286,12 +312,5 @@ pub fn draw(
     let caret = if on { role_color(Role::Fill) } else { Color::NONE };
     for mut c in &mut q.p2() {
         c.set_if_neq(BackgroundColor(caret));
-    }
-    if seen.1 != toasts.version {
-        seen.1 = toasts.version;
-        let s = toasts.list.iter().map(|t| t.0.to_uppercase()).collect::<Vec<_>>().join("\n");
-        for mut t in &mut q.p3() {
-            t.0 = s.clone();
-        }
     }
 }
