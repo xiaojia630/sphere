@@ -101,7 +101,7 @@ pub fn setup_panels(
         &ui,
         &PanelSpec { id: PanelId::Moment, w: crate::moment::CARD_W, h: crate::moment::CARD_H, home, home_scale: 1.0, side: 0.0, phase: 0.4, show_at: 0.0, unframed: false },
     );
-    let _ = e;
+    c_moment_click(&mut commands, e, ui.root);
 
     // ---- Core readout, riding on the sphere deck
     let (rw, rh) = (272.0, 96.0);
@@ -112,6 +112,10 @@ pub fn setup_panels(
     commands.entity(e).remove::<Panel>().insert((ReadoutLink, Transform::from_xyz(0.0, 0.0, 112.0)));
     // pull the material handle back out through a marker query later; parent it under the core fold
     commands.entity(decks.list[CORE].fold).add_child(e);
+}
+
+fn c_moment_click(commands: &mut Commands, quad: Entity, root: Entity) {
+    commands.entity(quad).insert((crate::appframe::AppPart { app: crate::moment::CLICK_APP, pane: None }, crate::appframe::PaneRoot(root)));
 }
 
 #[derive(Component)]

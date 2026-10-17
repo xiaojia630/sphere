@@ -492,7 +492,8 @@ pub fn run(dir: &Path, op: Op) -> Result<String, String> {
             }
             git(dir, &a)?;
             let h = git_t(dir, &["log", "-1", "--format=%h"]).unwrap_or_default();
-            Ok(format!("{} {h} · {}", if amend { "Amended" } else { "Committed" }, msg))
+            let shown = if msg.is_empty() { git_t(dir, &["log", "-1", "--format=%s"]).unwrap_or_default() } else { msg };
+            Ok(format!("{} {h} · {}", if amend { "Amended" } else { "Committed" }, shown))
         }
         Op::Switch(b) => {
             let b = b.trim();
@@ -739,6 +740,17 @@ mod tests {
         // amending with no new message keeps the old one
         run(&dir, Op::Commit { msg: String::new(), amend: true }).unwrap();
         assert_eq!(git_t(&dir, &["log", "-1", "--format=%s"]).unwrap(), "second");
+        // a staged change folded in with an empty message: the message (subject and body) stays, the content changes
+        run(&dir, Op::Commit { msg: "third\n\nthe body".into(), amend: true }).unwrap();
+        std::fs::write(dir.join("a.txt"), "3\n").unwrap();
+        run(&dir, Op::StageAll).unwrap();
+        let note = run(&dir, Op::Commit { msg: String::new(), amend: true }).unwrap();
+        assert!(note.starts_with("Amended") && note.ends_with("third"), "{note}");
+        assert_eq!(git_t(&dir, &["rev-list", "--count", "HEAD"]).unwrap(), "1");
+        assert_eq!(git_t(&dir, &["log", "-1", "--format=%B"]).unwrap().trim(), "third\n\nthe body");
+        assert_eq!(git_t(&dir, &["show", "HEAD:a.txt"]).unwrap(), "3");
+        // without amend an empty message is still refused
+        assert!(run(&dir, Op::Commit { msg: String::new(), amend: false }).is_err());
         // switching: unknown, flag-like, created, existing
         assert!(run(&dir, Op::Switch("nope".into())).unwrap_err().contains("+nope"));
         assert!(run(&dir, Op::Switch("--detach".into())).is_err());

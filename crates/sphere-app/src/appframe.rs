@@ -369,7 +369,7 @@ pub fn test_wheel(sim: Res<crate::core::Sim>, mut scrolls: ResMut<AppScrolls>, m
     }
 }
 
-/// Look tests: SPHERE_TEST_CLICK="app,pane,x,y" clicks there (pane px) once, four seconds in.
+/// Look tests: SPHERE_TEST_CLICK="app,pane,x,y" clicks there (pane px; pane -1 is a quad with no pane, the moment card is app 200) once, four seconds in.
 pub fn test_click(sim: Res<crate::core::Sim>, mut clicks: ResMut<PanelClicks>, quads: Query<(Entity, &AppPart), With<PaneRoot>>, mut done: Local<bool>) {
     if *done || sim.t < 4.0 {
         return;
@@ -380,7 +380,7 @@ pub fn test_click(sim: Res<crate::core::Sim>, mut clicks: ResMut<PanelClicks>, q
     if f.len() != 4 {
         return;
     }
-    if let Some((e, _)) = quads.iter().find(|(_, p)| p.app == f[0] as u8 && p.pane == Some(f[1] as u8)) {
+    if let Some((e, _)) = quads.iter().find(|(_, p)| p.app == f[0] as u8 && p.pane == (f[1] >= 0.0).then_some(f[1] as u8)) {
         clicks.0.push((e, Vec2::new(f[2], f[3])));
     }
 }

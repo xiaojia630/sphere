@@ -3,6 +3,7 @@
 //! description of it. Enter answers yes, E changes (type, Enter sends), L is later, Esc puts the card away
 //! until something new arrives, and the arrows step through the others. Only these keys answer: the service
 //! takes answers from the app and the CLI, never from an agent.
+use crate::appframe::{AppClicks, Click};
 use crate::fonts::UiFonts;
 use crate::live::Live;
 use crate::panel::{font, with_alpha, Focus};
@@ -17,6 +18,8 @@ use sphere_proto::{AnswerKind, RequestKind, RequestStatus, RequestView};
 
 pub const CARD_W: f32 = 600.0;
 pub const CARD_H: f32 = 452.0;
+/// The card's id in `AppClicks` (its quad carries an `AppPart` with it, so the app-pane click layer reaches it).
+pub const CLICK_APP: u8 = 200;
 
 #[derive(Resource, Default)]
 pub struct Moment {
@@ -88,7 +91,51 @@ pub fn update(live: Res<Live>, mut m: ResMut<Moment>, mut seen: Local<u64>, mut 
     m.version += 1;
 }
 
-pub fn keys(mut ev: MessageReader<KeyboardInput>, focus: Res<Focus>, mut m: ResMut<Moment>, live: Res<Live>, svc: Res<Service>, mut sound: ResMut<crate::sound::Sound>) {
+pub fn keys(mut ev: MessageReader<KeyboardInput>, focus: Res<Focus>, mut m: ResMut<Moment>, live: Res<Live>, svc: Res<Service>, mut sound: ResMut<crate::sound::Sound>, mut clicks: ResMut<AppClicks>) {
+    // clicks on the card's buttons and option rows; they do what the same key does, and only on a card that is up and waiting
+    let clicked = clicks.take(CLICK_APP);
+    if m.shown && m.holding.is_none() && m.fold.is_none() && m.later.is_none() && m.all_done.is_none() {
+        for c in clicked {
+            let w = waiting(&live, &m);
+            let Some(req) = w.get(m.index).map(|r| (*r).clone()) else { break };
+            let (n, id) = (w.len(), req.info.id.clone());
+            let question = req.info.kind == RequestKind::Question;
+            match c {
+                Click::Key(KeyCode::Enter) if m.editing => {
+                    let text = std::mem::take(&mut m.text);
+                    m.editing = false;
+                    if !text.trim().is_empty() {
+                        answer(&mut m, &svc, &id, if question { AnswerKind::Yes } else { AnswerKind::Change }, Some(text.trim().to_string()));
+                        sound.play_with("confirm", 0.7, 0.0);
+                    }
+                }
+                Click::Key(KeyCode::Escape) if m.editing => {
+                    m.editing = false;
+                    m.text.clear();
+                }
+                _ if m.editing => {}
+                Click::Key(KeyCode::Enter) if question => m.editing = true,
+                Click::Key(KeyCode::Enter) => {
+                    answer(&mut m, &svc, &id, AnswerKind::Yes, None);
+                    sound.play_with("confirm", 0.7, 0.0);
+                }
+                Click::Key(KeyCode::KeyE) => m.editing = true,
+                Click::Key(KeyCode::KeyL) => {
+                    answer(&mut m, &svc, &id, AnswerKind::Later, None);
+                    sound.play_with("whoosh", 0.6, 0.0);
+                }
+                Click::Key(KeyCode::ArrowRight) if n > 1 => m.index = (m.index + 1) % n,
+                Click::Key(KeyCode::ArrowLeft) if n > 1 => m.index = (m.index + n - 1) % n,
+                Click::Pick(i) if question => {
+                    if let Some(label) = options(&req.info.input).get(i) {
+                        answer(&mut m, &svc, &id, AnswerKind::Yes, Some(label.clone()));
+                    }
+                }
+                _ => {}
+            }
+            m.version += 1;
+        }
+    }
     for e in ev.read() {
         if e.state != ButtonState::Pressed || !m.shown || focus.cmd || focus.terminal {
             continue;
@@ -226,12 +273,7 @@ fn action(r: &RequestView) -> (String, String, bool) {
     let i = &r.info.input;
     match r.info.kind {
         RequestKind::Question => {
-            let q = &i["questions"][0];
-            let mut t = s(q, "question");
-            for (n, o) in options(i).iter().enumerate() {
-                t.push_str(&format!("\n{}  {}", n + 1, o));
-            }
-            ("Question".into(), first_lines(&t, 6, 64), false)
+            ("Question".into(), first_lines(&s(&i["questions"][0], "question"), 3, 64), false)
         }
         RequestKind::Plan => ("Plan".into(), first_lines(&s(i, "plan"), 7, 70), false),
         _ => match r.info.tool.as_str() {
@@ -385,6 +427,17 @@ fn build(c: &mut Commands, f: &UiFonts, r: &RequestView, title: &str, m: &Moment
         c.spawn((Text::new(text), font(&f.ui500, 18.0, 0.14), TextColor(hot), LineHeight::Px(25.0))).id()
     };
     c.entity(draft).add_children(&[bar, dl, dt]);
+    if r.info.kind == RequestKind::Question {
+        for (n, o) in options(&r.info.input).iter().take(5).enumerate() {
+            let row = c
+                .spawn((Node { flex_direction: FlexDirection::Row, column_gap: px(12), padding: UiRect { left: px(8), right: px(10), top: px(4), bottom: px(3) }, border: UiRect::all(px(1)), ..default() }, BorderColor::all(g3), Click::Pick(n)))
+                .id();
+            let k = c.spawn((Text::new((n + 1).to_string()), font(&f.mono, 13.5, 0.0), TextColor(acc), LineHeight::Px(20.0))).id();
+            let l = c.spawn((Text::new(clip(o, 64)), font(&f.ui500, 16.0, 0.16), TextColor(hot), LineHeight::Px(20.0))).id();
+            c.entity(row).add_children(&[k, l]);
+            c.entity(draft).add_child(row);
+        }
+    }
     c.entity(body).add_child(draft);
 
     // what you're typing
@@ -431,12 +484,13 @@ fn build(c: &mut Commands, f: &UiFonts, r: &RequestView, title: &str, m: &Moment
             BorderColor::all(g3),
         ))
         .id();
-    let btn = |c: &mut Commands, label: &str, fill: bool, ghost: bool| -> Entity {
+    let btn = |c: &mut Commands, label: &str, fill: bool, ghost: bool, click: Click| -> Entity {
         let b = c
             .spawn((
                 Node { padding: if fill { UiRect { left: px(24), right: px(24), top: px(13), bottom: px(12) } } else { UiRect { left: px(17), right: px(17), top: px(12), bottom: px(11) } }, border: UiRect::all(px(1)), ..default() },
                 BackgroundColor(if fill { acc } else { Color::NONE }),
                 BorderColor::all(if fill { acc } else if ghost { Color::NONE } else { g2 }),
+                click,
             ))
             .id();
         let t = c
@@ -446,9 +500,9 @@ fn build(c: &mut Commands, f: &UiFonts, r: &RequestView, title: &str, m: &Moment
         b
     };
     let mut row = if m.editing {
-        vec![btn(c, "Send", true, false), btn(c, "Cancel", false, true)]
+        vec![btn(c, "Send", true, false, Click::Key(KeyCode::Enter)), btn(c, "Cancel", false, true, Click::Key(KeyCode::Escape))]
     } else {
-        vec![btn(c, yes_label(r), true, false), btn(c, "Change", false, false), btn(c, "Not now", false, true)]
+        vec![btn(c, yes_label(r), true, false, Click::Key(KeyCode::Enter)), btn(c, "Change", false, false, Click::Key(KeyCode::KeyE)), btn(c, "Not now", false, true, Click::Key(KeyCode::KeyL))]
     };
     let keys = c
         .spawn((Node { margin: UiRect { left: auto(), ..default() }, padding: UiRect { left: px(7), right: px(7), top: px(5), bottom: px(4) }, border: UiRect::all(px(1)), ..default() }, BorderColor::all(g3)))
