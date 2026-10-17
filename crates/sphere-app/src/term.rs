@@ -628,6 +628,7 @@ pub fn read_keys(
     mut focus: ResMut<Focus>,
     mut terms: ResMut<Terms>,
     moment: Res<crate::moment::Moment>,
+    working: Res<crate::working::Working>,
 ) {
     let ctrl = keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
     let alt = keys.pressed(KeyCode::AltLeft) || keys.pressed(KeyCode::AltRight);
@@ -675,9 +676,9 @@ pub fn read_keys(
             continue;
         }
         if !focus.terminal {
-            match e.key_code {
-                KeyCode::KeyT => focus.terminal = true,
-                _ => {}
+            // in the Working view T brings the agent's output forward instead
+            if e.key_code == KeyCode::KeyT && !working.open {
+                focus.terminal = true;
             }
             continue;
         }

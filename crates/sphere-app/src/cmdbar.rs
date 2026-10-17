@@ -26,8 +26,6 @@ pub struct CmdFrame;
 pub struct CmdText;
 #[derive(Component)]
 pub struct CmdCaret;
-#[derive(Component)]
-pub struct ToastText;
 
 const PLACEHOLDER: &str = "Ask Sphere, or start a task  ·  repo: task";
 
@@ -122,7 +120,7 @@ fn super_down(keys: &ButtonInput<KeyCode>) -> bool {
 }
 
 /// Keys while the bar is open, and the keys that open it. Runs before the card and the terminal.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn keys(
     mut ev: MessageReader<KeyboardInput>,
     keys: Res<ButtonInput<KeyCode>>,
@@ -247,6 +245,7 @@ fn home_command(t: &str, acts: &mut crate::home::Acts, open: &mut crate::apps::O
     true
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run(text: &str, svc: &Service, toasts: &mut Toasts, terms: &mut crate::term::Terms, focus: &mut Focus, say: &mut crate::homepanels::Say, sound: &mut crate::sound::Sound, working: &mut crate::working::Working) {
     if text.is_empty() {
         return;
@@ -258,6 +257,21 @@ fn run(text: &str, svc: &Service, toasts: &mut Toasts, terms: &mut crate::term::
             return;
         }
         _ => {}
+    }
+    if text.eq_ignore_ascii_case("stop") {
+        // stop the agent you heard from last that is still running
+        let latest = {
+            let s = svc.shared.lock().unwrap();
+            s.tasks.iter().filter(|t| matches!(t.state, sphere_proto::TaskState::Working | sphere_proto::TaskState::NeedsYou | sphere_proto::TaskState::Queued)).max_by(|a, b| a.updated_at.cmp(&b.updated_at)).map(|t| (t.id.clone(), t.title.clone()))
+        };
+        match latest {
+            Some((task, title)) => {
+                toasts.push(format!("Stopping {title}"));
+                svc.send(Cmd::Stop { task });
+            }
+            None => toasts.push("Nothing running to stop"),
+        }
+        return;
     }
     if let Some(msg) = text.strip_prefix('>') {
         // `> message` talks to the agent you heard from last

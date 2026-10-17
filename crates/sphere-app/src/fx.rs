@@ -69,6 +69,7 @@ pub fn setup(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut mats:
     commands.entity(root.0).add_child(band);
 }
 
+#[allow(clippy::type_complexity)]
 pub fn update(
     time: Res<Time<Real>>,
     mut fx: ResMut<Fx>,

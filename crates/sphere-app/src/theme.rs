@@ -201,9 +201,6 @@ pub fn bloom() -> f32 {
 pub fn tint() -> Vec3 {
     live().tint
 }
-pub fn fx() -> f32 {
-    live().fx
-}
 
 /// The colour swap for a panel's shader: the Balanced role colours (what UI is drawn in) and what each becomes now,
 /// both linear. Roles 0..8 in `ROLES` order.

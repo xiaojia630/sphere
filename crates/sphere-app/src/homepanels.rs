@@ -46,7 +46,7 @@ pub struct Meter(pub usize);
 #[derive(Component)]
 pub struct MeterValue(pub usize);
 #[derive(Component)]
-pub struct RoloRow(pub usize);
+pub struct RoloRow;
 #[derive(Component)]
 pub struct SayText;
 
@@ -181,7 +181,7 @@ pub fn setup(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut image
     for k in 0..APPS.len() * 3 {
         let i = k % APPS.len();
         let (name, live) = APPS[i];
-        let row = c.spawn((RoloRow(i), Node { height: px(34), flex_direction: FlexDirection::Row, align_items: AlignItems::Center, column_gap: px(10), padding: UiRect { left: px(14), ..default() }, ..default() })).id();
+        let row = c.spawn((RoloRow, Node { height: px(34), flex_direction: FlexDirection::Row, align_items: AlignItems::Center, column_gap: px(10), padding: UiRect { left: px(14), ..default() }, ..default() })).id();
         let dot = c.spawn((Node { width: px(4), height: px(4), ..default() }, BackgroundColor(with_alpha(line, 0.6)), RoloDot(k))).id();
         let t = c.spawn((Text::new(name.to_uppercase()), font(&f.ui600, 13.0, 3.38), TextColor(with_alpha(line, 0.5)), LineHeight::Px(16.0), RoloText(k))).id();
         c.entity(row).add_children(&[dot, t]);

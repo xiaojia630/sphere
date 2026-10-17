@@ -92,15 +92,20 @@ The idea of a small process that outlives the UI and owns the terminals comes fr
     cargo build --release
     target/release/sphere-app
 
-Keys:
+Keys (the prototypes' own):
 
-- `/` or Cmd+K: the command bar. Type a task and press Enter to start an agent: `repo: task` picks the repo (a folder in `~/Projects`, or a path), otherwise the last repo used, otherwise the folder the app runs in. `> message` talks to the agent you heard from last. `t` opens a terminal tab.
-- The Agent moment card rises when an agent needs you. Enter answers yes (Run, Apply, Allow, Approve), E changes (type, then Enter), L is later, Esc puts the card away until something new arrives, the arrows step through the others. A question takes an option's number or a typed answer.
+- `/` or Cmd+K: the command bar. A task starts an agent (`repo: task` picks the repo, a folder in `~/Projects` or a path; otherwise the last repo used, otherwise the app's folder) and opens the Working view. `> message` talks to the agent you heard from last, `stop` stops it. The prototype's commands work too: `depth`, `orbit`, `collapse`, a theme name, `fit`, `reset`, `apps`, `open terminal`.
+- Views: 1 Flat, 2/D Depth, 3/O Orbit, E Depth and Flat, X collapses the rings onto the sphere, F fits, R resets everything, C cycles the five themes, M mutes.
+- Mouse: drag the core to turn it, drag panels anywhere, scroll to zoom (on a panel: push it back; on Apps: spin the rolodex), double-click the sphere to collapse, a ring to fold it, empty space to fit.
+- A (or hold the sphere, or the dock's Apps): core open, the app orbit. ← → or scroll spins it, Enter or a click opens an app (Terminal and Agents are live), Esc closes.
+- W: the Working view on the latest agent (it also opens when you start one). P interrupts its turn, T brings its output forward, Esc goes home.
+- N: the Agent moment for what needs you (it rises by itself when a request arrives). Enter answers yes, E changes (type, Enter), L is later, ← → steps through them, Esc puts them away. Sphere reads each one out.
 - Terminal: T focuses it, Esc releases it, Cmd+T new tab, Cmd+W close, Cmd+1..9 switch, Cmd+V paste. Tabs run your login shell and live in the app for now (sphered has no terminal API yet).
 - Option+Space (macOS) brings Sphere up over anything and hides it again. When something needs you while Sphere isn't in front, you get a notification.
-- D toggles the Depth view.
 
-Flags: `--demo` (the look test's sample agents, no service), `--moment` (with `--demo`: the card with a sample request), `--live` (screenshots and benches against the real service), `--cmd "<command>"` (what the first terminal tab runs), `--bench <seconds>`, `--shot <png> [--frames N] [--depth] [--term]`, `--size WxH`, `--no-msaa`. `SPHERE_SOCKET` points the app at another sphered.
+Sounds are the prototype's own, rendered to WAV from its synthesis code (`crates/sphere-app/assets/sounds`). Speech uses macOS `say` with the Daniel voice.
+
+Flags: `--demo` (the look test's sample agents, no service), `--moment` (the Agent moment with sample requests), `--apps` (core open), `--work` (the Working view), `--orbit`, `--collapsed`, `--theme <name>`, `--live` (screenshots and benches against the real service), `--cmd "<command>"` (what the first terminal tab runs), `--bench <seconds>`, `--shot <png> [--frames N] [--depth] [--term]`, `--size WxH`, `--no-msaa`. `SPHERE_SOCKET` points the app at another sphered.
 
 `--shot` renders offscreen and needs no window. `--bench` and `--shot` use the demo data unless `--live` is given.
 
