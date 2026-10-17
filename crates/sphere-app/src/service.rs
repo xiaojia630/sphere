@@ -44,6 +44,8 @@ pub struct RunStep {
     pub ok: Option<bool>,
     pub output: String,
     pub at: String,
+    /// its place among every step the run has had (stays put when old steps are dropped)
+    pub seq: u64,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -51,17 +53,29 @@ pub struct Run {
     pub steps: Vec<RunStep>,
     /// what the agent said, oldest first
     pub says: Vec<String>,
+    /// for each say, how many steps had started when it was said
+    pub says_seq: Vec<u64>,
+    seq: u64,
     pub files: Vec<sphere_proto::FileStat>,
     pub version: u64,
 }
 
 impl Run {
+    /// Why the agent last edited `path`: what it said just before that edit (its plan for the change).
+    pub fn reason_for(&self, path: &str) -> Option<(&str, &RunStep)> {
+        let name = std::path::Path::new(path).file_name()?.to_string_lossy().to_string();
+        let step = self.steps.iter().rev().find(|s| s.kind == sphere_proto::StepKind::Edit && (s.title.contains(path) || s.title.ends_with(&name) || s.detail.contains(path)))?;
+        let i = self.says_seq.iter().rposition(|&q| q <= step.seq)?;
+        Some((self.says[i].as_str(), step))
+    }
+
     /// Folds one event into the run.
     pub fn apply(&mut self, ev: &sphere_proto::Event) {
         use sphere_proto::EventBody as B;
         match &ev.body {
             B::Step { id, step_kind, tool, title, detail, .. } => {
-                self.steps.push(RunStep { id: id.clone(), kind: *step_kind, tool: tool.clone(), title: title.clone(), detail: detail.clone(), ok: None, output: String::new(), at: ev.at.clone() });
+                self.steps.push(RunStep { id: id.clone(), kind: *step_kind, tool: tool.clone(), title: title.clone(), detail: detail.clone(), ok: None, output: String::new(), at: ev.at.clone(), seq: self.seq });
+                self.seq += 1;
             }
             B::StepDone { id, ok, output } => {
                 if let Some(s) = self.steps.iter_mut().rev().find(|s| &s.id == id) {
@@ -74,7 +88,10 @@ impl Run {
                     }
                 }
             }
-            B::Say { text } => self.says.push(text.clone()),
+            B::Say { text } => {
+                self.says.push(text.clone());
+                self.says_seq.push(self.seq);
+            }
             B::FilesTouched { files } => self.files = files.clone(),
             _ => return,
         }
@@ -84,6 +101,7 @@ impl Run {
         }
         if self.says.len() > 50 {
             self.says.drain(..10);
+            self.says_seq.drain(..10);
         }
         self.version += 1;
     }
@@ -315,5 +333,27 @@ async fn command(c: &Client, cmd: Cmd) -> Result<(), String> {
         Cmd::Send { task, text } => c.send(&task, &text).await.map_err(|e| format!("could not send: {e}")),
         Cmd::Interrupt { task } => c.interrupt(&task).await.map_err(|e| format!("could not interrupt: {e}")),
         Cmd::Stop { task } => c.stop(&task).await.map_err(|e| format!("could not stop: {e}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sphere_proto::{Event, EventBody, StepKind};
+
+    fn ev(body: EventBody) -> Event {
+        Event { seq: 0, task: "t1".into(), at: "2026-10-17T00:00:00.000Z".into(), body }
+    }
+
+    #[test]
+    fn a_files_reason_is_what_the_agent_said_before_editing_it() {
+        let mut r = Run::default();
+        r.apply(&ev(EventBody::Say { text: "Reading first.".into() }));
+        r.apply(&ev(EventBody::Step { id: "a".into(), step_kind: StepKind::Read, tool: "Read".into(), title: "src/lib.rs".into(), detail: String::new(), parent: None }));
+        r.apply(&ev(EventBody::Say { text: "Check the budget before taking the lock.".into() }));
+        r.apply(&ev(EventBody::Step { id: "b".into(), step_kind: StepKind::Edit, tool: "Edit".into(), title: "Editing src/core.rs".into(), detail: String::new(), parent: None }));
+        r.apply(&ev(EventBody::Say { text: "Done.".into() }));
+        assert_eq!(r.reason_for("src/core.rs").map(|x| x.0), Some("Check the budget before taking the lock."));
+        assert!(r.reason_for("src/other.rs").is_none());
     }
 }

@@ -671,7 +671,7 @@ pub fn draw(mut commands: Commands, app: Res<CodeApp>, svc: Res<Service>, roots:
     };
     draw_task(c, &ui, root(Pane::Task), &t, &run, app.review.as_ref());
     draw_tree(c, &ui, root(Pane::Tree), &app);
-    draw_diff(c, &ui, root(Pane::Diff), &app);
+    draw_diff(c, &ui, root(Pane::Diff), &app, &run);
     draw_tests(c, &ui, root(Pane::Tests), &t, app.tests.as_ref());
     draw_acts(c, &ui, root(Pane::Acts), &app);
 }
@@ -829,7 +829,7 @@ fn draw_tree(c: &mut Commands, ui: &Ui, root: Entity, app: &CodeApp) {
     }
 }
 
-fn draw_diff(c: &mut Commands, ui: &Ui, root: Entity, app: &CodeApp) {
+fn draw_diff(c: &mut Commands, ui: &Ui, root: Entity, app: &CodeApp, run: &crate::service::Run) {
     let b = ui.body(c, root);
     let h = ui.header(c, "Diff", "J K hunks · [ ] files · Z open in Zed", ui.dim);
     c.entity(b).add_child(h);
@@ -905,6 +905,26 @@ fn draw_diff(c: &mut Commands, ui: &Ui, root: Entity, app: &CodeApp) {
     if fd.hunks.is_empty() {
         let t = ui.text(c, "Only the file mode changed", &ui.f.ui500, 13.0, 0.4, ui.dim);
         c.entity(body).add_child(t);
+    }
+    // the agent's reason for this file: what it said just before editing it, pinned over the hunk
+    if let Some((why, _)) = run.reason_for(&fd.path) {
+        let line = fd.hunks.get(app.hunk).map(|h| h.new_start).unwrap_or(1);
+        let note = c
+            .spawn((
+                Node { position_type: PositionType::Absolute, right: px(22), top: px(96), width: px(300), flex_direction: FlexDirection::Column, row_gap: px(6), padding: UiRect::all(px(12)), border: UiRect::all(px(1)), ..default() },
+                BorderColor::all(with_alpha(ui.line, 0.6)),
+                BackgroundColor(Color::srgba(0.0, 0.01, 0.02, 0.92)),
+            ))
+            .id();
+        let hr = ui.row(c, 8.0);
+        let d = c.spawn((Node { width: px(6), height: px(6), ..default() }, BackgroundColor(ui.hot), UiTransform { rotation: Rot2::degrees(45.0), ..default() })).id();
+        let t = ui.text(c, "AGENT'S REASON", &ui.f.ui700, 9.5, 2.2, ui.hot);
+        let sp = c.spawn(Node { flex_grow: 1.0, ..default() }).id();
+        let at = ui.text(c, clip(&format!("{}:{line}", fd.path), 24), &ui.f.mono, 10.0, 0.0, ui.dim);
+        c.entity(hr).add_children(&[d, t, sp, at]);
+        let tx = c.spawn((Text::new(clip(why.lines().find(|l| !l.trim().is_empty()).unwrap_or(why).trim(), 170)), font(&ui.f.ui500, 13.0, 0.3), TextColor(ui.hot), LineHeight::Px(17.0))).id();
+        c.entity(note).add_children(&[hr, tx]);
+        c.entity(b).add_child(note);
     }
 }
 
