@@ -20,6 +20,7 @@ alacritty_terminal = "=0.26.0"
 fontdue = "=0.9.4"
 sphere-proto.workspace = true
 sphere-client.workspace = true
+sphere-host.workspace = true
 tokio.workspace = true
 serde_json.workspace = true
 libc.workspace = true

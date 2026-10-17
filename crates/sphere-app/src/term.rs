@@ -102,8 +102,11 @@ struct Inner {
     parser: Processor,
     rx: mpsc::Receiver<Vec<u8>>,
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
-    _master: Box<dyn portable_pty::MasterPty + Send>,
-    child: Box<dyn portable_pty::Child + Send + Sync>,
+    /// a PTY in this process (look test, or when the host can't be reached)
+    _master: Option<Box<dyn portable_pty::MasterPty + Send>>,
+    child: Option<Box<dyn portable_pty::Child + Send + Sync>>,
+    /// a shell held by sphere-host (it outlives the app)
+    host: Option<crate::hostterm::Handle>,
 }
 
 pub struct Terminal {
@@ -131,6 +134,15 @@ impl Terms {
         self.tabs.get(self.active)
     }
     pub fn open_tab(&mut self) {
+        // your shells live in sphere-host so they outlive the app; in the app only if the host can't be reached
+        if !self.demo {
+            if let Some(t) = Terminal::host(None) {
+                self.tabs.push(t);
+                self.active = self.tabs.len() - 1;
+                self.version += 1;
+                return;
+            }
+        }
         match Terminal::spawn(None, false) {
             Ok(t) => {
                 self.tabs.push(t);
@@ -229,7 +241,7 @@ impl Terminal {
             });
         }
         Ok(Self {
-            inner: Mutex::new(Inner { term, parser: Processor::new(), rx, writer, _master: pair.master, child }),
+            inner: Mutex::new(Inner { term, parser: Processor::new(), rx, writer, _master: Some(pair.master), child: Some(child), host: None }),
             dirty: true,
             exited: false,
             name,
@@ -238,8 +250,31 @@ impl Terminal {
 
     pub fn kill(&self) {
         if let Ok(mut i) = self.inner.lock() {
-            let _ = i.child.kill();
+            if let Some(c) = i.child.as_mut() {
+                let _ = c.kill();
+            }
+            if let Some(h) = &i.host {
+                h.kill();
+            }
         }
+    }
+
+    /// A shell in sphere-host: new, or a tab from an earlier run re-attached.
+    pub fn host(attach: Option<&sphere_host::ChildInfo>) -> Option<Self> {
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
+        let (h, rx, w) = match attach {
+            Some(ch) => crate::hostterm::attach(ch)?,
+            None => crate::hostterm::spawn(COLS as u16, ROWS as u16, &shell)?,
+        };
+        let name = std::path::Path::new(attach.map(|c| c.cmd.as_str()).unwrap_or(&shell)).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        let writer: Arc<Mutex<Box<dyn Write + Send>>> = Arc::new(Mutex::new(Box::new(w)));
+        let term = Term::new(Config::default(), &Size, Listener { writer: writer.clone() });
+        Some(Self {
+            inner: Mutex::new(Inner { term, parser: Processor::new(), rx, writer, _master: None, child: None, host: Some(h) }),
+            dirty: true,
+            exited: false,
+            name,
+        })
     }
 
     pub fn send(&self, bytes: &[u8]) {

@@ -100,7 +100,7 @@ Keys (the prototypes' own):
 - A (or hold the sphere, or the dock's Apps): core open, the app orbit. ← → or scroll spins it, Enter or a click opens an app (Terminal and Agents are live), Esc closes.
 - W: the Working view on the latest agent (it also opens when you start one). P interrupts its turn, T brings its output forward, Esc goes home.
 - N: the Agent moment for what needs you (it rises by itself when a request arrives). Enter answers yes, E changes (type, Enter), L is later, ← → steps through them, Esc puts them away. Sphere reads each one out.
-- Terminal: T focuses it, Esc releases it, Cmd+T new tab, Cmd+W close, Cmd+1..9 switch, Cmd+V paste. Tabs run your login shell and live in the app for now (sphered has no terminal API yet).
+- Terminal: T focuses it, Esc releases it, Cmd+T new tab, Cmd+W close, Cmd+1..9 switch, Cmd+V paste. Tabs run your login shell inside sphere-host, so they survive the app closing: the next launch re-attaches them (replaying their output). If the host can't be reached they live in the app.
 - Option+Space (macOS) brings Sphere up over anything and hides it again. When something needs you while Sphere isn't in front, you get a notification.
 
 Sounds are the prototype's own, rendered to WAV from its synthesis code (`crates/sphere-app/assets/sounds`). Speech uses macOS `say` with the Daniel voice.

@@ -5,6 +5,7 @@ mod core;
 mod fonts;
 mod fx;
 mod home;
+mod hostterm;
 mod homepanels;
 mod geo;
 mod glow;

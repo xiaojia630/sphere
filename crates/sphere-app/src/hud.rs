@@ -64,9 +64,24 @@ pub fn setup_panels(
     let default_cmd = "git log --graph --color --oneline -20";
     let first = if demo { Some(args.cmd.clone().unwrap_or_else(|| default_cmd.to_string())) } else { args.cmd.clone() };
     let mut terms = Terms { demo, ..default() };
-    match Terminal::spawn(first.as_deref(), demo) {
-        Ok(t) => terms.tabs.push(t),
-        Err(e) => eprintln!("could not start a terminal: {e}"),
+    if !demo {
+        // your tabs from the last run, still alive in sphere-host
+        for ch in crate::hostterm::running() {
+            if let Some(t) = Terminal::host(Some(&ch)) {
+                terms.tabs.push(t);
+            }
+        }
+        if terms.tabs.is_empty() {
+            terms.open_tab();
+            if let (Some(cmd), Some(t)) = (first.as_deref(), terms.tabs.first()) {
+                t.send(format!("{cmd}\n").as_bytes());
+            }
+        }
+    } else {
+        match Terminal::spawn(first.as_deref(), demo) {
+            Ok(t) => terms.tabs.push(t),
+            Err(e) => eprintln!("could not start a terminal: {e}"),
+        }
     }
     commands.insert_resource(terms);
     let home = stage_to_world(54.0 + TERM_W / 2.0, 70.0 + TERM_H / 2.0);
