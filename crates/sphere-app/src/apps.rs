@@ -22,7 +22,7 @@ impl Open {
     }
 }
 
-pub fn apply(mut open: ResMut<Open>, mut focus: ResMut<Focus>, mut working: ResMut<crate::working::Working>, mut code: ResMut<crate::codeapp::CodeApp>, mut sound: ResMut<crate::sound::Sound>, mut orb: ResMut<crate::orbit::Orb>) {
+pub fn apply(mut open: ResMut<Open>, mut focus: ResMut<Focus>, mut working: ResMut<crate::working::Working>, mut code: ResMut<crate::codeapp::CodeApp>, mut git: ResMut<crate::gitapp::GitApp>, mut sound: ResMut<crate::sound::Sound>, mut orb: ResMut<crate::orbit::Orb>) {
     if let Some(o) = open.toggle_orbit.take() {
         orb.set(o, &mut sound);
     }
@@ -32,7 +32,14 @@ pub fn apply(mut open: ResMut<Open>, mut focus: ResMut<Focus>, mut working: ResM
         0 => focus.terminal = true,
         2 => {
             working.close();
+            git.close();
             code.open();
+            sound.play_with("whoosh", 0.7, 0.0);
+        }
+        3 => {
+            working.close();
+            code.close();
+            git.open();
             sound.play_with("whoosh", 0.7, 0.0);
         }
         _ => working.open_latest(),

@@ -11,7 +11,7 @@ pub const APPS: [(&str, bool); 8] = [
     ("Terminal", true),
     ("Agents", true),
     ("Code", true),
-    ("Git & PRs", false),
+    ("Git & PRs", true),
     ("Containers", false),
     ("Ports & logs", false),
     ("Files", false),
