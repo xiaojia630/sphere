@@ -301,10 +301,16 @@ pub fn update_backdrop(
     let half_h = (20.0f32 * DEG).tan() * 3000.0;
     for (mut t, h) in &mut q {
         t.scale = Vec3::new(2.0 * half_h * sv.w / sv.h, 2.0 * half_h, 1.0);
-        if mats.get(&h.0).is_some_and(|m| m.u.c.x != sv.w || m.u.c.y != sv.h) {
+        let t = crate::theme::tint();
+        let tint = Color::srgb(t.x, t.y, t.z).to_srgba();
+        let line = crate::theme::now(Role::Line).to_srgba();
+        let (c, c2) = (Vec4::new(tint.red, tint.green, tint.blue, 1.0), Vec4::new(line.red, line.green, line.blue, 1.0));
+        if mats.get(&h.0).is_some_and(|m| m.u.c.x != sv.w || m.u.c.y != sv.h || m.u.color != c || m.u.c2 != c2) {
             if let Some(mut m) = mats.get_mut(&h.0) {
                 m.u.c.x = sv.w;
                 m.u.c.y = sv.h;
+                m.u.color = c;
+                m.u.c2 = c2;
             }
         }
     }

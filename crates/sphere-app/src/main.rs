@@ -10,6 +10,8 @@ mod moment;
 mod panel;
 mod service;
 mod summon;
+mod sysstats;
+mod theme;
 mod term;
 mod util;
 
@@ -44,6 +46,8 @@ pub struct Args {
     pub live: bool,
     /// `--moment`: the demo shows the Agent moment card with a sample request.
     pub moment: bool,
+    /// `--theme <name>`: balanced, full, cyan, black, red
+    pub theme: Option<theme::ThemeId>,
 }
 
 impl Args {
@@ -54,7 +58,7 @@ impl Args {
 }
 
 fn parse_args() -> Args {
-    let mut a = Args { cmd: None, bench: None, shot: None, frames: 120, depth: false, focus_term: false, msaa: true, size: (1600, 1000), dt: 1.0 / 20.0, demo: false, live: false, moment: false };
+    let mut a = Args { cmd: None, bench: None, shot: None, frames: 120, depth: false, focus_term: false, msaa: true, size: (1600, 1000), dt: 1.0 / 20.0, demo: false, live: false, moment: false, theme: None };
     let mut it = std::env::args().skip(1);
     while let Some(s) = it.next() {
         match s.as_str() {
@@ -68,6 +72,7 @@ fn parse_args() -> Args {
             "--demo" => a.demo = true,
             "--live" => a.live = true,
             "--moment" => a.moment = true,
+            "--theme" => a.theme = it.next().and_then(|v| theme::ThemeId::from_key(&v)),
             "--dt" => a.dt = it.next().and_then(|v| v.parse().ok()).unwrap_or(0.05),
             "--size" => {
                 if let Some(v) = it.next() {
@@ -78,7 +83,7 @@ fn parse_args() -> Args {
                 }
             }
             "-h" | "--help" => {
-                println!("sphere-app [--demo] [--live] [--moment] [--cmd \"<command>\"] [--bench <seconds>] [--shot <png> [--frames N] [--depth] [--term]] [--size WxH] [--no-msaa]");
+                println!("sphere-app [--demo] [--live] [--moment] [--theme name] [--cmd \"<command>\"] [--bench <seconds>] [--shot <png> [--frames N] [--depth] [--term]] [--size WxH] [--no-msaa]");
                 std::process::exit(0);
             }
             other => eprintln!("ignoring unknown argument {other}"),
@@ -105,13 +110,15 @@ fn main() {
         .insert_resource(StageView::compute(args.size.0 as f32, args.size.1 as f32))
         .insert_resource(if args.offline() { Agents::demo() } else { Agents::empty() })
         .insert_resource(service::start(args.offline()))
+        .insert_resource(sysstats::start(args.offline()))
+        .insert_resource(theme::Theme::new(args.theme.unwrap_or_else(|| if args.offline() { theme::ThemeId::Balanced } else { theme::saved() })))
         .init_resource::<live::Live>()
         .init_resource::<live::Toasts>()
         .init_resource::<cmdbar::CmdBar>()
         .init_resource::<moment::Moment>()
         .init_resource::<hud::FrameStats>()
         .add_systems(Startup, (setup_core, setup_cameras, hud::setup_panels, hud::setup_backdrop, hud::setup_overlay, cmdbar::setup).chain())
-        .add_systems(First, tick_sim)
+        .add_systems(First, (tick_sim, theme::animate))
         .add_systems(
             Update,
             (
@@ -123,7 +130,8 @@ fn main() {
             )
                 .chain(),
         )
-        .add_systems(Last, panel::gate_panel_cameras);
+        .add_systems(Last, panel::gate_panel_cameras)
+        .add_systems(PostUpdate, (panel::theme_panels, theme_bloom));
     if !args.offline() {
         summon::install(&mut app);
     }
@@ -256,6 +264,19 @@ fn setup_cameras(mut commands: Commands, args: Res<Args>, off: Res<Offscreen>) {
 fn stage_view(win: Query<&Window, With<PrimaryWindow>>, mut sv: ResMut<StageView>) {
     if let Ok(w) = win.single() {
         *sv = StageView::compute(w.width(), w.height());
+    }
+}
+
+/// Bloom follows the theme (the prototype's bloom strength .6 is our 0.22).
+fn theme_bloom(theme: Res<theme::Theme>, mut q: Query<&mut bevy::post_process::bloom::Bloom, With<CamCore>>) {
+    if !theme.is_changed() {
+        return;
+    }
+    let i = 0.22 * theme::bloom() / 0.6;
+    for mut b in &mut q {
+        if (b.intensity - i).abs() > 1e-4 {
+            b.intensity = i;
+        }
     }
 }
 

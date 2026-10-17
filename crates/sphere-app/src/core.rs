@@ -226,6 +226,8 @@ pub enum Tag {
 #[derive(Component)]
 pub struct GlowInfo {
     pub deck: usize,
+    /// the colour role, resolved against the live theme (and the deck's own hue in Full color)
+    pub role: Role,
     pub alpha: f32,
     pub wall: f32,
     pub tag: Tag,
@@ -329,7 +331,7 @@ fn add_geo(
         Mesh3d(mh.clone()),
         MeshMaterial3d(b.mats.add(m)),
         Transform::default(),
-        GlowInfo { deck, alpha, wall, tag },
+        GlowInfo { deck, role, alpha, wall, tag },
     ));
     if spin != 0.0 {
         e.insert(Spin { speed: spin, rx: 0.0, rz: 0.0 });
@@ -372,7 +374,7 @@ fn quad_label(b: &mut B, deck: usize, parent: Entity, text: &str, size: f32, rol
             Mesh3d(b.meshes.add(mesh)),
             MeshMaterial3d(b.mats.add(m)),
             Transform::from_xyz(ang.sin() * r, ang.cos() * r, 0.0),
-            GlowInfo { deck, alpha, wall: 0.0, tag: Tag::None },
+            GlowInfo { deck, role, alpha, wall: 0.0, tag: Tag::None },
         ))
         .id();
     b.commands.entity(parent).add_child(e);
@@ -594,7 +596,7 @@ pub fn setup_core(
     m.u.a.y = 0.0;
     let se = b
         .commands
-        .spawn((Mesh3d(spine), MeshMaterial3d(b.mats.add(m)), Transform::default(), GlowInfo { deck: CORE, alpha: 0.0, wall: 0.0, tag: Tag::Spine }))
+        .spawn((Mesh3d(spine), MeshMaterial3d(b.mats.add(m)), Transform::default(), GlowInfo { deck: CORE, role: Role::Line, alpha: 0.0, wall: 0.0, tag: Tag::Spine }))
         .id();
     b.commands.entity(tilt).add_child(se);
 
@@ -704,7 +706,7 @@ fn spawn_sph(b: &mut B, parent: Entity, mesh: Handle<Mesh>, kind: Kind, role: Ro
     if kind == Kind::Dots {
         m.u.c.z = 3.0;
     }
-    let e = b.commands.spawn((Mesh3d(mesh), MeshMaterial3d(b.mats.add(m)), Transform::default(), GlowInfo { deck: CORE, alpha, wall: 0.0, tag })).id();
+    let e = b.commands.spawn((Mesh3d(mesh), MeshMaterial3d(b.mats.add(m)), Transform::default(), GlowInfo { deck: CORE, role, alpha, wall: 0.0, tag })).id();
     b.commands.entity(parent).add_child(e);
 }
 
@@ -885,6 +887,8 @@ pub fn update_materials(
             _ => {}
         }
         let mut u = cur.u;
+        u.color = crate::theme::deck_lin(info.deck, info.role);
+        u.c2 = crate::theme::deck_b2_lin(info.deck);
         u.a = Vec4::new(alpha, info.wall, d.u_reveal, d.u_hi);
         u.b = Vec4::new(d.u_fade, d.u_depth, 0.0, 0.0);
         if info.tag == Tag::Dots {

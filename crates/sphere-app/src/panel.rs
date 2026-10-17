@@ -28,6 +28,9 @@ pub struct PanelUniform {
     pub fill: Vec4,
     pub acc: Vec4,
     pub p: Vec4,
+    /// theme swap (see `theme::panel_map`)
+    pub from_c: [Vec4; 8],
+    pub to_c: [Vec4; 8],
 }
 
 #[derive(Asset, TypePath, AsBindGroup, Clone, Debug)]
@@ -88,6 +91,43 @@ impl Plugin for PanelPlugin {
 }
 
 // ------------------------------------------------------------------ panels
+
+impl PanelId {
+    /// Full color: the hue this panel blends toward.
+    pub fn hue(self) -> Option<crate::theme::Hue> {
+        use crate::theme::Hue;
+        match self {
+            PanelId::Agents => Some(Hue::Agents),
+            PanelId::Clock => Some(Hue::Clock),
+            PanelId::Readout | PanelId::Moment => Some(Hue::Neutral),
+            PanelId::Terminal => None,
+        }
+    }
+}
+
+/// The panel's Full-color hue, on its quad (the readout has no `Panel`).
+#[derive(Component, Clone, Copy)]
+pub struct PanelHue(pub Option<crate::theme::Hue>);
+
+/// Re-colours every panel's frame, glass and UI swap when the palette moves.
+pub fn theme_panels(theme: Res<crate::theme::Theme>, mut seen: Local<u64>, mut mats: ResMut<Assets<PanelMaterial>>, q: Query<(&MeshMaterial3d<PanelMaterial>, &PanelHue)>) {
+    if *seen == theme.version {
+        return;
+    }
+    *seen = theme.version;
+    for (h, hue) in &q {
+        let (from, to) = crate::theme::panel_map(hue.0);
+        if let Some(mut m) = mats.get_mut(&h.0) {
+            let card = m.u.fill == m.u.acc;
+            m.u.line = to[0];
+            m.u.hot = to[2];
+            m.u.acc = to[4];
+            m.u.fill = if card { to[4] } else { to[3] };
+            m.u.from_c = from;
+            m.u.to_c = to;
+        }
+    }
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum PanelId {
@@ -210,6 +250,7 @@ pub fn spawn_panel_quad(
 ) -> Entity {
     // The Agent moment card: darker glass (it sits over the core's flare) and an amber LED and bar.
     let card = s.id == PanelId::Moment;
+    let (from_c, to_c) = crate::theme::panel_map(s.id.hue());
     let mat = mats.add(PanelMaterial {
         u: PanelUniform {
             size: Vec4::new(s.w, s.h, PAD, 0.0),
@@ -219,6 +260,8 @@ pub fn spawn_panel_quad(
             acc: lin(Role::Acc),
             // 1 framed glass, 2 the core readout (dark backdrop), 3 bare text (the clock)
             p: Vec4::new(if s.id == PanelId::Clock { 3.0 } else if s.unframed { 2.0 } else { 1.0 }, if card { 0.86 } else { 0.36 }, 1.0, 1.0),
+            from_c,
+            to_c,
         },
         content: Some(ui.image.clone()),
     });
@@ -228,6 +271,7 @@ pub fn spawn_panel_quad(
             MeshMaterial3d(mat.clone()),
             Transform::from_translation(s.home).with_scale(Vec3::splat(0.001)),
             RenderLayers::layer(1),
+            PanelHue(s.id.hue()),
             Panel {
                 id: s.id,
                 w: s.w,

@@ -10,6 +10,9 @@ struct Panel {
     fill: vec4<f32>,
     acc: vec4<f32>,
     p: vec4<f32>,      // framed (1) / readout (2), smoke alpha, glass scale, glow
+    // theme swap: the Balanced role colours the UI is drawn in, and what each becomes now (linear)
+    from_c: array<vec4<f32>, 8>,
+    to_c: array<vec4<f32>, 8>,
 };
 @group(constants::MATERIAL_BIND_GROUP) @binding(0) var<uniform> u: Panel;
 @group(constants::MATERIAL_BIND_GROUP) @binding(1) var content: texture_2d<f32>;
@@ -47,6 +50,23 @@ fn over(dst: vec4<f32>, src: vec4<f32>) -> vec4<f32> {
     return src + dst * (1.0 - src.a);
 }
 
+// UI is drawn in the Balanced colours; swap each pixel that is one of them for the current theme's colour.
+// Texels are premultiplied, so compare the straight colour (tolerant for faint edge pixels).
+fn retheme(c: vec4<f32>) -> vec4<f32> {
+    if (c.a < 0.01) { return c; }
+    let s = pow(clamp(c.rgb / c.a, vec3<f32>(0.0), vec3<f32>(1.0)), vec3<f32>(1.0 / 2.2));
+    var best = 1e9;
+    var bi = -1;
+    for (var i = 0; i < 8; i = i + 1) {
+        let f = pow(u.from_c[i].rgb, vec3<f32>(1.0 / 2.2));
+        let d = distance(s, f);
+        if (d < best) { best = d; bi = i; }
+    }
+    let tol = 0.05 + (1.0 - c.a) * 0.2;
+    if (bi < 0 || best > tol) { return c; }
+    return vec4<f32>(u.to_c[bi].rgb * c.a, c.a);
+}
+
 @fragment
 fn fs_panel(i: VOut) -> @location(0) vec4<f32> {
     let w = u.size.x;
@@ -61,7 +81,7 @@ fn fs_panel(i: VOut) -> @location(0) vec4<f32> {
     let tuv = q / vec2<f32>(w, h);
     let inb = f32(tuv.x >= 0.0 && tuv.x <= 1.0 && tuv.y >= 0.0 && tuv.y <= 1.0);
     let cuv = clamp(tuv, vec2<f32>(0.0), vec2<f32>(1.0));
-    let tex = textureSample(content, content_samp, cuv) * inb;
+    let tex = retheme(textureSample(content, content_samp, cuv)) * inb;
 
     if (u.p.x > 2.5) {
         // bare text, no glass or frame
