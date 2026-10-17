@@ -206,8 +206,9 @@ async fn a_run_streams_steps_output_files_and_cost() {
         t.status
     );
     let wt = std::path::PathBuf::from(t.workdir.as_ref().unwrap());
+    // on macOS /tmp is a link to /private/tmp: compare real paths
     assert_eq!(
-        wt,
+        wt.canonicalize().unwrap_or(wt.clone()),
         env.state
             .join("worktrees/repo/t1")
             .canonicalize()

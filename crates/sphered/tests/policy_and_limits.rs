@@ -489,7 +489,15 @@ async fn auth_and_version_problems_are_warnings_not_failures() {
         .set("check_version", "true");
     env.start_daemon().await;
     let c = env.client().await;
-    let st = c.status().await.unwrap();
+    // the sign-in and version checks run in the background after start: wait for them
+    let mut st = c.status().await.unwrap();
+    for _ in 0..100 {
+        if st.signed_in.is_some() && st.warnings.iter().any(|w| w.contains("9.9.9")) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        st = c.status().await.unwrap();
+    }
     assert_eq!(st.signed_in, Some(false));
     assert!(
         st.warnings.iter().any(|w| w.contains("signed out")),
