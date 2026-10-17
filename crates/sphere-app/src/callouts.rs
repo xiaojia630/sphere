@@ -23,7 +23,7 @@ pub fn setup(mut commands: Commands, f: Res<UiFonts>, root: Res<crate::hud::Over
     let c = &mut commands;
     let line = role_color(Role::Line);
     let hot = role_color(Role::Hot);
-    for i in 0..6 {
+    for (i, layer) in NAMES.iter().enumerate() {
         let lab = c
             .spawn((Callout(i), Node { position_type: PositionType::Absolute, flex_direction: FlexDirection::Column, row_gap: px(4), ..default() }, Visibility::Hidden))
             .id();
@@ -31,7 +31,7 @@ pub fn setup(mut commands: Commands, f: Res<UiFonts>, root: Res<crate::hud::Over
         let tag = c.spawn((Node { padding: UiRect { left: px(5), right: px(5), top: px(2), bottom: px(1) }, ..default() }, BackgroundColor(role_color(Role::Fill)))).id();
         let tt = c.spawn((Text::new(format!("L{}", i + 1)), font(&f.ui700, 10.5, 1.26), TextColor(Color::BLACK), LineHeight::Px(13.0))).id();
         c.entity(tag).add_child(tt);
-        let name = c.spawn((Text::new(NAMES[i].to_uppercase()), font(&f.ui700, 10.5, 2.73), TextColor(hot), LineHeight::Px(13.0))).id();
+        let name = c.spawn((Text::new(layer.to_uppercase()), font(&f.ui700, 10.5, 2.73), TextColor(hot), LineHeight::Px(13.0))).id();
         c.entity(top).add_children(&[tag, name]);
         let sub = c.spawn((CalloutSub(i), Text::new(""), font(&f.ui500, 11.0, 1.32), TextColor(line), LineHeight::Px(13.0))).id();
         c.entity(lab).add_children(&[top, sub]);
