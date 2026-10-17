@@ -1,5 +1,99 @@
 # Sphere
 
+Sphere is an operating-system-style desktop for working with coding agents, on macOS. A live core sits in the middle
+of the screen with glass panels around it. You start Claude Code agents from a command bar and watch them work.
+When one needs you, Sphere asks: the request rises out of the core and you answer it with a key. Around that sit the
+apps a developer reaches for all day, all on your real data:
+
+- **Code**: review an agent's work. You see its task and checkpoints, the changed files, the diff by hunk with the
+  agent's reason for each change, and the tests. From there you merge, open a PR, ask for a change, open it in Zed,
+  or discard it.
+- **Git**: your repos, a tilted commit graph across branches, staging, commit, branches, pull, push and fetch.
+- **Containers**: Docker or OrbStack containers with their logs, plus start, stop, restart, pull and remove.
+- **Ports & logs**: every port listening on your Mac, matched to the process or container that owns it.
+- **System**: CPU per core, memory, GPU, network, disk and battery, and the processes using the most.
+- **Files**: yazi-style columns with a preview, pinned places, copy and paste, the Trash, and a quick edit.
+
+![The home screen](look/m2/home.jpg)
+
+| | |
+| --- | --- |
+| ![Code](look/apps/code-reason.jpg) | ![Git](look/apps/git-full.jpg) |
+| ![Ports & logs](look/apps/ports-full.jpg) | ![The Agent moment](look/m2/moment.jpg) |
+
+Side-by-side shots of each app next to its design are in `look/apps/`.
+
+## Install
+
+1. Download `Sphere-<version>.dmg` from the releases page, open it, and drag Sphere to Applications.
+2. The first time, right-click Sphere in Applications and choose **Open**, then **Open** again. The app is signed
+   for local use only and isn't notarized by Apple, so a plain double-click is refused once. If macOS still says it
+   can't be opened, run `xattr -dr com.apple.quarantine /Applications/Sphere.app` in Terminal.
+3. Sphere starts its background service (`sphered` and `sphere-host`, both inside the app) by itself, the first
+   time and every time. State lives in `~/.sphere`.
+
+### Requirements
+
+- macOS 13 or later on Apple silicon. The build is arm64; build from source on an Intel Mac.
+- To run agents: [Claude Code](https://docs.anthropic.com/en/docs/claude-code) installed and signed in. Agents run
+  on your own account. Without it, everything else works.
+- Optional:
+  - Docker Desktop or [OrbStack](https://orbstack.dev) for Containers, and for container names in Ports.
+  - The GitHub CLI (`gh`) for opening PRs from Code.
+  - [Zed](https://zed.dev) for "open in Zed" and quick edits.
+- On first use, macOS asks whether Sphere may show notifications.
+
+## Using it
+
+- **Option+Space** shows or hides Sphere from anywhere. Closing the window hides it; **Cmd+Q** quits.
+- **/** (or Cmd+K) opens the command bar.
+  - `repo: what to do` starts an agent in its own git worktree and branch, and the Working view follows it.
+  - `> message` talks to the agent you heard from last.
+  - `system` opens System.
+- **A** opens the core's app orbit. Spin it with ← → or the wheel, then press Enter or click an app. **Esc** goes back.
+- **W** shows the Working view for the latest agent. **N** raises what needs you.
+  - In the Agent moment, **Enter** (or **Y**) says yes, **E** changes, and **L** is later.
+- **T** focuses the terminal. Its tabs live in `sphere-host`, so they survive quitting the app.
+- Views: **1 2 3** switch between flat, depth and orbit, **X** collapses the rings, **C** cycles the five themes,
+  **F** fits, **R** resets, **M** mutes.
+- Every app shows its keys at the bottom right, and every button and row can be clicked.
+- Apps that change things ask twice before anything destructive: merge, discard, remove a container, stop a
+  process, move to the Trash.
+
+## Build from source
+
+```
+cargo build --release
+target/release/sphere-app                    # the app (starts sphered when it isn't running)
+sh scripts/package-macos-app.sh              # target/Sphere.app, target/Sphere-<version>.dmg and a zip
+```
+
+Open one app directly with `--code`, `--git`, or `--app containers|ports|system|files`. `SPHERE_STATS=1` prints
+startup timings and memory.
+
+## Credits
+
+Sphere adapts the designs and models of these open-source projects. The code here is our own unless noted.
+- [yazi](https://github.com/sxyazi/yazi) (MIT): Files.
+- [gitui](https://github.com/extrawurst/gitui) (MIT): Git.
+- [oxker](https://github.com/mrjackwills/oxker) (MIT): Containers.
+- [listeners](https://github.com/GyulyVGC/listeners) (MIT): Ports & logs.
+- [delta](https://github.com/dandavison/delta) (MIT): the diff view.
+- [herdr](https://github.com/herdrdev/herdr) (Apache-2.0): the process holder that outlives the UI.
+
+It is built on these libraries:
+- [Bevy](https://bevy.org) (MIT or Apache-2.0).
+- [Alacritty](https://github.com/alacritty/alacritty)'s `alacritty_terminal` (Apache-2.0).
+- `portable-pty` from [WezTerm](https://github.com/wezterm/wezterm) (MIT).
+- [rodio](https://github.com/RustAudio/rodio) and [hound](https://github.com/ruuda/hound) (MIT or Apache-2.0).
+- Fonts under the SIL OFL: Michroma, Rajdhani and JetBrains Mono.
+
+Sphere itself is Apache-2.0.
+
+---
+
+## sphered, the service (for developers)
+
 `sphered` is the background service behind Sphere. It starts and owns Claude Code agents (headless, over stream-json), gives each task its own git worktree and branch, records everything as one ordered event log in SQLite, and turns the agent's permission checks, questions and plans into requests that only you answer. Clients talk to it over a Unix socket with JSON-RPC 2.0; the `sphere` CLI is the first one.
 
 This is milestone 1: the service, the process holder, the CLI and a fake agent for tests. The design is in [docs/sphered.md](docs/sphered.md). Desktop only (Linux and macOS).
