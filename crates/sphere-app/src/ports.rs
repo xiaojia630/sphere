@@ -377,6 +377,22 @@ pub fn draw(mut commands: Commands, app: Res<PortsApp>, svc: Res<Service>, roots
 fn draw_map(c: &mut Commands, ui: &Ui, map: Entity, app: &PortsApp) {
     let shown = app.shown();
     let (cx, cy) = (430.0, 262.0);
+    let inner = shown.len().min(8);
+    let place = |i: usize| -> Vec2 {
+        let (k, m, rx, ry, off) = if i < inner { (i, inner, 220.0, 120.0, 0.0) } else { (i - inner, shown.len() - inner, 380.0, 220.0, 0.2) };
+        let a = std::f32::consts::TAU * k as f32 / m.max(1) as f32 - std::f32::consts::FRAC_PI_2 + off;
+        Vec2::new(cx + rx * a.cos(), cy + ry * a.sin())
+    };
+    // connectors from the hub (the selected port dashed and bright), under everything
+    for (i, l) in shown.iter().enumerate() {
+        let to = place(i);
+        let from = Vec2::new(cx, cy) + (to - Vec2::new(cx, cy)).normalize_or_zero() * 50.0;
+        if i == app.sel {
+            ui.dashed(c, map, from, to, 1.5, with_alpha(ui.hot, 0.9), 5.0, 4.0);
+        } else {
+            ui.line(c, map, from, to, 1.0, with_alpha(if l.container.is_some() { role_color(Role::Fill) } else { ui.line }, 0.2));
+        }
+    }
     let hub = c
         .spawn((
             Node { position_type: PositionType::Absolute, left: px(cx - 48.0), top: px(cy - 48.0), width: px(96), height: px(96), border: UiRect::all(px(1)), border_radius: BorderRadius::MAX, flex_direction: FlexDirection::Column, align_items: AlignItems::Center, justify_content: JustifyContent::Center, ..default() },
@@ -394,11 +410,8 @@ fn draw_map(c: &mut Commands, ui: &Ui, map: Entity, app: &PortsApp) {
     }
     c.entity(map).add_child(hub);
     // inner ring holds up to 8, the rest go outside
-    let inner = shown.len().min(8);
     for (i, l) in shown.iter().enumerate() {
-        let (k, m, rx, ry, off) = if i < inner { (i, inner, 220.0, 120.0, 0.0) } else { (i - inner, shown.len() - inner, 380.0, 220.0, 0.2) };
-        let a = std::f32::consts::TAU * k as f32 / m.max(1) as f32 - std::f32::consts::FRAC_PI_2 + off;
-        let (x, y) = (cx + rx * a.cos(), cy + ry * a.sin());
+        let Vec2 { x, y } = place(i);
         let sel = i == app.sel;
         let col = if l.container.is_some() { role_color(Role::Fill) } else { ui.line };
         let (w, h) = (92.0, 40.0);

@@ -44,6 +44,13 @@ pub struct SysApp {
     gpu_h: Vec<f32>,
     in_h: Vec<f32>,
     out_h: Vec<f32>,
+    /// each core's use 0..1, from the last two tick readings
+    cores: Vec<f32>,
+    ticks_prev: Vec<(u64, u64)>,
+    /// disk bytes (read, written) last time, when, and the rates since
+    disk_prev: Option<((u64, u64), f32)>,
+    disk_rw: (f32, f32),
+    disk_h: Vec<f32>,
     net_prev: Option<((u64, u64), std::time::Instant)>,
     loading: bool,
     load_t: f32,
@@ -58,7 +65,7 @@ pub struct SysApp {
 impl Default for SysApp {
     fn default() -> Self {
         let (tx, rx) = mpsc::channel();
-        SysApp { open: false, amt: Spring::new(0.0, 26.0, 9.0), sys: None, cpu_h: Vec::new(), gpu_h: Vec::new(), in_h: Vec::new(), out_h: Vec::new(), net_prev: None, loading: false, load_t: -99.0, rx: None, sel: 0, by_mem: false, armed: None, notes: (tx, Mutex::new(rx)), version: 0 }
+        SysApp { open: false, amt: Spring::new(0.0, 26.0, 9.0), sys: None, cpu_h: Vec::new(), gpu_h: Vec::new(), in_h: Vec::new(), out_h: Vec::new(), cores: Vec::new(), ticks_prev: Vec::new(), disk_prev: None, disk_rw: (0.0, 0.0), disk_h: Vec::new(), net_prev: None, loading: false, load_t: -99.0, rx: None, sel: 0, by_mem: false, armed: None, notes: (tx, Mutex::new(rx)), version: 0 }
     }
 }
 
@@ -207,6 +214,17 @@ pub fn update(sim: Res<crate::core::Sim>, mut app: ResMut<SysApp>, mut ctl: ResM
         let had_net = app.net_prev.is_some();
         app.net_prev = prev;
         push(&mut app.cpu_h, s.cpu);
+        if !app.ticks_prev.is_empty() {
+            app.cores = crate::opsdata::core_use(&app.ticks_prev, &s.cores_ticks);
+        }
+        app.ticks_prev = s.cores_ticks.clone();
+        if let Some(((r0, w0), t0)) = app.disk_prev {
+            let dt = (sim.t - t0).max(0.5);
+            app.disk_rw = (s.disk_bytes.0.saturating_sub(r0) as f32 / dt, s.disk_bytes.1.saturating_sub(w0) as f32 / dt);
+            let rw = app.disk_rw.0 + app.disk_rw.1;
+            push(&mut app.disk_h, rw);
+        }
+        app.disk_prev = Some((s.disk_bytes, sim.t));
         push(&mut app.gpu_h, s.gpu);
         if had_net {
             push(&mut app.in_h, s.net_in);
@@ -277,21 +295,41 @@ pub fn draw(mut commands: Commands, app: Res<SysApp>, svc: Res<Service>, roots: 
     // processor
     let b = ui.body(c, ws.panes[CPU]);
     let h = ui.header(c, "Processor", &format!("{} P + {} E cores", s.cores.0, s.cores.1), ui.dim);
-    let inner = c.spawn(Node { flex_direction: FlexDirection::Column, row_gap: px(10), padding: UiRect { left: px(18), right: px(18), top: px(16), ..default() }, align_items: AlignItems::Center, ..default() }).id();
+    let inner = c.spawn(Node { flex_direction: FlexDirection::Column, row_gap: px(8), padding: UiRect { left: px(18), right: px(18), top: px(8), ..default() }, align_items: AlignItems::Center, ..default() }).id();
     c.entity(b).add_children(&[h, inner]);
+    // one spoke per core round the total, longer the busier (P cores first, then E)
+    let dial = c.spawn(Node { width: px(380), height: px(250), ..default() }).id();
+    let (cx, cy) = (190.0, 122.0);
+    let n = app.cores.len().max(1);
+    for (i, u) in app.cores.iter().enumerate() {
+        let a = std::f32::consts::TAU * i as f32 / n as f32 - std::f32::consts::FRAC_PI_2;
+        let dir = Vec2::new(a.cos(), a.sin());
+        let r0 = 66.0;
+        let col = if *u > 0.85 { role_color(Role::Bad) } else if *u > 0.5 { role_color(Role::Acc) } else { role_color(Role::Fill) };
+        ui.line(c, dial, Vec2::new(cx, cy) + dir * r0, Vec2::new(cx, cy) + dir * (r0 + 52.0), 3.0, with_alpha(ui.line, 0.12));
+        ui.line(c, dial, Vec2::new(cx, cy) + dir * r0, Vec2::new(cx, cy) + dir * (r0 + 4.0 + 48.0 * u), 3.0, col);
+        let lp = Vec2::new(cx, cy) + dir * 134.0;
+        let p = i < s.cores.0 as usize;
+        let k = if p { format!("P{i}") } else { format!("E{}", i - s.cores.0 as usize) };
+        let lab = c.spawn(Node { position_type: PositionType::Absolute, left: px(lp.x - 16.0), top: px(lp.y - 12.0), width: px(32), flex_direction: FlexDirection::Column, align_items: AlignItems::Center, ..default() }).id();
+        let l1 = ui.text(c, k, &f.ui600, 8.5, 1.0, ui.dim);
+        let l2 = ui.text(c, format!("{:.0}", u * 100.0), &f.mono, 10.0, 0.0, ui.line);
+        c.entity(lab).add_children(&[l1, l2]);
+        c.entity(dial).add_child(lab);
+    }
     let ring = c
         .spawn((
-            Node { width: px(170), height: px(170), border: UiRect::all(px(3)), border_radius: BorderRadius::MAX, flex_direction: FlexDirection::Column, align_items: AlignItems::Center, justify_content: JustifyContent::Center, ..default() },
+            Node { position_type: PositionType::Absolute, left: px(cx - 56.0), top: px(cy - 56.0), width: px(112), height: px(112), border: UiRect::all(px(2)), border_radius: BorderRadius::MAX, flex_direction: FlexDirection::Column, align_items: AlignItems::Center, justify_content: JustifyContent::Center, ..default() },
             BorderColor::all(with_alpha(if s.cpu > 0.85 { role_color(Role::Bad) } else { role_color(Role::Fill) }, 0.35 + 0.65 * s.cpu)),
         ))
         .id();
-    let pct = ui.text(c, format!("{:.0}%", s.cpu * 100.0), &f.display, 34.0, 0.5, ui.hot);
-    let cl = ui.text(c, "CPU", &f.ui600, 10.0, 2.4, ui.dim);
+    let pct = ui.text(c, format!("{:.0}%", s.cpu * 100.0), &f.display, 24.0, 0.5, ui.hot);
+    let cl = ui.text(c, "CPU", &f.ui600, 9.0, 2.4, ui.dim);
     c.entity(ring).add_children(&[pct, cl]);
+    c.entity(dial).add_child(ring);
     let la = ui.text(c, format!("load {:.2} · {:.2} · {:.2}", s.load[0], s.load[1], s.load[2]), &f.mono, 12.0, 0.0, ui.line);
-    let sp = ui.spark(c, &app.cpu_h, 70.0, role_color(Role::Fill));
-    let cap = ui.text(c, "LAST 80 SECONDS", &f.ui600, 9.5, 1.8, ui.dim);
-    c.entity(inner).add_children(&[ring, la, sp, cap]);
+    let sp = ui.spark(c, &app.cpu_h, 46.0, role_color(Role::Fill));
+    c.entity(inner).add_children(&[dial, la, sp]);
     // memory
     let b = ui.body(c, ws.panes[MEM]);
     // used the way Activity Monitor counts it: app, wired and compressed (cached files can be dropped)
@@ -338,11 +376,15 @@ pub fn draw(mut commands: Commands, app: Res<SysApp>, svc: Res<Service>, roots: 
     // disk and battery
     let b = ui.body(c, ws.panes[DISK]);
     let h = ui.header(c, "Disk · battery", "", ui.dim);
-    let inner = c.spawn(Node { flex_direction: FlexDirection::Column, row_gap: px(7), padding: UiRect { left: px(18), right: px(18), top: px(12), ..default() }, ..default() }).id();
+    let inner = c.spawn(Node { flex_direction: FlexDirection::Column, row_gap: px(5), padding: UiRect { left: px(18), right: px(18), top: px(10), ..default() }, ..default() }).id();
     c.entity(b).add_children(&[h, inner]);
     let dk = ui.kv(c, "macintosh hd", format!("{:.0} of {:.0} GB", s.disk.0, s.disk.1), ui.line);
     let db = ui.bar(c, s.disk.0 / s.disk.1.max(1.0), role_color(Role::Fill), 340.0);
-    c.entity(inner).add_children(&[dk, db]);
+    let io = ui.kv(c, "disk i/o", format!("read {} · write {}", rate(app.disk_rw.0), rate(app.disk_rw.1)), ui.line);
+    let peak = app.disk_h.iter().cloned().fold(1e6, f32::max);
+    let dh: Vec<f32> = app.disk_h.iter().map(|v| v / peak).collect();
+    let dsp = ui.spark(c, &dh, 22.0, ui.line);
+    c.entity(inner).add_children(&[dk, db, io, dsp]);
     match &s.battery {
         Some((pct, state, left)) => {
             let bk = ui.kv(c, "battery", format!("{pct}% · {state}"), ui.line);

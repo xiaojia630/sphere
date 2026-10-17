@@ -413,6 +413,18 @@ fn mib(s: &str) -> f32 {
 fn draw_map(c: &mut Commands, ui: &Ui, map: Entity, app: &ContainersApp) {
     let shown = app.shown();
     let (cx, cy, rx, ry) = (430.0, 165.0, 300.0, 112.0);
+    // connectors from the hub to each container (the selected one dashed and bright), under everything
+    let m = shown.len().max(1);
+    for (i, ct) in shown.iter().enumerate() {
+        let a = std::f32::consts::TAU * i as f32 / m as f32 - std::f32::consts::FRAC_PI_2;
+        let to = Vec2::new(cx + rx * a.cos(), cy + ry * a.sin());
+        let from = Vec2::new(cx, cy) + (to - Vec2::new(cx, cy)).normalize_or_zero() * 44.0;
+        if i == app.sel {
+            ui.dashed(c, map, from, to, 1.5, with_alpha(state_col(ct), 0.9), 5.0, 4.0);
+        } else {
+            ui.line(c, map, from, to, 1.0, with_alpha(ui.line, 0.22));
+        }
+    }
     // the hub
     let hub = c
         .spawn((
@@ -425,7 +437,6 @@ fn draw_map(c: &mut Commands, ui: &Ui, map: Entity, app: &ContainersApp) {
     c.entity(hub).add_children(&[n, d]);
     let ring = c.spawn((Node { position_type: PositionType::Absolute, left: px(cx - rx), top: px(cy - ry), width: px(rx * 2.0), height: px(ry * 2.0), border: UiRect::all(px(1)), border_radius: BorderRadius::MAX, ..default() }, BorderColor::all(with_alpha(ui.line, 0.16)))).id();
     c.entity(map).add_children(&[ring, hub]);
-    let m = shown.len().max(1);
     for (i, ct) in shown.iter().enumerate() {
         let a = std::f32::consts::TAU * i as f32 / m as f32 - std::f32::consts::FRAC_PI_2;
         let (x, y) = (cx + rx * a.cos(), cy + ry * a.sin());

@@ -308,3 +308,31 @@ pub fn test_click(sim: Res<crate::core::Sim>, mut clicks: ResMut<PanelClicks>, q
         clicks.0.push((e, Vec2::new(f[2], f[3])));
     }
 }
+
+impl Ui<'_> {
+    /// A straight line from `a` to `b` (px in `parent`, which lays its children out absolutely).
+    pub fn line(&self, c: &mut Commands, parent: Entity, a: Vec2, b: Vec2, w: f32, col: Color) {
+        let d = b - a;
+        let len = d.length();
+        let mid = (a + b) / 2.0;
+        let e = c
+            .spawn((
+                Node { position_type: PositionType::Absolute, left: px(mid.x - len / 2.0), top: px(mid.y - w / 2.0), width: px(len), height: px(w), ..default() },
+                BackgroundColor(col),
+                UiTransform { rotation: Rot2::radians(d.y.atan2(d.x)), ..default() },
+            ))
+            .id();
+        c.entity(parent).add_child(e);
+    }
+    /// A dashed line: `dash` px on, `gap` px off.
+    pub fn dashed(&self, c: &mut Commands, parent: Entity, a: Vec2, b: Vec2, w: f32, col: Color, dash: f32, gap: f32) {
+        let len = (b - a).length();
+        let dir = (b - a) / len.max(1e-3);
+        let mut s = 0.0;
+        while s < len {
+            let e = (s + dash).min(len);
+            self.line(c, parent, a + dir * s, a + dir * e, w, col);
+            s += dash + gap;
+        }
+    }
+}

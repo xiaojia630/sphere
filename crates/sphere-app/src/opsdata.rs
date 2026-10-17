@@ -227,6 +227,51 @@ pub struct Sys {
     pub net_out: f32,
     pub battery: Option<(u32, String, String)>,
     pub procs: Vec<Proc>,
+    /// each core's ticks so far: (busy, total)
+    pub cores_ticks: Vec<(u64, u64)>,
+    /// bytes read and written by the disks so far
+    pub disk_bytes: (u64, u64),
+}
+
+/// Each core's busy and total CPU ticks since boot (`host_processor_info`).
+#[cfg(target_os = "macos")]
+pub fn core_ticks() -> Vec<(u64, u64)> {
+    let mut count: libc::natural_t = 0;
+    let mut info: libc::processor_info_array_t = std::ptr::null_mut();
+    let mut n: libc::mach_msg_type_number_t = 0;
+    #[allow(deprecated)]
+    let r = unsafe { libc::host_processor_info(libc::mach_host_self(), libc::PROCESSOR_CPU_LOAD_INFO, &mut count, &mut info, &mut n) };
+    if r != 0 || info.is_null() {
+        return Vec::new();
+    }
+    let per = libc::CPU_STATE_MAX as usize;
+    let mut out = Vec::with_capacity(count as usize);
+    for i in 0..count as usize {
+        let t = |k: i32| unsafe { *info.add(i * per + k as usize) } as u64;
+        let (user, sys, idle, nice) = (t(libc::CPU_STATE_USER), t(libc::CPU_STATE_SYSTEM), t(libc::CPU_STATE_IDLE), t(libc::CPU_STATE_NICE));
+        out.push((user + sys + nice, user + sys + nice + idle));
+    }
+    #[allow(deprecated)]
+    unsafe {
+        libc::vm_deallocate(libc::mach_task_self(), info as libc::vm_address_t, (n as usize * std::mem::size_of::<libc::integer_t>()) as libc::vm_size_t);
+    }
+    out
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn core_ticks() -> Vec<(u64, u64)> {
+    Vec::new()
+}
+
+/// `ioreg` block storage statistics: bytes read and written since boot, over all disks.
+pub fn parse_ioreg_disk(raw: &str) -> (u64, u64) {
+    let sum = |k: &str| raw.split(k).skip(1).filter_map(|r| r.trim_start_matches('=').split(|c: char| !c.is_ascii_digit()).next()?.parse::<u64>().ok()).sum::<u64>();
+    (sum("\"Bytes (Read)\""), sum("\"Bytes (Write)\""))
+}
+
+/// Per-core use 0..1 between two tick readings.
+pub fn core_use(prev: &[(u64, u64)], now: &[(u64, u64)]) -> Vec<f32> {
+    now.iter().zip(prev.iter()).map(|(n, p)| (n.0.saturating_sub(p.0)) as f32 / (n.1.saturating_sub(p.1)).max(1) as f32).collect()
 }
 
 fn sysctl(k: &str) -> String {
@@ -311,6 +356,8 @@ pub fn sample(prev_net: NetMark) -> (Sys, NetMark) {
         s.net_in = net.0.saturating_sub(i0) as f32 / dt;
         s.net_out = net.1.saturating_sub(o0) as f32 / dt;
     }
+    s.cores_ticks = core_ticks();
+    s.disk_bytes = parse_ioreg_disk(&run("ioreg", &["-c", "IOBlockStorageDriver", "-r", "-w0", "-d", "1"]).unwrap_or_default());
     let b = run("pmset", &["-g", "batt"]).unwrap_or_default();
     s.battery = b.lines().nth(1).and_then(|l| {
         let pct = l.split('\t').nth(1)?.split('%').next()?.trim().parse().ok()?;
@@ -329,6 +376,14 @@ mod tests {
         assert_eq!(parse_published("0.0.0.0:8090->80/tcp, [::]:8090->80/tcp, 0.0.0.0:5432->5432/tcp"), vec![(8090, "80/tcp".into()), (5432, "5432/tcp".into())]);
         let l = parse_lsof("p612\ncsphered\nn127.0.0.1:7878\np2210\ncadb\nn*:5037\nn[::1]:5037\n");
         assert_eq!(l.iter().map(|x| (x.port, x.pid, x.command.as_str())).collect::<Vec<_>>(), vec![(5037, 2210, "adb"), (7878, 612, "sphered")]);
+    }
+
+    #[test]
+    fn reads_disk_bytes_and_core_use() {
+        let raw = "\"Statistics\" = {\"Bytes (Read)\"=1000,\"Operations (Write)\"=4,\"Bytes (Write)\"=500}\n\"Statistics\" = {\"Bytes (Read)\"=24,\"Bytes (Write)\"=6}";
+        assert_eq!(parse_ioreg_disk(raw), (1024, 506));
+        assert_eq!(core_use(&[(10, 100), (0, 100)], &[(60, 200), (0, 200)]), vec![0.5, 0.0]);
+        assert!(!core_ticks().is_empty() || !cfg!(target_os = "macos"));
     }
 
     #[test]
