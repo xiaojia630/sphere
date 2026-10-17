@@ -102,14 +102,19 @@ pub enum AState {
     Working,
     Needs,
     Done,
+    /// Failed or stopped; `Agent::chip` says which.
+    Failed,
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Agent {
-    pub name: &'static str,
+    pub name: String,
     pub state: AState,
     pub p: f32,
     pub step: String,
     pub rate: f32,
+    /// The right-hand figure in the panel row (a percent in the demo, a step count for real agents).
+    pub figure: Option<String>,
+    pub chip: Option<&'static str>,
 }
 #[derive(Resource)]
 pub struct Agents {
@@ -117,10 +122,12 @@ pub struct Agents {
     pub version: u32,
     acc: f32,
     seed: u32,
+    /// The look test's scripted progress; real agents only change through `set`.
+    demo: bool,
 }
 impl Agents {
     pub fn demo() -> Self {
-        let a = |name, state, p, step: &str, rate| Agent { name, state, p, step: step.to_string(), rate };
+        let a = |name: &str, state, p, step: &str, rate| Agent { name: name.to_string(), state, p, step: step.to_string(), rate, figure: None, chip: None };
         Self {
             list: vec![
                 a("Fix flaky login test", AState::Working, 0.64, "Running tests · 41 / 64", 0.0042),
@@ -131,6 +138,18 @@ impl Agents {
             version: 1,
             acc: 0.0,
             seed: 12345,
+            demo: true,
+        }
+    }
+    /// No agents yet: the panel and the ring deck start empty and fill from sphered.
+    pub fn empty() -> Self {
+        Self { list: Vec::new(), version: 1, acc: 0.0, seed: 12345, demo: false }
+    }
+    /// Replaces the list (only when it differs, so the panel rebuilds only on real changes).
+    pub fn set(&mut self, list: Vec<Agent>) {
+        if self.list != list {
+            self.list = list;
+            self.version += 1;
         }
     }
     pub fn working(&self) -> usize {
@@ -154,6 +173,9 @@ impl Agents {
     }
     /// The prototype ticks agent progress once a second.
     pub fn tick(&mut self, dt: f32) {
+        if !self.demo {
+            return;
+        }
         self.acc += dt;
         while self.acc >= 1.0 {
             self.acc -= 1.0;
@@ -424,7 +446,7 @@ pub fn build_agents_dyn(list: &[Agent]) -> [Geo; 4] {
         match a.state {
             AState::Working => ring_geo(&mut work, 247.0, 4.6, RingOpt { a0, a1: a0 + (a1 - a0) * clamp(a.p, 0.02, 1.0), walls: 2, ..Default::default() }),
             AState::Needs => ring_geo(&mut need, 247.0, 4.6, RingOpt { a0, a1, walls: 2, ..Default::default() }),
-            AState::Done => ring_geo(&mut done, 247.0, 2.4, RingOpt { a0, a1, ..Default::default() }),
+            AState::Done | AState::Failed => ring_geo(&mut done, 247.0, 2.4, RingOpt { a0, a1, ..Default::default() }),
         }
     }
     [track, work, need, done]

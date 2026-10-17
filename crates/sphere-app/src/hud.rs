@@ -3,7 +3,7 @@ use crate::core::*;
 use crate::fonts::{self, UiFonts};
 use crate::glow::*;
 use crate::panel::*;
-use crate::term::{self, Terminal, TERM_H, TERM_W};
+use crate::term::{self, Terminal, Terms, TERM_H, TERM_W};
 use crate::util::*;
 use crate::{camera_output, target_for, Args, CamCore, Offscreen, WindowCam};
 use bevy::text::LineHeight;
@@ -39,7 +39,7 @@ pub fn setup_panels(
     // texture px per css px: the panel is shown at about `k` on screen, so match the screen pixels
     let scale = (sv.k * dpr).max(SCALE_MIN) * 1.0;
     commands.insert_resource(PanelScale(scale));
-    commands.insert_resource(Focus { terminal: args.focus_term });
+    commands.insert_resource(Focus { terminal: args.focus_term, cmd: false });
 
     // ---- Agents panel: right column, bottom aligned like the prototype (x 1546, y 962)
     let (aw, ah) = (356.0, 351.0);
@@ -58,14 +58,17 @@ pub fn setup_panels(
     let ui = spawn_ui_panel(&mut commands, &mut images, TERM_W, TERM_H, scale, -9);
     let tui = term::build_term_ui(&mut commands, ui.root, &f);
     commands.insert_resource(tui);
+    // The look test's first tab (bash, the Sphere prompt, a git log) for screenshots and benches; your own
+    // shell otherwise.
+    let demo = args.offline();
     let default_cmd = "git log --graph --color --oneline -20";
-    let first = args.cmd.clone().unwrap_or_else(|| default_cmd.to_string());
-    match Terminal::spawn(&first) {
-        Ok(t) => {
-            commands.insert_resource(t);
-        }
+    let first = if demo { Some(args.cmd.clone().unwrap_or_else(|| default_cmd.to_string())) } else { args.cmd.clone() };
+    let mut terms = Terms { demo, ..default() };
+    match Terminal::spawn(first.as_deref(), demo) {
+        Ok(t) => terms.tabs.push(t),
         Err(e) => eprintln!("could not start a terminal: {e}"),
     }
+    commands.insert_resource(terms);
     let home = stage_to_world(54.0 + TERM_W / 2.0, 70.0 + TERM_H / 2.0);
     spawn_panel_quad(
         &mut commands,
@@ -73,6 +76,19 @@ pub fn setup_panels(
         &mut pmats,
         &ui,
         &PanelSpec { id: PanelId::Terminal, w: TERM_W, h: TERM_H, home, home_scale: 1.0, side: 1.0, phase: 4.1, show_at: 1.1, unframed: false },
+    );
+
+    // ---- Clock: right column, top, right aligned (prototype x 1546, y 46), unframed
+    let (cw, ch) = (356.0, 92.0);
+    let ui = spawn_ui_panel(&mut commands, &mut images, cw, ch, scale, -7);
+    build_clock_ui(&mut commands, ui.root, &f);
+    let home = stage_to_world(1546.0 - cw / 2.0, 46.0 + ch / 2.0);
+    spawn_panel_quad(
+        &mut commands,
+        &mut meshes,
+        &mut pmats,
+        &ui,
+        &PanelSpec { id: PanelId::Clock, w: cw, h: ch, home, home_scale: 1.0, side: -1.0, phase: 2.2, show_at: 0.7, unframed: true },
     );
 
     // ---- Core readout, riding on the sphere deck
@@ -84,6 +100,99 @@ pub fn setup_panels(
     commands.entity(e).remove::<Panel>().insert((ReadoutLink, Transform::from_xyz(0.0, 0.0, 112.0)));
     // pull the material handle back out through a marker query later; parent it under the core fold
     commands.entity(decks.list[CORE].fold).add_child(e);
+}
+
+#[derive(Component)]
+pub struct ClockText;
+#[derive(Component)]
+pub struct DateText;
+
+fn build_clock_ui(commands: &mut Commands, root: Entity, f: &UiFonts) {
+    let body = commands
+        .spawn(Node { width: percent(100), height: percent(100), flex_direction: FlexDirection::Column, align_items: AlignItems::FlexEnd, row_gap: px(6), ..default() })
+        .id();
+    commands.entity(root).add_child(body);
+    let (time, date) = clock_strings();
+    let t = commands
+        .spawn((ClockText, Text::new(time), font(&f.display, 50.0, 1.0), TextColor(role_color(Role::Hot)), LineHeight::Px(50.0)))
+        .id();
+    let d = commands
+        .spawn((DateText, Text::new(date), font(&f.ui600, 12.5, 3.75), TextColor(role_color(Role::Line)), LineHeight::Px(17.5)))
+        .id();
+    commands.entity(body).add_children(&[t, d]);
+}
+
+/// Local time as "13:34" and "FRIDAY, OCTOBER 16, 2026", from the system clock and zone (`date`'s view of
+/// it, read once a minute).
+fn clock_strings() -> (String, String) {
+    let out = std::process::Command::new("date").arg("+%H:%M|%A, %B %-d, %Y").output();
+    match out {
+        Ok(o) if o.status.success() => {
+            let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            let (t, d) = s.split_once('|').unwrap_or((s.as_str(), ""));
+            (t.to_string(), d.to_uppercase())
+        }
+        _ => ("--:--".into(), String::new()),
+    }
+}
+
+#[allow(clippy::type_complexity)]
+/// Updates the clock when the minute changes (the panel camera then redraws once).
+pub fn update_clock(mut last: Local<i64>, mut q: ParamSet<(Query<&mut Text, With<ClockText>>, Query<&mut Text, With<DateText>>)>, args: Res<Args>) {
+    if args.shot.is_some() {
+        return;
+    }
+    let min = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64 / 60).unwrap_or(0);
+    if *last == min {
+        return;
+    }
+    *last = min;
+    let (t, d) = clock_strings();
+    for mut x in &mut q.p0() {
+        x.0 = t.clone();
+    }
+    for mut x in &mut q.p1() {
+        x.0 = d.clone();
+    }
+}
+
+#[derive(Component)]
+pub struct ReadoutMain;
+#[derive(Component)]
+pub struct ReadoutSub;
+
+#[allow(clippy::type_complexity)]
+/// The readout on the core says what the service is doing: connecting, standby, working, needs you.
+pub fn update_readout_text(
+    agents: Res<Agents>,
+    live: Res<crate::live::Live>,
+    args: Res<Args>,
+    mut q: ParamSet<(Query<(&mut Text, &mut TextColor), With<ReadoutMain>>, Query<&mut Text, With<ReadoutSub>>)>,
+) {
+    if args.offline() || !(agents.is_changed() || live.is_changed()) {
+        return;
+    }
+    use crate::service::Link;
+    let needs = live.requests.len();
+    let (main, hot, sub) = match &live.link {
+        Some(Link::Connected) if needs > 0 => ("NEEDS YOU", false, agents.summary()),
+        Some(Link::Connected) if agents.working() > 0 => ("WORKING", true, agents.summary()),
+        Some(Link::Connected) => ("STANDBY", true, if agents.list.is_empty() { "no agents yet".to_string() } else { agents.summary() }),
+        Some(Link::Down(_)) => ("OFFLINE", true, "sphered is not running".to_string()),
+        _ => ("STANDBY", true, "connecting to sphered".to_string()),
+    };
+    for (mut t, mut c) in &mut q.p0() {
+        if t.0 != main {
+            t.0 = main.to_string();
+            c.0 = role_color(if hot { Role::Hot } else { Role::Acc });
+        }
+    }
+    let sub = sub.to_uppercase();
+    for mut t in &mut q.p1() {
+        if t.0 != sub {
+            t.0 = sub.clone();
+        }
+    }
 }
 
 fn build_readout_ui(commands: &mut Commands, root: Entity, f: &UiFonts, agents: &Agents) {
@@ -110,6 +219,7 @@ fn build_readout_ui(commands: &mut Commands, root: Entity, f: &UiFonts, agents: 
         .id();
     let main = commands
         .spawn((
+            ReadoutMain,
             Text::new("STANDBY"),
             font(&f.display, 18.0, 5.4),
             TextColor(role_color(Role::Hot)),
@@ -118,7 +228,7 @@ fn build_readout_ui(commands: &mut Commands, root: Entity, f: &UiFonts, agents: 
         ))
         .id();
     let sub = commands
-        .spawn((Text::new(agents.summary().to_uppercase()), font(&f.ui600, 11.5, 2.76), TextColor(role_color(Role::Line)), LineHeight::Px(13.8)))
+        .spawn((ReadoutSub, Text::new(agents.summary().to_uppercase()), font(&f.ui600, 11.5, 2.76), TextColor(role_color(Role::Line)), LineHeight::Px(13.8)))
         .id();
     commands.entity(body).add_children(&[top, main, sub]);
 }
@@ -199,6 +309,10 @@ pub struct FrameStats {
 #[derive(Component)]
 pub struct StatsText;
 
+/// The screen-pinned UI root (frame stats, hints, the command bar).
+#[derive(Resource)]
+pub struct OverlayRoot(pub Entity);
+
 pub fn setup_overlay(mut commands: Commands, f: Res<UiFonts>, off: Res<Offscreen>, args: Res<Args>) {
     let (msaa, clear_color, output_mode) = camera_output(&args, WindowCam::Overlay);
     let cam = commands
@@ -230,13 +344,15 @@ pub fn setup_overlay(mut commands: Commands, f: Res<UiFonts>, off: Res<Offscreen
         .id();
     let hint = commands
         .spawn((
-            Text::new("D DEPTH   ·   T TERMINAL   ·   ESC RELEASE"),
+            Text::new("/ COMMAND   ·   T TERMINAL   ·   CMD T NEW TAB   ·   D DEPTH   ·   ESC RELEASE"),
             font(&f.ui600, 10.5, 3.2),
             TextColor(with_alpha(role_color(Role::Dim), 0.95)),
-            Node { position_type: PositionType::Absolute, left: percent(50), margin: UiRect { left: px(-190), ..default() }, bottom: px(26), ..default() },
+            TextLayout { justify: Justify::Center, ..default() },
+            Node { position_type: PositionType::Absolute, left: px(0), right: px(0), bottom: px(18), ..default() },
         ))
         .id();
     commands.entity(root).add_children(&[stats, hint]);
+    commands.insert_resource(OverlayRoot(root));
 }
 
 fn pct(v: &mut [f32], p: f32) -> f32 {

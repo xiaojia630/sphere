@@ -63,6 +63,10 @@ fn fs_panel(i: VOut) -> @location(0) vec4<f32> {
     let cuv = clamp(tuv, vec2<f32>(0.0), vec2<f32>(1.0));
     let tex = textureSample(content, content_samp, cuv) * inb;
 
+    if (u.p.x > 2.5) {
+        // bare text, no glass or frame
+        return tex * u.size.w;
+    }
     if (u.p.x > 1.5) {
         // core readout: black radial backdrop, then the text
         let rr = length((q - vec2<f32>(w, h) * 0.5) / (vec2<f32>(w, h) * 0.5));

@@ -103,14 +103,62 @@ struct Inner {
     rx: mpsc::Receiver<Vec<u8>>,
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
     _master: Box<dyn portable_pty::MasterPty + Send>,
-    _child: Box<dyn portable_pty::Child + Send + Sync>,
+    child: Box<dyn portable_pty::Child + Send + Sync>,
 }
 
-#[derive(Resource)]
 pub struct Terminal {
     inner: Mutex<Inner>,
     pub dirty: bool,
     pub exited: bool,
+    /// The program's name for the header (`zsh`, `bash`).
+    pub name: String,
+}
+
+/// The terminal tabs. Shells live in the app for now: sphered has no terminal API yet, so they end when the
+/// app quits (docs/sphered.md moves them into sphere-host).
+#[derive(Resource, Default)]
+pub struct Terms {
+    pub tabs: Vec<Terminal>,
+    pub active: usize,
+    /// Bumps when tabs open, close or switch, so the panel redraws everything.
+    pub version: u64,
+    /// The first tab's look-test setup (bash with the Sphere prompt) for `--shot`, `--bench` and `--demo`.
+    pub demo: bool,
+}
+
+impl Terms {
+    pub fn active(&self) -> Option<&Terminal> {
+        self.tabs.get(self.active)
+    }
+    pub fn open_tab(&mut self) {
+        match Terminal::spawn(None, false) {
+            Ok(t) => {
+                self.tabs.push(t);
+                self.active = self.tabs.len() - 1;
+            }
+            Err(e) => eprintln!("could not start a terminal: {e}"),
+        }
+        self.version += 1;
+    }
+    pub fn close(&mut self, i: usize) {
+        if i < self.tabs.len() {
+            let t = self.tabs.remove(i);
+            t.kill();
+            if self.active >= self.tabs.len() && self.active > 0 {
+                self.active = self.tabs.len() - 1;
+            }
+            if self.tabs.is_empty() {
+                self.open_tab();
+            }
+            self.version += 1;
+        }
+    }
+    pub fn switch(&mut self, i: usize) {
+        if i < self.tabs.len() && i != self.active {
+            self.active = i;
+            self.version += 1;
+        }
+    }
 }
 
 fn repo_dir() -> std::path::PathBuf {
@@ -125,20 +173,31 @@ fn repo_dir() -> std::path::PathBuf {
 }
 
 impl Terminal {
-    pub fn spawn(first_cmd: &str) -> Result<Self, String> {
+    /// `look`: the look test's bash with the Sphere prompt; otherwise your own shell as a login shell.
+    pub fn spawn(first_cmd: Option<&str>, look: bool) -> Result<Self, String> {
         let pty = native_pty_system();
         let pair = pty
             .openpty(PtySize { rows: ROWS as u16, cols: COLS as u16, pixel_width: 0, pixel_height: 0 })
             .map_err(|e| e.to_string())?;
-        let mut cmd = CommandBuilder::new("bash");
-        cmd.args(["--norc", "--noprofile", "-i"]);
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
+        let mut cmd = if look {
+            let mut c = CommandBuilder::new("bash");
+            c.args(["--norc", "--noprofile", "-i"]);
+            // a quiet Sphere prompt: cool blue, amber only for the sigil
+            c.env("PS1", "\\[\\e[38;2;111;216;240m\\]sphere\\[\\e[0m\\] \\[\\e[38;2;166;211;230m\\]\\W\\[\\e[0m\\] \\[\\e[38;2;255;179;71m\\]›\\[\\e[0m\\] ");
+            c.env("LS_COLORS", "di=1;36:ln=36:ex=1;32");
+            c.env("GIT_PAGER", "cat");
+            c.cwd(repo_dir());
+            c
+        } else {
+            let mut c = CommandBuilder::new(&shell);
+            c.arg("-l");
+            c.cwd(std::env::var_os("HOME").unwrap_or_default());
+            c
+        };
+        let name = if look { "bash".to_string() } else { std::path::Path::new(&shell).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default() };
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
-        // a quiet Sphere prompt: cool blue, amber only for the sigil
-        cmd.env("PS1", "\\[\\e[38;2;111;216;240m\\]sphere\\[\\e[0m\\] \\[\\e[38;2;166;211;230m\\]\\W\\[\\e[0m\\] \\[\\e[38;2;255;179;71m\\]›\\[\\e[0m\\] ");
-        cmd.env("LS_COLORS", "di=1;36:ln=36:ex=1;32");
-        cmd.env("GIT_PAGER", "cat");
-        cmd.cwd(repo_dir());
         let child = pair.slave.spawn_command(cmd).map_err(|e| e.to_string())?;
         drop(pair.slave);
         let mut reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;
@@ -158,7 +217,7 @@ impl Terminal {
             }
         });
         let term = Term::new(Config::default(), &Size, Listener { writer: writer.clone() });
-        {
+        if let Some(first_cmd) = first_cmd {
             // wait for bash to draw its first prompt so the command is not echoed twice
             let w = writer.clone();
             let line = format!("{first_cmd}\n");
@@ -170,10 +229,17 @@ impl Terminal {
             });
         }
         Ok(Self {
-            inner: Mutex::new(Inner { term, parser: Processor::new(), rx, writer, _master: pair.master, _child: child }),
+            inner: Mutex::new(Inner { term, parser: Processor::new(), rx, writer, _master: pair.master, child }),
             dirty: true,
             exited: false,
+            name,
         })
+    }
+
+    pub fn kill(&self) {
+        if let Ok(mut i) = self.inner.lock() {
+            let _ = i.child.kill();
+        }
     }
 
     pub fn send(&self, bytes: &[u8]) {
@@ -186,8 +252,17 @@ impl Terminal {
     }
 }
 
-/// Drain PTY output into the VT state.
-pub fn pump(mut t: ResMut<Terminal>) {
+/// Drain every tab's PTY output into its VT state; close tabs whose shell exited.
+pub fn pump(mut terms: ResMut<Terms>) {
+    for t in terms.tabs.iter_mut() {
+        pump_one(t);
+    }
+    if let Some(i) = terms.tabs.iter().position(|t| t.exited) {
+        terms.close(i);
+    }
+}
+
+fn pump_one(t: &mut Terminal) {
     let mut got = false;
     let mut gone = false;
     {
@@ -221,8 +296,8 @@ pub fn pump(mut t: ResMut<Terminal>) {
 pub struct TermUi {
     pub rows: Vec<Entity>,
     pub hashes: Vec<u64>,
-    #[allow(dead_code)]
     pub status: Entity,
+    pub version: u64,
     pub last_focus: bool,
     pub last_blink: bool,
 }
@@ -292,7 +367,7 @@ pub fn build_term_ui(commands: &mut Commands, root: Entity, f: &UiFonts) -> Term
         commands.entity(grid).add_child(e);
         rows.push(e);
     }
-    TermUi { rows, hashes: vec![u64::MAX; ROWS], status, last_focus: false, last_blink: true }
+    TermUi { rows, hashes: vec![u64::MAX; ROWS], status, version: u64::MAX, last_focus: false, last_blink: true }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -311,16 +386,28 @@ fn unrgba(c: [u8; 4]) -> Color {
 }
 
 /// Redraw rows whose cells changed. A row is a list of coloured text spans.
+#[allow(clippy::too_many_arguments)]
 pub fn draw(
     mut commands: Commands,
-    mut t: ResMut<Terminal>,
+    mut terms: ResMut<Terms>,
     mut ui: ResMut<TermUi>,
     f: Res<UiFonts>,
     focus: Res<Focus>,
     sim: Res<Sim>,
+    mut texts: Query<&mut Text>,
 ) {
     let blink = focus.terminal && (sim.t % 1.0) < 0.6;
-    if !t.dirty && ui.last_focus == focus.terminal && ui.last_blink == blink {
+    let switched = ui.version != terms.version;
+    if switched {
+        ui.version = terms.version;
+        ui.hashes.iter_mut().for_each(|h| *h = u64::MAX);
+        if let Ok(mut s) = texts.get_mut(ui.status) {
+            s.0 = tabs_label(&terms);
+        }
+    }
+    let active = terms.active;
+    let Some(t) = terms.tabs.get_mut(active) else { return };
+    if !switched && !t.dirty && ui.last_focus == focus.terminal && ui.last_blink == blink {
         return;
     }
     ui.last_focus = focus.terminal;
@@ -521,17 +608,71 @@ pub fn app_cursor(t: &Terminal) -> bool {
     t.inner.lock().map(|g| g.term.mode().contains(TermMode::APP_CURSOR)).unwrap_or(false)
 }
 
+/// The header's right side: the active tab and how many there are.
+fn tabs_label(terms: &Terms) -> String {
+    let name = terms.active().map(|t| t.name.to_uppercase()).unwrap_or_default();
+    if terms.tabs.len() > 1 {
+        format!("{name} · TAB {} / {}", terms.active + 1, terms.tabs.len())
+    } else if terms.demo {
+        "BASH · LIVE PTY".to_string()
+    } else {
+        format!("{name} · CMD T NEW TAB")
+    }
+}
+
+/// Cmd+T new tab, Cmd+W close, Cmd+1..9 switch (always); T focuses, Esc releases; D toggles Depth. While
+/// focused, every other key goes to the active shell. The command bar and the card take keys first.
 pub fn read_keys(
     mut ev: MessageReader<KeyboardInput>,
     keys: Res<ButtonInput<KeyCode>>,
     mut focus: ResMut<Focus>,
     mut ctl: ResMut<crate::core::CoreCtl>,
-    t: Res<Terminal>,
+    mut terms: ResMut<Terms>,
+    moment: Res<crate::moment::Moment>,
 ) {
     let ctrl = keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
     let alt = keys.pressed(KeyCode::AltLeft) || keys.pressed(KeyCode::AltRight);
+    let cmd = keys.pressed(KeyCode::SuperLeft) || keys.pressed(KeyCode::SuperRight);
     for e in ev.read() {
-        if e.state != ButtonState::Pressed {
+        if e.state != ButtonState::Pressed || focus.cmd {
+            continue;
+        }
+        if cmd {
+            let n = match e.key_code {
+                KeyCode::Digit1 => Some(0),
+                KeyCode::Digit2 => Some(1),
+                KeyCode::Digit3 => Some(2),
+                KeyCode::Digit4 => Some(3),
+                KeyCode::Digit5 => Some(4),
+                KeyCode::Digit6 => Some(5),
+                KeyCode::Digit7 => Some(6),
+                KeyCode::Digit8 => Some(7),
+                KeyCode::Digit9 => Some(8),
+                _ => None,
+            };
+            match e.key_code {
+                KeyCode::KeyT => {
+                    terms.open_tab();
+                    focus.terminal = true;
+                }
+                KeyCode::KeyW => {
+                    let i = terms.active;
+                    terms.close(i);
+                }
+                KeyCode::KeyV if focus.terminal => {
+                    if let (Ok(out), Some(t)) = (std::process::Command::new("pbpaste").output(), terms.active()) {
+                        t.send(&out.stdout);
+                    }
+                }
+                _ => {}
+            }
+            if let Some(i) = n {
+                terms.switch(i);
+                focus.terminal = true;
+            }
+            continue;
+        }
+        if moment.shown && !focus.terminal {
             continue;
         }
         if !focus.terminal {
@@ -549,8 +690,10 @@ pub fn read_keys(
             focus.terminal = false;
             continue;
         }
-        if let Some(b) = key_bytes(e, ctrl, alt, app_cursor(&t)) {
-            t.send(&b);
+        if let Some(t) = terms.active() {
+            if let Some(b) = key_bytes(e, ctrl, alt, app_cursor(t)) {
+                t.send(&b);
+            }
         }
     }
 }

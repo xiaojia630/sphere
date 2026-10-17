@@ -1,10 +1,14 @@
 //! Sphere OS look test (M0): proves the approved HUD look can be matched natively in Rust.
+mod cmdbar;
 mod core;
 mod fonts;
 mod geo;
 mod glow;
 mod hud;
+mod live;
+mod moment;
 mod panel;
+mod service;
 mod term;
 mod util;
 
@@ -33,10 +37,21 @@ pub struct Args {
     pub msaa: bool,
     pub size: (u32, u32),
     pub dt: f32,
+    /// The look test's demo data instead of sphered (always on for `--shot` and `--bench`).
+    pub demo: bool,
+    /// `--live`: screenshots and benches use sphered too.
+    pub live: bool,
+}
+
+impl Args {
+    /// Screenshots, benches and `--demo` never touch the service.
+    pub fn offline(&self) -> bool {
+        !self.live && (self.demo || self.shot.is_some() || self.bench.is_some())
+    }
 }
 
 fn parse_args() -> Args {
-    let mut a = Args { cmd: None, bench: None, shot: None, frames: 120, depth: false, focus_term: false, msaa: true, size: (1600, 1000), dt: 1.0 / 20.0 };
+    let mut a = Args { cmd: None, bench: None, shot: None, frames: 120, depth: false, focus_term: false, msaa: true, size: (1600, 1000), dt: 1.0 / 20.0, demo: false, live: false };
     let mut it = std::env::args().skip(1);
     while let Some(s) = it.next() {
         match s.as_str() {
@@ -47,6 +62,8 @@ fn parse_args() -> Args {
             "--depth" => a.depth = true,
             "--term" => a.focus_term = true,
             "--no-msaa" => a.msaa = false,
+            "--demo" => a.demo = true,
+            "--live" => a.live = true,
             "--dt" => a.dt = it.next().and_then(|v| v.parse().ok()).unwrap_or(0.05),
             "--size" => {
                 if let Some(v) = it.next() {
@@ -57,7 +74,7 @@ fn parse_args() -> Args {
                 }
             }
             "-h" | "--help" => {
-                println!("sphere-look [--cmd \"<command>\"] [--bench <seconds>] [--shot <png> [--frames N] [--depth] [--term]] [--size WxH] [--no-msaa]");
+                println!("sphere-app [--demo] [--live] [--cmd \"<command>\"] [--bench <seconds>] [--shot <png> [--frames N] [--depth] [--term]] [--size WxH] [--no-msaa]");
                 std::process::exit(0);
             }
             other => eprintln!("ignoring unknown argument {other}"),
@@ -82,30 +99,23 @@ fn main() {
         .insert_resource(Sim { dt: 1.0 / 60.0, t: 0.0, boot_t: 0.0, fixed_dt: args.shot.as_ref().map(|_| args.dt), frozen: false })
         .insert_resource(CoreCtl::new(true))
         .insert_resource(StageView::compute(args.size.0 as f32, args.size.1 as f32))
-        .insert_resource(Agents::demo())
+        .insert_resource(if args.offline() { Agents::demo() } else { Agents::empty() })
+        .insert_resource(service::start(args.offline()))
+        .init_resource::<live::Live>()
+        .init_resource::<live::Toasts>()
+        .init_resource::<cmdbar::CmdBar>()
+        .init_resource::<moment::Moment>()
         .init_resource::<hud::FrameStats>()
-        .add_systems(Startup, (setup_core, setup_cameras, hud::setup_panels, hud::setup_backdrop, hud::setup_overlay).chain())
+        .add_systems(Startup, (setup_core, setup_cameras, hud::setup_panels, hud::setup_backdrop, hud::setup_overlay, cmdbar::setup).chain())
         .add_systems(First, tick_sim)
         .add_systems(
             Update,
             (
-                keys,
-                stage_view,
-                camera_rig,
-                update_core,
-                spin_system,
-                update_materials,
-                panel::update_panels,
-                hud::update_readout,
-                hud::update_backdrop,
-                panel::rebuild_agents_ui,
-                panel::blink_system,
-                term::pump,
-                term::read_keys,
-                term::draw,
-                hud::frame_stats,
-                hud::bench,
-                hud::shot,
+                (keys, stage_view, camera_rig, update_core, spin_system, update_materials, panel::update_panels, hud::update_readout, hud::update_backdrop)
+                    .chain(),
+                (live::sync, live::tick_toasts, panel::rebuild_agents_ui, hud::update_readout_text, hud::update_clock, panel::blink_system).chain(),
+                (term::pump, cmdbar::keys, term::read_keys, term::draw, cmdbar::draw).chain(),
+                (hud::frame_stats, hud::bench, hud::shot).chain(),
             )
                 .chain(),
         )
@@ -130,7 +140,7 @@ fn default_plugins(args: &Args) -> impl PluginGroup {
     } else {
         DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
-                title: "Sphere OS · look test".into(),
+                title: "Sphere".into(),
                 resolution: (args.size.0, args.size.1).into(),
                 present_mode: if args.bench.is_some() { PresentMode::AutoNoVsync } else { PresentMode::AutoVsync },
                 ..default()

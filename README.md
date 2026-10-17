@@ -84,7 +84,7 @@ Set `SPHERE_LIVE_CLAUDE` to the command if `claude` is not on your PATH.
 ## Credits
 
 The idea of a small process that outlives the UI and owns the terminals comes from [herdr](https://github.com/herdrdev/herdr) (Apache-2.0). Sphere is built with its design in mind; no herdr code is used here.
-## sphere-look (M0 look test)
+## sphere-app (M0 look test)
 
 A small native Rust/Bevy program that checks the approved HUD look (the web prototype, Balanced theme) can be matched natively: the ring-deck core with bloom and a Depth view, a glass Agents panel and a live terminal panel, both rendered from Bevy UI to a texture and shown on tilted 3D quads.
 

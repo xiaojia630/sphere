@@ -57,7 +57,6 @@ pub enum Role {
     Acc,
     Deep,
     Ok,
-    #[allow(dead_code)]
     Bad,
 }
 

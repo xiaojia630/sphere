@@ -41,10 +41,10 @@ pub struct PanelMaterial {
 
 impl Material for PanelMaterial {
     fn vertex_shader() -> ShaderRef {
-        "embedded://sphere_look/shaders/panel.wesl".into()
+        "embedded://sphere_app/shaders/panel.wesl".into()
     }
     fn fragment_shader() -> ShaderRef {
-        "embedded://sphere_look/shaders/panel.wesl".into()
+        "embedded://sphere_app/shaders/panel.wesl".into()
     }
     fn alpha_mode(&self) -> AlphaMode {
         AlphaMode::Premultiplied
@@ -94,6 +94,9 @@ pub enum PanelId {
     Agents,
     Terminal,
     Readout,
+    Clock,
+    #[allow(dead_code)] // the Agent moment card (next)
+    Moment,
 }
 
 #[derive(Component)]
@@ -213,7 +216,8 @@ pub fn spawn_panel_quad(
             hot: lin(Role::Hot),
             fill: lin(Role::Fill),
             acc: lin(Role::Acc),
-            p: Vec4::new(if s.unframed { 2.0 } else { 1.0 }, 0.36, 1.0, 1.0),
+            // 1 framed glass, 2 the core readout (dark backdrop), 3 bare text (the clock)
+            p: Vec4::new(if s.id == PanelId::Clock { 3.0 } else if s.unframed { 2.0 } else { 1.0 }, 0.36, 1.0, 1.0),
         },
         content: Some(ui.image.clone()),
     });
@@ -248,6 +252,8 @@ pub fn spawn_panel_quad(
 #[derive(Resource, Default)]
 pub struct Focus {
     pub terminal: bool,
+    /// The command bar has the keyboard.
+    pub cmd: bool,
 }
 
 /// Moves each panel: gentle drift and tilt in the flat view, the prototype's side tilt in Depth, and the
@@ -355,6 +361,7 @@ pub fn build_agents_ui(commands: &mut Commands, root: Entity, f: &UiFonts, agent
     let fill = role_color(Role::Fill);
     let acc = role_color(Role::Acc);
     let ok = role_color(Role::Ok);
+    let bad = role_color(Role::Bad);
     let g1 = with_alpha(line, 0.72);
     let _ = sim_t;
     let body = commands
@@ -404,10 +411,22 @@ pub fn build_agents_ui(commands: &mut Commands, root: Entity, f: &UiFonts, agent
     // rows
     let list = commands.spawn(Node { flex_direction: FlexDirection::Column, row_gap: px(2), ..default() }).id();
     commands.entity(body).add_child(list);
+    if agents.list.is_empty() {
+        let e = commands
+            .spawn((
+                Text::new("No agents yet. Type a task in the bar below."),
+                font(&f.ui500, 13.0, 1.04),
+                TextColor(with_alpha(line, 0.7)),
+                LineHeight::Px(16.9),
+                Node { margin: UiRect { top: px(8), ..default() }, ..default() },
+            ))
+            .id();
+        commands.entity(list).add_child(e);
+    }
     for a in &agents.list {
         let (name_c, op) = match a.state {
             AState::Needs => (acc, 1.0),
-            AState::Done => (hot, 0.6),
+            AState::Done | AState::Failed => (hot, 0.6),
             _ => (hot, 1.0),
         };
         let row = commands
@@ -431,6 +450,7 @@ pub fn build_agents_ui(commands: &mut Commands, root: Entity, f: &UiFonts, agent
             AState::Working => ("WORKING", line, Color::NONE, g1),
             AState::Needs => ("NEEDS YOU", Color::BLACK, acc, acc),
             AState::Done => ("DONE", ok, Color::NONE, with_alpha(ok, 0.7)),
+            AState::Failed => (a.chip.unwrap_or("FAILED"), bad, Color::NONE, with_alpha(bad, 0.7)),
         };
         let chip = commands
             .spawn((
@@ -466,10 +486,12 @@ pub fn build_agents_ui(commands: &mut Commands, root: Entity, f: &UiFonts, agent
             let seg = commands.spawn((Node { flex_grow: 1.0, height: px(5), ..default() }, BackgroundColor(c))).id();
             commands.entity(track).add_child(seg);
         }
-        let pct_txt = match a.state {
-            AState::Working => format!("{}%", (a.p * 100.0).round() as i32),
-            AState::Needs => "WAIT".to_string(),
-            AState::Done => "OK".to_string(),
+        let pct_txt = match (&a.figure, a.state) {
+            (Some(f), _) => f.clone(),
+            (None, AState::Working) => format!("{}%", (a.p * 100.0).round() as i32),
+            (None, AState::Needs) => "WAIT".to_string(),
+            (None, AState::Done) => "OK".to_string(),
+            (None, AState::Failed) => "--".to_string(),
         };
         let pct_c = if a.state == AState::Done { ok } else { hot };
         let pct = commands

@@ -7,7 +7,7 @@ members = [
     "crates/sphere-client",
     "crates/sphere-cli",
     "crates/fake-claude",
-    "crates/sphere-look",
+    "crates/sphere-app",
 ]
 
 [workspace.package]

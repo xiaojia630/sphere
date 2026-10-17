@@ -5,4 +5,4 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 export VK_ICD_FILENAMES="${VK_ICD_FILENAMES:-/opt/pw-browsers/chromium-1194/chrome-linux/vk_swiftshader_icd.json}"
 export WGPU_BACKEND="${WGPU_BACKEND:-vulkan}"
-exec target/release/sphere-look "$@"
+exec target/release/sphere-app "$@"

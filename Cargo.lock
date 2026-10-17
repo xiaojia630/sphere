@@ -4772,6 +4772,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "sphere-app"
+version = "0.1.0"
+dependencies = [
+ "alacritty_terminal",
+ "bevy",
+ "fontdue",
+ "libc",
+ "portable-pty",
+ "serde_json",
+ "sphere-client",
+ "sphere-proto",
+ "tokio",
+]
+
+[[package]]
 name = "sphere-cli"
 version = "0.1.0"
 dependencies = [
@@ -4810,16 +4825,6 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
-]
-
-[[package]]
-name = "sphere-look"
-version = "0.0.1"
-dependencies = [
- "alacritty_terminal",
- "bevy",
- "fontdue",
- "portable-pty",
 ]
 
 [[package]]

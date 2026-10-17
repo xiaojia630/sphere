@@ -73,10 +73,10 @@ impl GlowMaterial {
 
 impl Material for GlowMaterial {
     fn vertex_shader() -> ShaderRef {
-        "embedded://sphere_look/shaders/glow.wesl".into()
+        "embedded://sphere_app/shaders/glow.wesl".into()
     }
     fn fragment_shader() -> ShaderRef {
-        "embedded://sphere_look/shaders/glow.wesl".into()
+        "embedded://sphere_app/shaders/glow.wesl".into()
     }
     fn alpha_mode(&self) -> AlphaMode {
         AlphaMode::Blend
