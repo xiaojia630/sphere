@@ -25,6 +25,7 @@ pub enum DockBtn {
     Fit,
     Reset,
     Sound,
+    Apps,
 }
 
 #[derive(Component)]
@@ -152,7 +153,7 @@ pub fn setup(mut commands: Commands, f: Res<UiFonts>, dock: Query<Entity, With<D
     c.entity(tw).add_children(&[tb, pop]);
     // Tools
     let tools = c.spawn(Node { flex_direction: FlexDirection::Row, align_items: AlignItems::Center, column_gap: px(6), ..default() }).id();
-    for (l, b) in [("Fit", DockBtn::Fit), ("Reset", DockBtn::Reset), ("Sound", DockBtn::Sound)] {
+    for (l, b) in [("Apps", DockBtn::Apps), ("Fit", DockBtn::Fit), ("Reset", DockBtn::Reset), ("Sound", DockBtn::Sound)] {
         let e = group_btn(c, &f, l, b);
         c.entity(tools).add_child(e);
     }
@@ -215,6 +216,7 @@ pub fn buttons(
     mut sound: ResMut<crate::sound::Sound>,
     ctl: Res<CoreCtl>,
     mut pop: Query<&mut Visibility, With<ThemePop>>,
+    mut orb: ResMut<crate::orbit::Orb>,
 ) {
     for (i, b) in &q {
         match i {
@@ -234,6 +236,7 @@ pub fn buttons(
                     DockBtn::Fit => acts.0.push(Act::Fit),
                     DockBtn::Reset => acts.0.push(Act::Reset),
                     DockBtn::Sound => acts.0.push(Act::Mute),
+                    DockBtn::Apps => orb.toggle(&mut sound),
                 }
                 if !matches!(b, DockBtn::ThemeMenu | DockBtn::Theme(_)) {
                     sound.play_q("click", 90);
@@ -260,7 +263,7 @@ pub fn draw_buttons(
     let fill = crate::theme::now(Role::Fill);
     let hot = crate::theme::now(Role::Hot);
     for (b, i, mut bg, mut bd, kids) in &mut btns {
-        let pressed = matches!(b, DockBtn::Mode(m) if *m == ctl.mode);
+        let pressed = matches!(b, DockBtn::Mode(m) if *m == ctl.mode) || (*b == DockBtn::Apps && ctl.orb > 0.5);
         let hover = *i == Interaction::Hovered;
         bg.set_if_neq(BackgroundColor(match b {
             DockBtn::Theme(_) if hover => with_alpha(line, 0.1),

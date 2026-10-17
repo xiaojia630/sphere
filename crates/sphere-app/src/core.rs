@@ -51,6 +51,8 @@ pub struct CoreCtl {
     pub flash: f32,
     /// every collapsed ring has landed (flash and the drop sound once)
     pub landed: bool,
+    /// how open the core is (the app orbit), 0..1
+    pub orb: f32,
 }
 
 impl CoreCtl {
@@ -73,6 +75,7 @@ impl CoreCtl {
             collapse_t: 10.0,
             flash: 0.0,
             landed: false,
+            orb: 0.0,
         };
         if intro {
             c.spacing.set(165.0);
@@ -244,6 +247,8 @@ pub enum Tag {
     SphFill,
     Shell,
     Dots,
+    /// the core-open track (fades with the orbit, no reveal)
+    Orb,
 }
 
 #[derive(Component)]
@@ -805,7 +810,8 @@ pub fn update_core(
     let t = sim.t;
     let boot = sim.boot_t;
     // core orientation
-    let tgt = ctl.q_target;
+    // core open: tipped back 62° like a holo-table
+    let tgt = if ctl.orb > 0.001 { ctl.q_target.slerp(Quat::from_rotation_x(-62.0 * DEG), ctl.orb) } else { ctl.q_target };
     let k = 1.0 - (-3.2 * dt).exp();
     if ctl.auto_orient {
         ctl.q_user = ctl.q_user.slerp(tgt, k);
@@ -841,6 +847,10 @@ pub fn update_core(
             ctl.depth.t = 16.0;
         }
     }
+    // core open: a low dome with short walls
+    let o = ctl.orb;
+    ctl.spacing.t = lerp(ctl.spacing.t, 30.0, o);
+    ctl.depth.t = lerp(ctl.depth.t, 12.0, o);
     ctl.spacing.step(dt);
     ctl.depth.step(dt);
     ctl.zoom.step(dt);
@@ -930,7 +940,7 @@ pub fn update_core(
         };
         d.u_depth = (ctl.depth.x + d.hi.x * 8.0 + if i == VOICE { voice_lvl * 30.0 } else { 0.0 }).max(0.0);
         d.u_hi = d.hi.x * 0.9 + flash;
-        d.u_fade = (1.0 - ctl.focus_amt * d.focus_fade) * (1.0 - smooth(0.3, 0.93, c)) * (1.0 - 0.35 * clamp(c, 0.0, 1.0)) * (1.0 - smooth(0.06, 0.7, d.u_pinch));
+        d.u_fade = (1.0 - ctl.focus_amt * d.focus_fade) * (1.0 - if i == CORE { 0.1 } else { 0.38 } * ctl.orb) * (1.0 - smooth(0.3, 0.93, c)) * (1.0 - 0.35 * clamp(c, 0.0, 1.0)) * (1.0 - smooth(0.06, 0.7, d.u_pinch));
         d.u_reveal = out_cubic((boot - 0.15 - d.reveal_at) / 0.9);
     }
     // the sphere grows a little in Orbit, and breathes while the stack is collapsed
@@ -1041,6 +1051,13 @@ pub fn update_materials(
         }
         if info.tag == Tag::Shell {
             u.d = Vec4::new(sim.t, 0.0, 0.0, 0.0);
+        }
+        if info.tag == Tag::Orb {
+            let o = ctl.orb;
+            let rev = clamp(o / 0.85, 0.0, 1.0);
+            u.a = Vec4::new(info.alpha * o, info.wall, rev * rev * (3.0 - 2.0 * rev), ctl.flash * 0.6);
+            u.b = Vec4::new(1.0, 14.0, 0.0, 0.0);
+            u.c.x = 0.0;
         }
         if u != cur.u {
             if let Some(mut m) = mats.get_mut(&h.0) {

@@ -19,6 +19,8 @@ pub enum Hit {
     Panel(Entity, PanelId),
     /// a deck (ring) of the core, by index
     Ring(usize),
+    /// a core-open app tile
+    Tile(usize),
 }
 
 #[derive(Default, PartialEq)]
@@ -27,6 +29,7 @@ enum Drag {
     None,
     Core,
     Panel(Entity),
+    Orbit,
 }
 
 #[derive(Resource, Default)]
@@ -58,13 +61,25 @@ pub fn setup(mut cursor: Query<&mut CursorOptions, With<PrimaryWindow>>, args: R
 
 type PanelPick<'w, 's> = Query<'w, 's, (Entity, &'static Panel, &'static GlobalTransform, &'static Visibility)>;
 
-fn pick(win: &Window, pos: Vec2, cam: (&Camera, &GlobalTransform), panels: &PanelPick, decks: &Decks, gts: &Query<&GlobalTransform>) -> Hit {
+type TilePick<'w, 's> = Query<'w, 's, (&'static crate::orbit::Tile, &'static GlobalTransform, &'static Visibility)>;
+
+fn pick(win: &Window, pos: Vec2, cam: (&Camera, &GlobalTransform), panels: &PanelPick, tiles: &TilePick, decks: &Decks, gts: &Query<&GlobalTransform>) -> Hit {
     // the dock and the ticker sit in the bottom ~100 px
     if pos.y > win.height() - 100.0 {
         return Hit::Visor;
     }
     let Ok(ray) = cam.0.viewport_to_world(cam.1, pos) else { return Hit::None };
     let mut best: Option<(f32, Hit)> = None;
+    for (t, gt, vis) in tiles {
+        if *vis == Visibility::Hidden {
+            continue;
+        }
+        let Some(d) = ray.intersect_plane(gt.translation(), InfinitePlane3d::new(gt.back())) else { continue };
+        let local = gt.affine().inverse().transform_point3(ray.get_point(d));
+        if local.x.abs() <= crate::orbit::TILE_W / 2.0 && local.y.abs() <= crate::orbit::TILE_H / 2.0 && best.is_none_or(|(bd, _)| d < bd) {
+            best = Some((d, Hit::Tile(t.0)));
+        }
+    }
     for (e, p, gt, vis) in panels {
         if *vis == Visibility::Hidden || p.op.x < 0.06 {
             continue;
@@ -108,6 +123,8 @@ pub fn update(
     win: Query<&Window, With<PrimaryWindow>>,
     cams: Query<(&Camera, &GlobalTransform), With<CamCore>>,
     mut panels: ParamSet<(PanelPick, Query<&mut Panel>)>,
+    tiles: TilePick,
+    mut orb: ResMut<crate::orbit::Orb>,
     mut decks: ResMut<Decks>,
     gts: Query<&GlobalTransform>,
     mut ctl: ResMut<CoreCtl>,
@@ -137,7 +154,7 @@ pub fn update(
         return;
     };
     ms.pos = Some(pos);
-    let hit = if ms.drag == Drag::None { pick(w, pos, cam, &panels.p0(), &decks, &gts) } else { ms.hit.unwrap_or(Hit::None) };
+    let hit = if ms.drag == Drag::None { pick(w, pos, cam, &panels.p0(), &tiles, &decks, &gts) } else { ms.hit.unwrap_or(Hit::None) };
     if ms.hit != Some(hit) && matches!(hit, Hit::Ring(_)) {
         sound.play("hover");
     }
@@ -153,7 +170,17 @@ pub fn update(
     }
     if dy != 0.0 {
         let ctrl = keys.any_pressed([KeyCode::ControlLeft, KeyCode::ControlRight]);
+        if orb.open && !ctrl && hit != Hit::Visor {
+            // while the core is open, the wheel spins the orbit: every 60 px one slot
+            ms.wheel_acc += dy;
+            while ms.wheel_acc.abs() >= 60.0 {
+                orb.step(if ms.wheel_acc > 0.0 { -1.0 } else { 1.0 });
+                ms.wheel_acc -= ms.wheel_acc.signum() * 60.0;
+            }
+            dy = 0.0;
+        }
         match hit {
+            _ if dy == 0.0 => {}
             Hit::Panel(_, PanelId::Apps) if !ctrl => {
                 // accumulate; every 40 px is one step, with a tick
                 ms.wheel_acc += dy;
@@ -189,9 +216,11 @@ pub fn update(
         let d = pos - ms.last_pos;
         if ms.drag == Drag::None && (pos - p0).length() > 4.0 && buttons.pressed(MouseButton::Left) {
             ms.drag = match hit {
+                _ if orb.open => Drag::Orbit,
                 Hit::Panel(e, id) if id != PanelId::Readout && id != PanelId::Moment => Drag::Panel(e),
                 _ => Drag::Core,
             };
+            orb.dragging = ms.drag == Drag::Orbit;
             if let Drag::Panel(e) = ms.drag {
                 if let Ok(mut p) = panels.p1().get_mut(e) {
                     p.dragging = true;
@@ -208,6 +237,14 @@ pub fn update(
                 if dt > 0.0 && d.length() > 0.0 {
                     let r = Vec2::new(ay, ax) / dt;
                     ms.rate = ms.rate.lerp(r, 0.4);
+                    ms.last_move = now;
+                }
+            }
+            Drag::Orbit => {
+                orb.drag_by(d.x, w.width());
+                if dt > 0.0 && d.x != 0.0 {
+                    let da = d.x * 2.4 / (0.9 * w.width()).max(320.0) / dt;
+                    ms.rate.x = lerp(ms.rate.x, da, 0.35);
                     ms.last_move = now;
                 }
             }
@@ -240,12 +277,25 @@ pub fn update(
                 }
                 sound.play_with("drop", 0.8, 0.0);
             }
+            Drag::Orbit => {
+                orb.dragging = false;
+                orb.release(if now - ms.last_move < 0.09 { ms.rate.x } else { 0.0 });
+                ms.rate = Vec2::ZERO;
+                sound.play_with("drop", 0.8, 0.0);
+            }
             Drag::None => {
                 // a click: double within 300 ms, else a single after 260 ms
                 if let Some((p0, t0)) = ms.down_at {
                     if (pos - p0).length() <= 4.0 && now - t0 < 0.45 {
-                        let dbl = ms.last_click.is_some_and(|(lp, lt)| now - lt < 0.3 && (pos - lp).length() < 8.0);
-                        if dbl {
+                        let dbl = !orb.open && ms.last_click.is_some_and(|(lp, lt)| now - lt < 0.3 && (pos - lp).length() < 8.0);
+                        if orb.open {
+                            // open: a tile opens its app, the sphere closes the orbit
+                            match hit {
+                                Hit::Tile(i) => orb.launch(i),
+                                Hit::Ring(CORE) => orb.set(false, &mut sound),
+                                _ => {}
+                            }
+                        } else if dbl {
                             ms.last_click = None;
                             ms.pending_click = None;
                             double_click(hit, &mut decks, &mut acts, &mut sound, &mut toasts);
@@ -258,6 +308,14 @@ pub fn update(
             }
         }
         ms.down_at = None;
+    }
+    // hold the sphere half a second (without moving) to open the core
+    if let Some((p0, t0)) = ms.down_at {
+        if !orb.open && ms.drag == Drag::None && hit == Hit::Ring(CORE) && (pos - p0).length() <= 4.0 && now - t0 > 0.5 {
+            orb.set(true, &mut sound);
+            ms.down_at = None;
+            ms.pending_click = None;
+        }
     }
     if let Some((h, t0)) = ms.pending_click {
         if now - t0 > 0.26 {

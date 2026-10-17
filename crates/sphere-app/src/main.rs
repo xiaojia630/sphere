@@ -12,6 +12,7 @@ mod hud;
 mod live;
 mod moment;
 mod mouse;
+mod orbit;
 mod panel;
 mod service;
 mod sound;
@@ -45,6 +46,8 @@ pub struct Args {
     pub frames: u32,
     pub depth: bool,
     pub orbit: bool,
+    /// open the core (the app orbit) at start, for screenshots
+    pub apps: bool,
     pub collapsed: bool,
     pub focus_term: bool,
     pub msaa: bool,
@@ -68,7 +71,7 @@ impl Args {
 }
 
 fn parse_args() -> Args {
-    let mut a = Args { cmd: None, bench: None, shot: None, frames: 120, depth: false, orbit: false, collapsed: false, focus_term: false, msaa: true, size: (1600, 1000), dt: 1.0 / 20.0, demo: false, live: false, moment: false, theme: None };
+    let mut a = Args { cmd: None, bench: None, shot: None, frames: 120, depth: false, orbit: false, apps: false, collapsed: false, focus_term: false, msaa: true, size: (1600, 1000), dt: 1.0 / 20.0, demo: false, live: false, moment: false, theme: None };
     let mut it = std::env::args().skip(1);
     while let Some(s) = it.next() {
         match s.as_str() {
@@ -78,6 +81,7 @@ fn parse_args() -> Args {
             "--frames" => a.frames = it.next().and_then(|v| v.parse().ok()).unwrap_or(120),
             "--depth" => a.depth = true,
             "--orbit" => a.orbit = true,
+            "--apps" => a.apps = true,
             "--collapsed" => a.collapsed = true,
             "--term" => a.focus_term = true,
             "--no-msaa" => a.msaa = false,
@@ -135,7 +139,7 @@ fn main() {
         .init_resource::<apps::Open>()
         .init_resource::<working::Working>()
         .init_resource::<hud::FrameStats>()
-        .add_systems(Startup, (sound::setup, setup_core, setup_cameras, hud::setup_panels, hud::setup_backdrop, hud::setup_overlay, cmdbar::setup, visor::setup, fx::setup, homepanels::setup, mouse::setup, mouse::setup_reticle).chain())
+        .add_systems(Startup, (sound::setup, setup_core, setup_cameras, hud::setup_panels, hud::setup_backdrop, hud::setup_overlay, cmdbar::setup, visor::setup, fx::setup, homepanels::setup, orbit::setup, mouse::setup, mouse::setup_reticle).chain())
         .add_systems(First, (tick_sim, theme::animate))
         .add_systems(
             Update,
@@ -143,7 +147,8 @@ fn main() {
                 (keys, stage_view, camera_rig, update_core, spin_system, update_materials, panel::update_panels, hud::update_readout, hud::update_backdrop)
                     .chain(),
                 (live::sync, moment::update, summon::notify, live::tick_toasts, panel::rebuild_agents_ui, hud::update_readout_text, hud::update_clock, panel::blink_system, homepanels::update, homepanels::draw_rolodex, homepanels::draw_say).chain(),
-                (term::pump, cmdbar::keys, moment::keys, term::read_keys, home::keys, visor::buttons, mouse::update, home::apply, apps::apply, mouse::draw_reticle, visor::draw_buttons, visor::ticker, visor::toasts, home::landed_sound, home::step_view, fx::update, term::draw, cmdbar::draw, moment::draw).chain(),
+                (term::pump, cmdbar::keys, moment::keys, term::read_keys, home::keys, orbit::keys, visor::buttons, mouse::update, home::apply, apps::apply).chain(),
+                (orbit::update, mouse::draw_reticle, visor::draw_buttons, visor::ticker, visor::toasts, home::landed_sound, home::step_view, fx::update, term::draw, cmdbar::draw, moment::draw).chain(),
                 (hud::frame_stats, hud::bench, hud::shot).chain(),
             )
                 .chain(),
@@ -286,11 +291,12 @@ fn stage_view(win: Query<&Window, With<PrimaryWindow>>, mut sv: ResMut<StageView
 }
 
 /// Bloom follows the theme (the prototype's bloom strength .6 is our 0.22).
-fn theme_bloom(theme: Res<theme::Theme>, mut q: Query<&mut bevy::post_process::bloom::Bloom, With<CamCore>>) {
-    if !theme.is_changed() {
+fn theme_bloom(theme: Res<theme::Theme>, ctl: Res<CoreCtl>, mut q: Query<&mut bevy::post_process::bloom::Bloom, With<CamCore>>) {
+    if !theme.is_changed() && !ctl.is_changed() {
         return;
     }
-    let i = 0.22 * theme::bloom() / 0.6;
+    // core open dims the bloom by a third
+    let i = 0.22 * theme::bloom() / 0.6 * (1.0 - 0.32 * ctl.orb);
     for mut b in &mut q {
         if (b.intensity - i).abs() > 1e-4 {
             b.intensity = i;

@@ -106,7 +106,7 @@ impl PanelId {
             PanelId::Apps => Some(Hue::Apps),
             PanelId::Tele => Some(Hue::Tele),
             PanelId::Rail => Some(Hue::Rail),
-            PanelId::Terminal | PanelId::Brand => None,
+            PanelId::Terminal | PanelId::Brand | PanelId::Tile => None,
         }
     }
 }
@@ -148,6 +148,8 @@ pub enum PanelId {
     Tele,
     Rail,
     Say,
+    /// a core-open app tile
+    Tile,
 }
 
 #[derive(Component)]
@@ -366,6 +368,12 @@ pub fn update_panels(
         if ctl.mode == Mode::Orbit {
             tz -= 110.0;
             top *= 0.5;
+        }
+        // core open: the side panels step aside and back
+        if ctl.orb > 0.0 && !matches!(p.id, PanelId::Brand | PanelId::Say | PanelId::Moment | PanelId::Terminal) {
+            tx -= p.side * 230.0 * ctl.orb;
+            tz -= 320.0 * ctl.orb;
+            top *= 1.0 - 0.9 * ctl.orb;
         }
         let focused_me = p.id == PanelId::Terminal && focus.terminal;
         if p.id == PanelId::Terminal && !focus.terminal {

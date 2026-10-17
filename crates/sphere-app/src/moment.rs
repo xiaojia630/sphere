@@ -427,7 +427,7 @@ fn build(c: &mut Commands, f: &UiFonts, r: &RequestView, title: &str, m: &Moment
     // foot
     let foot = c.spawn(Node { flex_direction: FlexDirection::Row, justify_content: JustifyContent::SpaceBetween, margin: UiRect { top: px(14), ..default() }, ..default() }).id();
     let count = c.spawn((Text::new(format!("{} of {}", m.index + 1, n)), font(&f.mono, 11.0, 0.66), TextColor(hot), LineHeight::Px(11.0))).id();
-    let nav = c.spawn((Text::new(if n > 1 { "← → FOR THE OTHERS" } else { "" }), font(&f.ui600, 9.5, 2.47), TextColor(mute), LineHeight::Px(9.5))).id();
+    let nav = c.spawn((Text::new(if n > 1 { "← →  for the others" } else { "" }), font(&f.mono, 10.0, 0.5), TextColor(mute), LineHeight::Px(10.0))).id();
     c.entity(foot).add_children(&[count, nav]);
     c.entity(body).add_child(foot);
     body

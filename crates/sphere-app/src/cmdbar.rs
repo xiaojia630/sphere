@@ -29,7 +29,7 @@ pub struct CmdCaret;
 #[derive(Component)]
 pub struct ToastText;
 
-const PLACEHOLDER: &str = "Ask Sphere or start a task  ·  repo: task  ·  > reply to the last agent";
+const PLACEHOLDER: &str = "Ask Sphere, or start a task  ·  repo: task";
 
 pub fn setup(mut commands: Commands, f: Res<UiFonts>, root: Res<crate::hud::OverlayRoot>) {
     let line = role_color(Role::Line);
@@ -221,6 +221,12 @@ fn home_command(t: &str, acts: &mut crate::home::Acts, open: &mut crate::apps::O
         Act::Theme(Some(ThemeId::Black))
     } else if starts(&["red"]) {
         Act::Theme(Some(ThemeId::Red))
+    } else if starts(&["apps", "open apps", "show apps", "launcher", "open core", "open the core", "core open"]) {
+        open.toggle_orbit = Some(true);
+        return true;
+    } else if starts(&["close", "close apps", "close core", "back"]) {
+        open.toggle_orbit = Some(false);
+        return true;
     } else if starts(&["fit", "frame"]) {
         Act::Fit
     } else if starts(&["reset", "home", "center", "centre"]) {
