@@ -1,4 +1,4 @@
-//! The Git app (design/apps/git): your repos and their state at a glance, a commit graph across branches, the
+//! The Git app: your repos and their state at a glance, a commit graph across branches, the
 //! working tree with staging, a commit box, branches and the remote, over the agents' strip. Everything is read
 //! and done with git in the background. Keys: [ ] repo, Tab the list J K move in (files, branches, graph),
 //! Enter stage or unstage the file / switch to the branch, S stage, U unstage, A stage all, X unstage all,

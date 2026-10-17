@@ -1,4 +1,4 @@
-//! The Ports & logs app (design/apps/ports): every TCP port listening on this machine around a hub, each with who
+//! The Ports & logs app: every TCP port listening on this machine around a hub, each with who
 //! owns it (a process, or the container publishing it), and a detail pane for the selected one. Keys: ← → ↑ ↓
 //! (or J) select, , . turn the page of tiles, Tab filter (all, containers, processes), O open in the browser, T
 //! its logs (containers), K stop the process (asks twice), Esc closes.

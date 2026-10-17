@@ -1,4 +1,4 @@
-//! The Code app (design/apps/code): review an agent's work before it lands. The core shrinks into the top-left
+//! The Code app: review an agent's work before it lands. The core shrinks into the top-left
 //! corner and a glass workspace unfolds with the task and its checkpoints, the changed files, a delta-style diff
 //! by hunk, the repo's tests and the review actions (merge, open a PR, ask for a change, open in Zed, discard),
 //! over a strip of the repo's agents. The changes are read with git from the agent's worktree; tests run with the

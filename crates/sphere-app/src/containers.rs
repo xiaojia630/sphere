@@ -1,4 +1,4 @@
-//! The Containers app (design/apps/containers): your Docker or OrbStack containers around a hub, grouped by
+//! The Containers app: your Docker or OrbStack containers around a hub, grouped by
 //! compose project, with a detail pane and the selected one's logs. Keys: ← → (or J K) select, S start or stop,
 //! R restart, P pull its image, D remove (asks twice), F follow logs, Esc closes.
 use crate::appframe::*;

@@ -4,6 +4,8 @@ description = "Event, request and API types shared by sphered, the sphere CLI an
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
 
 [dependencies]
 serde.workspace = true

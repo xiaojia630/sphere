@@ -1,0 +1,25 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      # sphere-app keeps its own wide formatting; the other crates follow rustfmt
+      - name: Format
+        run: cargo fmt -p sphere-proto -p sphere-host -p sphered -p sphere-client -p sphere-cli -p fake-claude --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Test
+        run: cargo test --workspace
+      - name: Build
+        run: cargo build --release --workspace

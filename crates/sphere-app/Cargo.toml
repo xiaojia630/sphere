@@ -1,9 +1,11 @@
 [package]
 name = "sphere-app"
-description = "The Sphere desktop app"
+description = "The Sphere desktop app: a 3D command center for coding agents, with code review, git, containers, ports, system and files"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
 publish = false
 
 [[bin]]

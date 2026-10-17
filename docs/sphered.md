@@ -1,6 +1,6 @@
 # Sphere architecture
 
-*Agreed with Gabriel on 2026-10-16 (second pass). It replaces the first pass (in this file's git history) after Gabriel asked that everything go through Sphere.*
+*Second pass, 2026-10-16. It replaces the first pass (in this file's git history), so that everything goes through Sphere.*
 
 Sphere is the one place you work. Agents, terminals, code review, containers and music all start, run and finish inside it, so you never need a Claude window or a terminal open somewhere else. Your browser and your editor (Zed) are the only things that open in their own windows, and Sphere opens them for you. Sphere has two halves:
 

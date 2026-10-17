@@ -118,17 +118,19 @@ Sphere is built on [Bevy](https://bevy.org), [Alacritty](https://github.com/alac
 [WezTerm](https://github.com/wezterm/wezterm)'s `portable-pty` and [rodio](https://github.com/RustAudio/rodio).
 It is set in Michroma, Rajdhani and JetBrains Mono (SIL OFL).
 
-Sphere is licensed under Apache-2.0.
+Sphere is licensed under Apache-2.0; see [LICENSE](LICENSE) and [NOTICE](NOTICE). Contributions are welcome: see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ---
 
-## sphered, the service (for developers)
+## For developers
+
+### sphered, the service
 
 `sphered` is the background service behind Sphere. It starts and owns Claude Code agents (headless, over stream-json), gives each task its own git worktree and branch, records everything as one ordered event log in SQLite, and turns the agent's permission checks, questions and plans into requests that only you answer. Clients talk to it over a Unix socket with JSON-RPC 2.0; the `sphere` CLI is the first one.
 
-This is milestone 1: the service, the process holder, the CLI and a fake agent for tests. The design is in [docs/sphered.md](docs/sphered.md). Desktop only (Linux and macOS).
+The design is in [docs/sphered.md](docs/sphered.md). The service and CLI run on macOS and Linux; the app is macOS-first.
 
-## Crates
+### Crates
 
 | Crate | What it is |
 | --- | --- |
@@ -140,7 +142,7 @@ This is milestone 1: the service, the process holder, the CLI and a fake agent f
 | `sphere-app` | The desktop app (`sphere-app`): core, panels, command bar, terminal tabs, Agent moment. |
 | `fake-claude` | A scripted stand-in for `claude`, driven by the fixtures in `crates/fake-claude/fixtures`. Used by the tests. |
 
-## Build and install
+### Build and install
 
 You need a recent stable Rust toolchain and git. To run real agents you need Claude Code installed and signed in.
 
@@ -152,7 +154,7 @@ sphere doctor
 
 `sphere doctor` checks Claude Code (version range and sign-in), git, the sandbox helpers (`bwrap`, `socat`) and whether sphered is running. Version and sign-in problems are warnings, never errors.
 
-## The CLI
+### The CLI
 
 ```
 sphere daemon                       run sphered in the foreground
@@ -187,7 +189,7 @@ sphere doctor                       check the installation
 
 A repo's `.sphere/config.toml` can list files to `copy` into each worktree and a `setup` command to run there.
 
-## Tests
+### Tests
 
 ```
 cargo test --workspace
@@ -206,40 +208,28 @@ cargo test -p sphered --test live_claude -- --ignored --nocapture
 
 Set `SPHERE_LIVE_CLAUDE` to the command if `claude` is not on your PATH.
 
-## Credits
-
-The idea of a small process that outlives the UI and owns the terminals comes from [herdr](https://github.com/herdrdev/herdr) (Apache-2.0). Sphere is built with its design in mind; no herdr code is used here.
-## The Sphere app (M2)
+### The desktop app
 
 `sphere-app` is the desktop app: the core, the glass panels, a command bar, terminal tabs and the Agent moment card. It is a client of sphered like the CLI, and starts sphered when nothing is running.
 
     cargo build --release
     target/release/sphere-app
 
-Keys (the prototypes' own):
+More keys:
 
 - `/` or Cmd+K: the command bar. A task starts an agent (`repo: task` picks the repo, a folder in `~/Projects` or a path; otherwise the last repo used, otherwise the app's folder) and opens the Working view. `> message` talks to the agent you heard from last, `stop` stops it. The prototype's commands work too: `depth`, `orbit`, `collapse`, a theme name, `fit`, `reset`, `apps`, `open terminal`.
 - Views: 1 Flat, 2/D Depth, 3/O Orbit, E Depth and Flat, X collapses the rings onto the sphere, F fits, R resets everything, C cycles the five themes, M mutes.
 - Mouse: drag the core to turn it, drag panels anywhere, scroll to zoom (on a panel: push it back; on Apps: spin the rolodex), double-click the sphere to collapse, a ring to fold it, empty space to fit.
-- A (or hold the sphere, or the dock's Apps): core open, the app orbit. ← → or scroll spins it, Enter or a click opens an app (Terminal and Agents are live), Esc closes.
+- A (or hold the sphere, or the dock's Apps): core open, the app orbit. ← → or scroll spins it, Enter or a click opens an app, Esc closes.
 - W: the Working view on the latest agent (it also opens when you start one). P interrupts its turn, T brings its output forward, Esc goes home.
 - N: the Agent moment for what needs you (it rises by itself when a request arrives). Enter answers yes, E changes (type, Enter), L is later, ← → steps through them, Esc puts them away. Sphere reads each one out.
 - Terminal: T focuses it, Esc releases it, Cmd+T new tab, Cmd+W close, Cmd+1..9 switch, Cmd+V paste. Tabs run your login shell inside sphere-host, so they survive the app closing: the next launch re-attaches them (replaying their output). If the host can't be reached they live in the app.
 - Option+Space (macOS) brings Sphere up over anything and hides it again. When something needs you while Sphere isn't in front, you get a notification.
 
-Sounds are the prototype's own, rendered to WAV from its synthesis code (`crates/sphere-app/assets/sounds`). Speech uses macOS `say` with the Daniel voice.
+Sounds are synthesised and rendered to WAV (`crates/sphere-app/assets/sounds`). Speech uses macOS `say` with the Daniel voice.
 
-Flags: `--demo` (the look test's sample agents, no service), `--moment` (the Agent moment with sample requests), `--apps` (core open), `--work` (the Working view), `--orbit`, `--collapsed`, `--theme <name>`, `--live` (screenshots and benches against the real service), `--cmd "<command>"` (what the first terminal tab runs), `--bench <seconds>`, `--shot <png> [--frames N] [--depth] [--term]`, `--size WxH`, `--no-msaa`. `SPHERE_SOCKET` points the app at another sphered.
+Flags: `--demo` (sample agents, no service), `--code`, `--git`, `--app containers|ports|system|files`, `--moment` (the Agent moment with sample requests), `--apps` (core open), `--work` (the Working view), `--orbit`, `--collapsed`, `--theme <name>`, `--live` (screenshots and benches against the real service), `--cmd "<command>"` (what the first terminal tab runs), `--bench <seconds>`, `--shot <png> [--frames N] [--depth] [--term]`, `--record <dir> [--record-frames N]` (every frame, for GIFs), `--size WxH`, `--no-msaa`. `SPHERE_STATS=1` prints startup timings and memory. `SPHERE_SOCKET` points the app at another sphered.
 
-`--shot` renders offscreen and needs no window. `--bench` and `--shot` use the demo data unless `--live` is given.
+`--shot` and `--record` render offscreen and need no window. `--bench`, `--shot` and `--record` use the demo data unless `--live` is given.
 
-Linux: needs X11 dev libs by default (`--features wayland` for Wayland). The hotkey and notifications are macOS only for now. No GPU (CI, containers): `scripts/shot-swiftshader.sh --shot look/out.png --frames 120 --no-msaa` uses a software Vulkan driver.
-
-Images in `look/` are from the M0 look test: `compare.png` (prototype left, Rust right), `rust-flat.png`, `rust-depth.png`, `rust-terminal.png`.
-
-### Credits
-
-- [Bevy](https://bevy.org)
-- [Alacritty](https://github.com/alacritty/alacritty) (`alacritty_terminal` for VT state)
-- `portable-pty` from [WezTerm](https://github.com/wezterm/wezterm)
-- Fonts under the SIL OFL (licences in `assets/fonts`): Michroma, Rajdhani, JetBrains Mono
+Linux: needs X11 dev libs by default (`--features wayland` for Wayland). The hotkey and notifications are macOS only for now. No GPU (CI, containers): `scripts/shot-swiftshader.sh --shot out.png --frames 120 --no-msaa` uses a software Vulkan driver.

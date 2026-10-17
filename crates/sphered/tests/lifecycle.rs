@@ -184,6 +184,8 @@ async fn output_produced_while_sphered_is_down_is_picked_up_exactly_once() {
     assert!((snap.tasks[0].cost_usd - 0.5).abs() < 1e-9);
 }
 
+// reads /proc, so Linux only
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn sphered_and_the_host_are_separate_processes_and_the_host_is_detached() {
     let mut env = Env::new("slow");

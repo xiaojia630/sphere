@@ -1,4 +1,4 @@
-//! The Files app (design/apps/files): yazi-style columns (the parent, where you are, a preview), pinned places
+//! The Files app: yazi-style columns (the parent, where you are, a preview), pinned places
 //! along the top (your repos, Downloads, agents' worktrees), and a status line. Keys: H J K L (or arrows) move,
 //! Enter opens with the default app, / filters, Space selects, Y yanks, P pastes here (never over anything), D
 //! moves to the Trash (asks twice; only things inside your home), E opens in Zed (else the default editor),

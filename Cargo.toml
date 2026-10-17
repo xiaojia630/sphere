@@ -14,7 +14,9 @@ members = [
 version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
-repository = "https://github.com/sphere-os/sphere"
+repository = "https://github.com/xiaojia630/sphere"
+homepage = "https://github.com/xiaojia630/sphere"
+readme = "README.md"
 
 [workspace.dependencies]
 anyhow = "=1.0.104"

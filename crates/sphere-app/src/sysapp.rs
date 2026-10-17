@@ -1,4 +1,4 @@
-//! The System app (design/apps/system): this machine's processor, memory, GPU, network, disk and battery, sampled
+//! The System app: this machine's processor, memory, GPU, network, disk and battery, sampled
 //! every two seconds while it's open, and the processes using the most. Keys: ↑ ↓ (or J) select a process, S sort
 //! by CPU or memory, K stop it (asks twice), Esc closes.
 use crate::appframe::*;

@@ -4,6 +4,8 @@ description = "Owns every child process (agents, terminals) so sphered can resta
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
 
 [lib]
 name = "sphere_host"
