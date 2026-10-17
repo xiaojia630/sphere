@@ -902,7 +902,12 @@ fn draw_task(c: &mut Commands, ui: &Ui, root: Entity, t: &TaskView, run: &crate:
     if r.is_some_and(|r| r.dirty) || items.is_empty() {
         for s in edits.iter().rev().take(6).collect::<Vec<_>>().into_iter().rev() {
             let at = s.at.get(11..16).unwrap_or("").to_string();
-            items.push((s.title.clone(), at, false));
+            // real agents name files by absolute path in the worktree: show them relative to it
+            let title = match t.workdir.as_deref() {
+                Some(wd) => s.title.replace(&format!("{}/", wd.trim_end_matches('/')), ""),
+                None => s.title.clone(),
+            };
+            items.push((title, at, false));
         }
     }
     let n = items.len();
