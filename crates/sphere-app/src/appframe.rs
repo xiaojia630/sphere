@@ -325,6 +325,7 @@ impl Ui<'_> {
         c.entity(parent).add_child(e);
     }
     /// A dashed line: `dash` px on, `gap` px off.
+    #[allow(clippy::too_many_arguments)]
     pub fn dashed(&self, c: &mut Commands, parent: Entity, a: Vec2, b: Vec2, w: f32, col: Color, dash: f32, gap: f32) {
         let len = (b - a).length();
         let dir = (b - a) / len.max(1e-3);
