@@ -208,7 +208,7 @@ pub fn update_readout_text(
             x.0 = "STANDBY".into();
         }
         for mut x in &mut q.p1() {
-            x.0 = agents.summary().to_uppercase();
+            x.0 = if args.offline() { agents.summary().to_uppercase() } else { "CONNECTING TO SPHERED".into() };
         }
     }
     if args.offline() || !(agents.is_changed() || live.is_changed()) {

@@ -149,7 +149,7 @@ pub fn setup(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut atlas
     let b = body(c, ui.root, true);
     let hd = hdr(c, &f, "Sphere · System", &format!("v{}", env!("CARGO_PKG_VERSION")));
     c.entity(b).add_child(hd);
-    for (k, v, acc) in [("Core", "Online", false), ("Agents", "0 working", false), ("Needs you", "None", false), ("Containers", "Not set up", false), ("Voice", "Off", false), ("Response", "—", false)] {
+    for (k, v, acc) in [("Core", "Connecting", false), ("Agents", "—", false), ("Needs you", "—", false), ("Containers", "Checking", false), ("Voice", "—", false), ("Response", "—", false)] {
         let row = c.spawn(Node { flex_direction: FlexDirection::Row, justify_content: JustifyContent::SpaceBetween, column_gap: px(22), ..default() }).id();
         let dt = c.spawn((Text::new(k.to_uppercase()), font(&f.ui500, 14.0, 2.24), TextColor(line), LineHeight::Px(25.2))).id();
         let dd = c.spawn((SysRow(k), Text::new(v.to_uppercase()), font(&f.ui600, 14.0, 2.24), TextColor(if acc { role_color(Role::Acc) } else { hot }), LineHeight::Px(25.2))).id();
@@ -259,6 +259,7 @@ pub fn update(
     live: Res<crate::live::Live>,
     svc: Res<crate::service::Service>,
     args: Res<crate::Args>,
+    sound: Res<crate::sound::Sound>,
     mut acc: Local<f32>,
     mut texts: ParamSet<(Query<(&SysRow, &mut Text, &mut TextColor)>, Query<(&MeterValue, &mut Text)>)>,
     mut segs: Query<(&Meter, &mut BackgroundColor)>,
@@ -272,12 +273,15 @@ pub fn update(
     let rtt = svc.shared.lock().unwrap().rtt_ms;
     let up = matches!(live.link, Some(crate::service::Link::Connected)) || args.offline();
     let needs = live.requests.len();
+    let s = stats.get();
     for (r, mut t, mut c) in &mut texts.p0() {
         let (v, col) = match r.0 {
             "Core" => (if up { "ONLINE".to_string() } else { "OFFLINE".to_string() }, if up { role_color(Role::Ok) } else { role_color(Role::Bad) }),
             "Agents" => (format!("{} WORKING", agents.working()), role_color(Role::Hot)),
             "Needs you" => (if needs == 0 { "NONE".to_string() } else { format!("{needs} WAITING") }, if needs == 0 { role_color(Role::Hot) } else { role_color(Role::Acc) }),
-            "Response" => (rtt.map(|ms| format!("{:.2} S", ms / 1000.0)).unwrap_or_else(|| "—".into()), role_color(Role::Hot)),
+            "Containers" => (s.docker.label(), if matches!(s.docker, crate::sysstats::Docker::Off) { role_color(Role::Dim) } else { role_color(Role::Hot) }),
+            "Voice" => (if sound.muted { "MUTED" } else { "SPEAKS" }.to_string(), if sound.muted { role_color(Role::Dim) } else { role_color(Role::Hot) }),
+            "Response" => (rtt.map(|ms| if ms < 1.0 { "<1 MS".to_string() } else if ms < 1000.0 { format!("{ms:.0} MS") } else { format!("{:.1} S", ms / 1000.0) }).unwrap_or_else(|| "—".into()), role_color(Role::Hot)),
             _ => continue,
         };
         if t.0 != v {
@@ -285,7 +289,6 @@ pub fn update(
         }
         c.set_if_neq(TextColor(col));
     }
-    let s = stats.get();
     if !s.ready {
         return;
     }

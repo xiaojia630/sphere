@@ -108,6 +108,16 @@ pub fn sync(svc: Res<Service>, mut live: ResMut<Live>, mut agents: ResMut<Agents
         live.link = s.link.clone();
     }
     agents.set(pick(&s.tasks));
+    agents.set_runs(
+        s.tasks
+            .iter()
+            .filter_map(|t| {
+                let a = crate::working::parse_rfc3339(&t.started_at)?;
+                let active = matches!(t.state, TaskState::Queued | TaskState::Working | TaskState::NeedsYou);
+                Some((a, if active { i64::MAX } else { crate::working::parse_rfc3339(&t.updated_at).unwrap_or(a) }))
+            })
+            .collect(),
+    );
     let mut reqs: Vec<RequestView> = s.requests.iter().filter(|r| r.status.is_open()).cloned().collect();
     reqs.sort_by(|a, b| a.opened_at.cmp(&b.opened_at));
     let titles: Vec<(String, String)> = s.tasks.iter().map(|t| (t.id.clone(), t.title.clone())).collect();
