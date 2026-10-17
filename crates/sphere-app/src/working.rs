@@ -169,9 +169,8 @@ pub fn setup(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut gmats: ResMut<Assets<GlowMaterial>>,
-    mut images: ResMut<Assets<Image>>,
+    mut atlas: ResMut<crate::panel::PanelAtlas>,
     mut pmats: ResMut<Assets<PanelMaterial>>,
-    scale: Res<PanelScale>,
     args: Res<crate::Args>,
 ) {
     let c = &mut commands;
@@ -180,7 +179,6 @@ pub fn setup(
         w.open_latest();
         c.insert_resource(w);
     }
-    let s = scale.0;
     // the track and the head live in world space, placed every frame from the core's position
     let track = c.spawn((Track, Transform::default(), Visibility::Hidden)).id();
     let lm = meshes.add(line_mesh(vec![[0.0; 3], [1.0, 0.0, 0.0]], vec![1.0, 1.0]));
@@ -197,18 +195,18 @@ pub fn setup(
     let head = c.spawn((Head, Mesh3d(meshes.add(g.into_mesh())), MeshMaterial3d(gmats.add(hm)), Transform::default())).id();
     c.entity(track).add_children(&[line, head]);
     // panels: run (left 54, top 54), output (right 1546, bottom 962), edit (right 1546, top 46)
-    let mut mk = |w: f32, h: f32, home: Vec3, side: f32, order: isize, k: u8| -> Entity {
-        let ui = spawn_ui_panel(c, &mut images, w, h, s, order);
+    let mut mk = |w: f32, h: f32, home: Vec3, side: f32, k: u8| -> Entity {
+        let ui = spawn_ui_panel(c, &mut atlas, w, h);
         let e = spawn_panel_quad(c, &mut meshes, &mut pmats, &ui, &PanelSpec { id: PanelId::Work, w, h, home, home_scale: 1.0, side, phase: 1.1 + k as f32, show_at: 0.0, unframed: false });
         c.entity(e).insert(WorkPanel(k));
         ui.root
     };
-    let run = mk(RUN_W, RUN_H, crate::homepanels::anchor('l', 54.0, 't', 54.0, RUN_W, RUN_H), 1.0, -40, 0);
-    let out = mk(OUT_W, OUT_H, crate::homepanels::anchor('r', 1546.0, 'b', 962.0, OUT_W, OUT_H), -1.0, -41, 1);
-    let edit = mk(EDIT_W, EDIT_H, crate::homepanels::anchor('r', 1546.0, 't', 46.0, EDIT_W, EDIT_H), -1.0, -42, 2);
+    let run = mk(RUN_W, RUN_H, crate::homepanels::anchor('l', 54.0, 't', 54.0, RUN_W, RUN_H), 1.0, 0);
+    let out = mk(OUT_W, OUT_H, crate::homepanels::anchor('r', 1546.0, 'b', 962.0, OUT_W, OUT_H), -1.0, 1);
+    let edit = mk(EDIT_W, EDIT_H, crate::homepanels::anchor('r', 1546.0, 't', 46.0, EDIT_W, EDIT_H), -1.0, 2);
     let mut chips = [Entity::PLACEHOLDER; CHIPS];
     for (i, ch) in chips.iter_mut().enumerate() {
-        let ui = spawn_ui_panel(c, &mut images, CHIP_W, CHIP_H, s, -50 - i as isize);
+        let ui = spawn_ui_panel(c, &mut atlas, CHIP_W, CHIP_H);
         let e = spawn_panel_quad(c, &mut meshes, &mut pmats, &ui, &PanelSpec { id: PanelId::Chip, w: CHIP_W, h: CHIP_H, home: Vec3::ZERO, home_scale: 1.0, side: 0.0, phase: 0.0, show_at: 0.0, unframed: true });
         c.entity(e).remove::<Panel>().insert((Chip(i), Visibility::Hidden));
         *ch = ui.root;

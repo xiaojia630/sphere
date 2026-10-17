@@ -33,6 +33,8 @@ pub struct PanelUniform {
     pub to_c: [Vec4; 8],
     /// x: how much of the outline is drawn (0..1)
     pub q: Vec4,
+    /// where the panel's UI sits in the atlas: uv offset (xy) and size (zw); texture px until `finish_atlas`
+    pub r: Vec4,
 }
 
 #[derive(Asset, TypePath, AsBindGroup, Clone, Debug)]
@@ -209,42 +211,88 @@ pub struct UiPanel {
     #[allow(dead_code)]
     pub camera: Entity,
     pub image: Handle<Image>,
+    /// texture px in the atlas: x, y, w, h
+    pub rect: Vec4,
 }
 
-/// Marks a camera that renders a panel's UI into its image. See `gate_panel_cameras`.
+/// Marks the camera that renders the panels' UI into the atlas. See `gate_panel_cameras`.
 #[derive(Component)]
 pub struct PanelUiCamera;
 
-/// A UI camera that renders into an image, plus the full-size root node whose UI lives there.
-pub fn spawn_ui_panel(commands: &mut Commands, images: &mut Assets<Image>, w: f32, h: f32, scale: f32, order: isize) -> UiPanel {
-    let (pw, ph) = ((w * scale).ceil() as u32, (h * scale).ceil() as u32);
-    let mut img = Image::new_fill(
-        Extent3d { width: pw, height: ph, depth_or_array_layers: 1 },
-        TextureDimension::D2,
-        &[0, 0, 0, 0],
-        TextureFormat::Rgba8UnormSrgb,
-        RenderAssetUsages::default(),
-    );
-    img.texture_descriptor.usage = bevy::render::render_resource::TextureUsages::TEXTURE_BINDING
-        | bevy::render::render_resource::TextureUsages::COPY_DST
-        | bevy::render::render_resource::TextureUsages::RENDER_ATTACHMENT;
-    let image = images.add(img);
+/// Every panel's UI is laid out side by side in one texture, drawn by one UI camera (rather than a camera and a
+/// texture per panel). Rects are packed in shelves as panels spawn during Startup; `finish_atlas` then makes the
+/// texture as tall as they need. It's a render target only: no CPU copy.
+#[derive(Resource)]
+pub struct PanelAtlas {
+    pub image: Handle<Image>,
+    pub camera: Entity,
+    pub scale: f32,
+    x: u32,
+    y: u32,
+    shelf: u32,
+}
+
+pub const ATLAS_W: u32 = 4096;
+/// clear texels between panels, so sampling at a panel's edge never picks up its neighbour
+const GUTTER: u32 = 2;
+
+pub fn setup_atlas(mut commands: Commands, mut images: ResMut<Assets<Image>>, args: Res<crate::Args>, win: Query<&Window, With<bevy::window::PrimaryWindow>>) {
+    let sv = StageView::compute(args.size.0 as f32, args.size.1 as f32);
+    let dpr = win.single().map(|w| w.scale_factor()).unwrap_or(1.0);
+    // texture px per css px: the panel is shown at about `k` on screen, so match the screen pixels
+    let scale = (sv.k * dpr).max(crate::hud::SCALE_MIN);
+    commands.insert_resource(PanelScale(scale));
+    // a placeholder until `finish_atlas` knows the size (the camera needs its target to exist)
+    let image = images.add(atlas_image(1));
     let camera = commands
         .spawn((
             Camera2d,
-            Camera { order, clear_color: ClearColorConfig::Custom(Color::NONE), ..default() },
+            Camera { order: -10, clear_color: ClearColorConfig::Custom(Color::NONE), ..default() },
             RenderTarget::Image(ImageRenderTarget { handle: image.clone(), scale_factor: scale }),
             Msaa::Off,
             PanelUiCamera,
         ))
         .id();
+    commands.insert_resource(PanelAtlas { image, camera, scale, x: 0, y: 0, shelf: 0 });
+}
+
+fn atlas_image(h: u32) -> Image {
+    let mut img = Image::new_uninit(Extent3d { width: ATLAS_W, height: h, depth_or_array_layers: 1 }, TextureDimension::D2, TextureFormat::Rgba8UnormSrgb, RenderAssetUsages::default());
+    img.texture_descriptor.usage = bevy::render::render_resource::TextureUsages::TEXTURE_BINDING | bevy::render::render_resource::TextureUsages::RENDER_ATTACHMENT;
+    img
+}
+
+/// Sizes the atlas to what was packed and points every panel material at its rect.
+pub fn finish_atlas(atlas: Res<PanelAtlas>, mut images: ResMut<Assets<Image>>, mut mats: ResMut<Assets<PanelMaterial>>) {
+    let h = (atlas.y + atlas.shelf).max(1);
+    let _ = images.insert(&atlas.image, atlas_image(h));
+    let size = Vec4::new(ATLAS_W as f32, h as f32, ATLAS_W as f32, h as f32);
+    for (_, m) in mats.iter_mut() {
+        m.u.r /= size;
+    }
+    if crate::stats::on() {
+        eprintln!("stats: panel atlas {ATLAS_W}x{h} ({:.1} MB)", (ATLAS_W * h * 4) as f64 / 1e6);
+    }
+}
+
+/// A panel's UI root, placed in its own rect of the atlas (clipped to it).
+pub fn spawn_ui_panel(commands: &mut Commands, atlas: &mut PanelAtlas, w: f32, h: f32) -> UiPanel {
+    let (pw, ph) = ((w * atlas.scale).ceil() as u32, (h * atlas.scale).ceil() as u32);
+    if atlas.x + pw > ATLAS_W {
+        atlas.x = 0;
+        atlas.y += atlas.shelf;
+        atlas.shelf = 0;
+    }
+    let (x, y) = (atlas.x, atlas.y);
+    atlas.x += pw + GUTTER;
+    atlas.shelf = atlas.shelf.max(ph + GUTTER);
     let root = commands
         .spawn((
-            Node { width: px(w), height: px(h), position_type: PositionType::Absolute, left: px(0), top: px(0), ..default() },
-            UiTargetCamera(camera),
+            Node { width: px(w), height: px(h), position_type: PositionType::Absolute, left: px(x as f32 / atlas.scale), top: px(y as f32 / atlas.scale), overflow: Overflow::clip(), ..default() },
+            UiTargetCamera(atlas.camera),
         ))
         .id();
-    UiPanel { root, camera, image }
+    UiPanel { root, camera: atlas.camera, image: atlas.image.clone(), rect: Vec4::new(x as f32, y as f32, w * atlas.scale, h * atlas.scale) }
 }
 
 pub fn panel_mesh(w: f32, h: f32, pad: f32) -> Mesh {
@@ -297,6 +345,7 @@ pub fn spawn_panel_quad(
             from_c,
             to_c,
             q: Vec4::new(0.0, 0.0, 0.0, 0.0),
+            r: ui.rect,
         },
         content: Some(ui.image.clone()),
     });

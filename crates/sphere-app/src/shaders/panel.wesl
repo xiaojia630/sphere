@@ -14,6 +14,7 @@ struct Panel {
     from_c: array<vec4<f32>, 8>,
     to_c: array<vec4<f32>, 8>,
     q: vec4<f32>,      // x: how much of the outline is drawn (the boot draw-in), 0..1
+    r: vec4<f32>,      // the panel's rect in the shared UI atlas: uv offset (xy), size (zw)
 };
 @group(constants::MATERIAL_BIND_GROUP) @binding(0) var<uniform> u: Panel;
 @group(constants::MATERIAL_BIND_GROUP) @binding(1) var content: texture_2d<f32>;
@@ -35,6 +36,11 @@ fn vs_panel(v: VIn) -> VOut {
     o.clip = mesh_position_local_to_clip(get_world_from_local(v.instance_index), vec4<f32>(v.position, 1.0));
     o.uv = v.uv;
     return o;
+}
+
+// panel uv (0..1) to the atlas
+fn atl(t: vec2<f32>) -> vec2<f32> {
+    return u.r.xy + t * u.r.zw;
 }
 
 fn seg_d(p: vec2<f32>, a: vec2<f32>, b: vec2<f32>) -> f32 {
@@ -89,7 +95,7 @@ fn fs_panel(i: VOut) -> @location(0) vec4<f32> {
     let tuv = q / vec2<f32>(w, h);
     let inb = f32(tuv.x >= 0.0 && tuv.x <= 1.0 && tuv.y >= 0.0 && tuv.y <= 1.0);
     let cuv = clamp(tuv, vec2<f32>(0.0), vec2<f32>(1.0));
-    let tex = retheme(textureSample(content, content_samp, cuv)) * inb;
+    let tex = retheme(textureSample(content, content_samp, atl(cuv))) * inb;
 
     if (u.p.x > 2.5) {
         // bare text, no glass or frame
@@ -122,10 +128,10 @@ fn fs_panel(i: VOut) -> @location(0) vec4<f32> {
     let r = 2.2;
     let tw = vec2<f32>(r / w, r / h);
     var gl = 0.0;
-    gl += textureSample(content, content_samp, clamp(cuv + vec2<f32>(tw.x, 0.0), vec2<f32>(0.0), vec2<f32>(1.0))).a;
-    gl += textureSample(content, content_samp, clamp(cuv - vec2<f32>(tw.x, 0.0), vec2<f32>(0.0), vec2<f32>(1.0))).a;
-    gl += textureSample(content, content_samp, clamp(cuv + vec2<f32>(0.0, tw.y), vec2<f32>(0.0), vec2<f32>(1.0))).a;
-    gl += textureSample(content, content_samp, clamp(cuv - vec2<f32>(0.0, tw.y), vec2<f32>(0.0), vec2<f32>(1.0))).a;
+    gl += textureSample(content, content_samp, atl(clamp(cuv + vec2<f32>(tw.x, 0.0), vec2<f32>(0.0), vec2<f32>(1.0)))).a;
+    gl += textureSample(content, content_samp, atl(clamp(cuv - vec2<f32>(tw.x, 0.0), vec2<f32>(0.0), vec2<f32>(1.0)))).a;
+    gl += textureSample(content, content_samp, atl(clamp(cuv + vec2<f32>(0.0, tw.y), vec2<f32>(0.0), vec2<f32>(1.0)))).a;
+    gl += textureSample(content, content_samp, atl(clamp(cuv - vec2<f32>(0.0, tw.y), vec2<f32>(0.0), vec2<f32>(1.0)))).a;
     gl = gl * 0.25 * inb * u.p.w;
     col = over(col, vec4<f32>(u.line.rgb * gl * 0.55, gl * 0.35) * mask);
     col = over(col, tex * mask);

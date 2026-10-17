@@ -24,26 +24,20 @@ pub const SCALE_MIN: f32 = 1.0;
 pub fn setup_panels(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut images: ResMut<Assets<Image>>,
+    mut atlas: ResMut<crate::panel::PanelAtlas>,
     mut fonts_a: ResMut<Assets<Font>>,
     mut pmats: ResMut<Assets<PanelMaterial>>,
     agents: Res<Agents>,
     decks: Res<Decks>,
     args: Res<Args>,
-    win: Query<&Window, With<bevy::window::PrimaryWindow>>,
 ) {
     let f = fonts::load_ui_fonts(&mut fonts_a);
     commands.insert_resource(f.clone());
-    let sv = StageView::compute(args.size.0 as f32, args.size.1 as f32);
-    let dpr = win.single().map(|w| w.scale_factor()).unwrap_or(1.0);
-    // texture px per css px: the panel is shown at about `k` on screen, so match the screen pixels
-    let scale = (sv.k * dpr).max(SCALE_MIN) * 1.0;
-    commands.insert_resource(PanelScale(scale));
     commands.insert_resource(Focus { terminal: args.focus_term, cmd: false });
 
     // ---- Agents panel: right column, bottom aligned like the prototype (x 1546, y 962)
     let (aw, ah) = (356.0, 351.0);
-    let ui = spawn_ui_panel(&mut commands, &mut images, aw, ah, scale, -10);
+    let ui = spawn_ui_panel(&mut commands, &mut atlas, aw, ah);
     build_agents_ui(&mut commands, ui.root, &f, &agents, 0.0);
     let home = stage_to_world(1546.0 - aw / 2.0, 962.0 - ah / 2.0);
     spawn_panel_quad(
@@ -55,7 +49,7 @@ pub fn setup_panels(
     );
 
     // ---- Terminal panel: left column
-    let ui = spawn_ui_panel(&mut commands, &mut images, TERM_W, TERM_H, scale, -9);
+    let ui = spawn_ui_panel(&mut commands, &mut atlas, TERM_W, TERM_H);
     let tui = term::build_term_ui(&mut commands, ui.root, &f);
     commands.insert_resource(tui);
     // The look test's first tab (bash, the Sphere prompt, a git log) for screenshots and benches; your own
@@ -84,7 +78,7 @@ pub fn setup_panels(
 
     // ---- Clock: right column, top, right aligned (prototype x 1546, y 46), unframed
     let (cw, ch) = (356.0, 92.0);
-    let ui = spawn_ui_panel(&mut commands, &mut images, cw, ch, scale, -7);
+    let ui = spawn_ui_panel(&mut commands, &mut atlas, cw, ch);
     build_clock_ui(&mut commands, ui.root, &f);
     let home = stage_to_world(1546.0 - cw / 2.0, 46.0 + ch / 2.0);
     spawn_panel_quad(
@@ -96,7 +90,7 @@ pub fn setup_panels(
     );
 
     // ---- Agent moment card: centred over the core (prototype x 800, y 500, middle), in front of it
-    let ui = spawn_ui_panel(&mut commands, &mut images, crate::moment::CARD_W, crate::moment::CARD_H, scale, -6);
+    let ui = spawn_ui_panel(&mut commands, &mut atlas, crate::moment::CARD_W, crate::moment::CARD_H);
     commands.insert_resource(crate::moment::CardRoot(ui.root));
     let mut home = stage_to_world(800.0, 500.0);
     home.z = 230.0;
@@ -111,7 +105,7 @@ pub fn setup_panels(
 
     // ---- Core readout, riding on the sphere deck
     let (rw, rh) = (272.0, 96.0);
-    let ui = spawn_ui_panel(&mut commands, &mut images, rw, rh, scale, -8);
+    let ui = spawn_ui_panel(&mut commands, &mut atlas, rw, rh);
     build_readout_ui(&mut commands, ui.root, &f, &agents);
     let spec = PanelSpec { id: PanelId::Readout, w: rw, h: rh, home: Vec3::ZERO, home_scale: 1.0, side: 0.0, phase: 0.0, show_at: 0.0, unframed: true };
     let e = spawn_panel_quad(&mut commands, &mut meshes, &mut pmats, &ui, &spec);

@@ -121,9 +121,8 @@ fn body(c: &mut Commands, root: Entity, framed: bool) -> Entity {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn setup(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut images: ResMut<Assets<Image>>, mut pmats: ResMut<Assets<PanelMaterial>>, f: Res<UiFonts>, scale: Res<PanelScale>) {
+pub fn setup(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut atlas: ResMut<crate::panel::PanelAtlas>, mut pmats: ResMut<Assets<PanelMaterial>>, f: Res<UiFonts>) {
     let c = &mut commands;
-    let s = scale.0;
     let line = role_color(Role::Line);
     let hot = role_color(Role::Hot);
     let dim = role_color(Role::Dim);
@@ -131,7 +130,7 @@ pub fn setup(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut image
 
     // ---- brand: centre 800, top 20, 560 wide
     let (w, h) = (560.0, 52.0);
-    let ui = spawn_ui_panel(c, &mut images, w, h, s, -12);
+    let ui = spawn_ui_panel(c, &mut atlas, w, h);
     let b = c.spawn(Node { width: percent(100), height: percent(100), flex_direction: FlexDirection::Column, align_items: AlignItems::Center, row_gap: px(9), ..default() }).id();
     c.entity(ui.root).add_child(b);
     let wm = c.spawn(Node { flex_direction: FlexDirection::Row, align_items: AlignItems::Center, column_gap: px(14), padding: UiRect { left: px(14.3), ..default() }, ..default() }).id();
@@ -146,7 +145,7 @@ pub fn setup(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut image
 
     // ---- system: left 54, top 54, framed
     let (w, h) = (316.0, 212.0);
-    let ui = spawn_ui_panel(c, &mut images, w, h, s, -13);
+    let ui = spawn_ui_panel(c, &mut atlas, w, h);
     let b = body(c, ui.root, true);
     let hd = hdr(c, &f, "Sphere · System", &format!("v{}", env!("CARGO_PKG_VERSION")));
     c.entity(b).add_child(hd);
@@ -161,7 +160,7 @@ pub fn setup(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut image
 
     // ---- apps rolodex: left 60, middle 488, 226 wide
     let (w, h) = (226.0, 352.0);
-    let ui = spawn_ui_panel(c, &mut images, w, h, s, -14);
+    let ui = spawn_ui_panel(c, &mut atlas, w, h);
     let b = c.spawn(Node { width: percent(100), height: percent(100), flex_direction: FlexDirection::Column, row_gap: px(8), ..default() }).id();
     c.entity(ui.root).add_child(b);
     let hh = c.spawn((Text::new("APPS"), font(&f.ui600, 11.0, 4.62), TextColor(dim), LineHeight::Px(13.2), Node { margin: UiRect { left: px(14), ..default() }, ..default() })).id();
@@ -198,7 +197,7 @@ pub fn setup(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut image
 
     // ---- telemetry: left 54, bottom 962, framed
     let (w, h) = (316.0, 206.0);
-    let ui = spawn_ui_panel(c, &mut images, w, h, s, -15);
+    let ui = spawn_ui_panel(c, &mut atlas, w, h);
     let b = body(c, ui.root, true);
     let hd = hdr(c, &f, "Telemetry", "This machine");
     c.entity(b).add_child(hd);
@@ -222,7 +221,7 @@ pub fn setup(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut image
 
     // ---- rail: right 1546, top 236, "Next 24h" (no calendar source yet: an empty state)
     let (w, h) = (336.0, 120.0);
-    let ui = spawn_ui_panel(c, &mut images, w, h, s, -16);
+    let ui = spawn_ui_panel(c, &mut atlas, w, h);
     let b = c.spawn(Node { width: percent(100), height: percent(100), flex_direction: FlexDirection::Column, row_gap: px(8), align_items: AlignItems::FlexEnd, ..default() }).id();
     c.entity(ui.root).add_child(b);
     let rh = c.spawn((Text::new("NEXT 24H"), font(&f.ui600, 11.5, 4.6), TextColor(dim), LineHeight::Px(13.8), Node { margin: UiRect { right: px(52), ..default() }, ..default() })).id();
@@ -233,7 +232,7 @@ pub fn setup(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut image
 
     // ---- say: centre 800, top 886, 780 wide
     let (w, h) = (780.0, 96.0);
-    let ui = spawn_ui_panel(c, &mut images, w, h, s, -17);
+    let ui = spawn_ui_panel(c, &mut atlas, w, h);
     let b = c.spawn(Node { width: percent(100), height: percent(100), flex_direction: FlexDirection::Column, align_items: AlignItems::Center, justify_content: JustifyContent::Center, ..default() }).id();
     c.entity(ui.root).add_child(b);
     let t = c.spawn((SayText, Text::new(IDLE), font(&f.ui600, 12.0, 3.36), TextColor(dim), LineHeight::Px(16.0), TextLayout { justify: Justify::Center, ..default() })).id();

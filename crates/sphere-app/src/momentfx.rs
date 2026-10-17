@@ -67,9 +67,8 @@ pub fn setup(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut gmats: ResMut<Assets<GlowMaterial>>,
-    mut images: ResMut<Assets<Image>>,
+    mut atlas: ResMut<crate::panel::PanelAtlas>,
     mut pmats: ResMut<Assets<PanelMaterial>>,
-    scale: Res<PanelScale>,
     tilt: Query<Entity, With<CoreTilt>>,
 ) {
     let c = &mut commands;
@@ -108,7 +107,7 @@ pub fn setup(
     // satellites: small glass chips for the other waiting requests
     let mut roots = [Entity::PLACEHOLDER; SATS];
     for (i, r) in roots.iter_mut().enumerate() {
-        let ui = spawn_ui_panel(c, &mut images, SAT_W, SAT_H, scale.0, -60 - i as isize);
+        let ui = spawn_ui_panel(c, &mut atlas, SAT_W, SAT_H);
         let e = spawn_panel_quad(c, &mut meshes, &mut pmats, &ui, &PanelSpec { id: PanelId::Sat, w: SAT_W, h: SAT_H, home: Vec3::ZERO, home_scale: 1.0, side: 0.0, phase: 0.0, show_at: 0.0, unframed: true });
         c.entity(e).remove::<Panel>().insert((Sat(i), Visibility::Hidden));
         *r = ui.root;

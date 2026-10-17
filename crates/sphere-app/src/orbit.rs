@@ -138,10 +138,9 @@ pub fn setup(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut gmats: ResMut<Assets<GlowMaterial>>,
-    mut images: ResMut<Assets<Image>>,
+    mut atlas: ResMut<crate::panel::PanelAtlas>,
     mut pmats: ResMut<Assets<PanelMaterial>>,
     f: Res<UiFonts>,
-    scale: Res<PanelScale>,
     tilt: Query<Entity, With<CoreTilt>>,
     agents: Res<crate::core::Agents>,
     args: Res<crate::Args>,
@@ -198,7 +197,7 @@ pub fn setup(
     // the tiles and their beams
     let bm = meshes.add(beam_mesh());
     for (i, (name, live)) in APPS.iter().enumerate() {
-        let ui = spawn_ui_panel(c, &mut images, TILE_W, TILE_H, scale.0, -30 - i as isize);
+        let ui = spawn_ui_panel(c, &mut atlas, TILE_W, TILE_H);
         build_tile(c, ui.root, &f, i, name, *live, &agents);
         let e = spawn_panel_quad(c, &mut meshes, &mut pmats, &ui, &PanelSpec { id: PanelId::Tile, w: TILE_W, h: TILE_H, home: Vec3::ZERO, home_scale: 1.0, side: 0.0, phase: 0.0, show_at: 0.0, unframed: false });
         c.entity(e).remove::<Panel>().insert((Tile(i), Visibility::Hidden));
