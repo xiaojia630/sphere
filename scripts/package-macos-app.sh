@@ -5,11 +5,11 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
-cargo build --release -p sphere-app -p sphered -p sphere-host -p sphere-cli
+cargo build --profile dist -p sphere-app -p sphered -p sphere-host -p sphere-cli
 app=target/Sphere.app
 rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
-cp target/release/sphere-app target/release/sphered target/release/sphere-host target/release/sphere "$app/Contents/MacOS/"
+cp target/dist/sphere-app target/dist/sphered target/dist/sphere-host target/dist/sphere "$app/Contents/MacOS/"
 cat > "$app/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -32,7 +32,7 @@ cat > "$app/Contents/Info.plist" <<PLIST
 PLIST
 # the icon: the core, rendered offscreen and cropped square
 tmp=$(mktemp -d)
-target/release/sphere-app --shot "$tmp/core.png" --icon --frames 120 --size 1600x1000 >/dev/null 2>&1 || true
+target/dist/sphere-app --shot "$tmp/core.png" --icon --frames 120 --size 1600x1000 >/dev/null 2>&1 || true
 if [ -s "$tmp/core.png" ]; then
   sips -c 860 860 --cropOffset 8 370 "$tmp/core.png" --out "$tmp/sq.png" >/dev/null
   mkdir -p "$tmp/Sphere.iconset"

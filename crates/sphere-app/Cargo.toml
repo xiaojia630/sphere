@@ -11,9 +11,13 @@ name = "sphere-app"
 path = "src/main.rs"
 
 [dependencies]
+# Only what the app uses: no glTF, scenes, gizmos, animation or audio (sounds play through rodio on their own
+# thread), and X11 only on Linux.
 bevy = { version = "=0.20.0", default-features = false, features = [
-  "default_app", "3d_bevy_render", "ui_bevy_render", "scene", "std", "bevy_winit",
-  "default_font", "multi_threaded", "x11", "png", "smaa_luts",
+  "default_app", "std", "multi_threaded", "bevy_winit", "default_font", "png", "hdr", "smaa_luts", "zstd_rust",
+  "bevy_render", "bevy_core_pipeline", "bevy_anti_alias", "bevy_post_process", "bevy_pbr", "bevy_light",
+  "bevy_camera", "bevy_color", "bevy_image", "bevy_mesh", "bevy_shader", "bevy_material", "bevy_window",
+  "bevy_text", "bevy_ui", "bevy_ui_render", "bevy_input_focus",
 ] }
 portable-pty = "=0.9.0"
 alacritty_terminal = "=0.26.0"
@@ -26,6 +30,9 @@ sphere-host.workspace = true
 tokio.workspace = true
 serde_json.workspace = true
 libc.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+bevy = { version = "=0.20.0", default-features = false, features = ["x11"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 global-hotkey = "=0.9.0"

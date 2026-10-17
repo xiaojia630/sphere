@@ -46,3 +46,10 @@ opt-level = 3
 lto = false
 codegen-units = 16
 incremental = true
+# What ships (scripts/package-macos-app.sh): slower to build, smaller and faster to run.
+[profile.dist]
+inherits = "release"
+lto = "thin"
+codegen-units = 1
+incremental = false
+strip = true
