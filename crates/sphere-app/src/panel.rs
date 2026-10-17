@@ -101,7 +101,7 @@ impl PanelId {
         match self {
             PanelId::Agents => Some(Hue::Agents),
             PanelId::Clock => Some(Hue::Clock),
-            PanelId::Readout | PanelId::Moment | PanelId::Say => Some(Hue::Neutral),
+            PanelId::Readout | PanelId::Moment | PanelId::Say | PanelId::Sat => Some(Hue::Neutral),
             PanelId::System => Some(Hue::System),
             PanelId::Apps => Some(Hue::Apps),
             PanelId::Tele => Some(Hue::Tele),
@@ -155,6 +155,8 @@ pub enum PanelId {
     Work,
     /// a Working view step chip
     Chip,
+    /// an Agent moment satellite (a waiting request)
+    Sat,
 }
 
 #[derive(Component)]
@@ -171,6 +173,9 @@ pub struct Panel {
     pub draw_t: f32,
     /// a Working view panel: (how open the view is, how far forward the output is)
     pub work: Option<(f32, f32)>,
+    /// the Agent moment card: the last rise it played, and seconds since it rose
+    pub rise_seen: u64,
+    pub rise_t: f32,
     /// home position in world units (stage px mapped to world, z = 0 plane)
     pub home: Vec3,
     pub home_scale: f32,
@@ -321,6 +326,8 @@ pub fn spawn_panel_quad(
                 tilt: Vec2::ZERO,
                 draw_t: 0.0,
                 work: None,
+                rise_seen: 0,
+                rise_t: 9.0,
             },
         ))
         .id()
@@ -345,7 +352,7 @@ pub fn update_panels(
 ) {
     let (dt, t) = (sim.dt, sim.t);
     // the core fades back for the focused terminal, and partly for the Agent moment card so its text reads
-    let ft = if focus.terminal { 1.0 } else if moment.shown { 0.75 } else { 0.0 };
+    let ft = if focus.terminal { 1.0 } else if moment.shown { 0.5 } else { 0.0 };
     ctl.focus_amt += (ft - ctl.focus_amt) * (1.0 - (-6.0 * dt).exp());
     for (mut p, mut tr, mut vis) in &mut q {
         let depth = ctl.mode == Mode::Depth;
@@ -412,17 +419,42 @@ pub fn update_panels(
             tz -= 120.0;
         }
         if p.id == PanelId::Moment {
-            // the card: up while a request waits, flat and still so its text reads cleanly
-            top = if moment.shown && !focus.terminal { 1.0 } else { 0.0 };
+            // the card rises out of the core: it starts small, transparent and tipped at the core, on loose springs
+            if moment.rise_seq != p.rise_seen {
+                p.rise_seen = moment.rise_seq;
+                p.rise_t = 0.0;
+                p.sc.set(0.08);
+                p.op.set(0.0);
+                p.rx.set(-50.0 * DEG);
+                p.px.set(0.0);
+                p.py.set(CORE_Y);
+                p.pz.set(-140.0);
+            }
+            p.rise_t += dt;
+            let loose = p.rise_t < 1.5;
+            (p.sc.k, p.sc.c) = if loose { (105.0, 12.5) } else { (120.0, 19.0) };
+            (p.pz.k, p.pz.c) = if loose { (88.0, 13.0) } else { (60.0, 14.0) };
+            (p.op.k, p.op.c) = if loose { (80.0, 15.0) } else { (50.0, 13.0) };
+            (p.rx.k, p.rx.c) = if loose { (80.0, 12.5) } else { (90.0, 15.0) };
+            let up = (moment.shown || moment.holding.is_some()) && !focus.terminal;
+            top = if up { 1.0 } else { 0.0 };
+            // at rest it breathes
             tx = p.home.x;
-            ty = p.home.y;
-            tz = p.home.z + if moment.shown { 0.0 } else { -120.0 };
-            trx = 0.0;
+            ty = p.home.y + 2.4 * (0.9 * t).sin();
+            tz = p.home.z + 3.5 * (0.7 * t + 1.0).sin() + if up { 0.0 } else { -120.0 };
+            trx = 0.5 * DEG * (0.6 * t).sin();
             try_ = 0.0;
-        } else if moment.shown && !focus.terminal {
-            // other panels step back while the card is up
-            top *= 0.45;
-            tz -= 40.0;
+            // Later dims it into orbit: faint, then small and gone
+            if let Some(lt) = moment.later {
+                top = if lt < 0.2 { 0.26 } else { 0.0 };
+                tsc *= if lt < 0.2 { 1.0 } else { 0.09 };
+            }
+        } else if (moment.shown || moment.holding.is_some()) && !focus.terminal && !matches!(p.id, PanelId::Brand | PanelId::Say) {
+            // the HUD draws back while the card is up
+            let a = ctl.moment;
+            tx -= p.side * 200.0 * a;
+            tz -= 300.0 * a;
+            top *= 1.0 - 0.93 * a;
         }
         if focused_me {
             tx = 0.0;
@@ -467,6 +499,18 @@ pub fn update_panels(
         tr.translation = Vec3::new(p.px.x, p.py.x, p.pz.x);
         tr.rotation = Quat::from_euler(EulerRot::XYZ, p.rx.x, p.ry.x, 0.0);
         tr.scale = Vec3::splat(p.sc.x.max(0.001));
+        // Send folds the card to a line: height 1 → .014 (at 70 %) → .004 over .35 s from .55 s, then it's gone
+        if p.id == PanelId::Moment {
+            if let Some(ft) = moment.fold {
+                let k = clamp((ft - 0.55) / 0.35, 0.0, 1.0);
+                let e = bezier(0.6, 0.02, 0.72, 0.46, k);
+                let fy = if e < 0.7 { lerp(1.0, 0.014, e / 0.7) } else { lerp(0.014, 0.004, (e - 0.7) / 0.3) };
+                tr.scale.y *= fy;
+                if ft > 0.9 {
+                    p.op.set(0.0);
+                }
+            }
+        }
         let op = clamp(p.op.x, 0.0, 1.0);
         *vis = if op > 0.004 { Visibility::Inherited } else { Visibility::Hidden };
         // the frame draws in over 1.15 s, cubic-bezier(.65,.05,.25,1), once the panel shows (and each time the card rises)

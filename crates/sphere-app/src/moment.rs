@@ -33,6 +33,19 @@ pub struct Moment {
     answered: Vec<String>,
     /// Bumps when anything on the card changes.
     pub version: u64,
+    /// what the card shows now (for holding it when answered)
+    pub current: Option<(RequestView, String)>,
+    /// the answered card, kept on screen while it folds away (or dims into orbit)
+    pub holding: Option<(RequestView, String)>,
+    /// seconds since Send / Later, while it plays
+    pub fold: Option<f32>,
+    pub later: Option<f32>,
+    /// bumps each time a card rises (the panel restarts its rise from the core)
+    pub rise_seq: u64,
+    /// everything answered: the halo turns green, Sphere says so, then the view closes
+    pub all_done: Option<f32>,
+    /// the streak's start: the card was here when it folded
+    pub streak: Option<f32>,
 }
 
 /// The card's UI root (inside its panel texture).
@@ -56,10 +69,15 @@ pub fn update(live: Res<Live>, mut m: ResMut<Moment>, mut seen: Local<u64>, mut 
     let w: Vec<String> = waiting(&live, &m).iter().map(|r| r.info.id.clone()).collect();
     let fresh = w.iter().any(|id| !m.dismissed.contains(id));
     let shown = !w.is_empty() && (m.shown || fresh);
-    if shown != m.shown {
+    if shown != m.shown && m.holding.is_none() && m.all_done.is_none() {
         m.shown = shown;
-        sound.play(if shown { "open" } else { "close" });
-        if !shown {
+        if shown {
+            sound.play_with("whoosh", 0.7, 0.0);
+            sound.play_with("open", 0.8, 0.0);
+            sound.play_with("expand", 0.5, 0.0);
+            m.rise_seq += 1;
+        } else {
+            sound.play_with("collapse", 0.7, 0.0);
             m.editing = false;
             m.text.clear();
         }
@@ -148,6 +166,15 @@ pub fn keys(mut ev: MessageReader<KeyboardInput>, focus: Res<Focus>, mut m: ResM
 }
 
 fn answer(m: &mut Moment, svc: &Service, id: &str, kind: AnswerKind, text: Option<String>) {
+    // keep the answered card on screen while it folds (yes) or dims into orbit (later)
+    if kind != AnswerKind::Change {
+        m.holding = m.current.clone();
+        if kind == AnswerKind::Later {
+            m.later = Some(0.0);
+        } else {
+            m.fold = Some(0.0);
+        }
+    }
     m.answered.push(id.to_string());
     m.text.clear();
     m.editing = false;
@@ -254,16 +281,25 @@ fn waited(opened_at: &str) -> String {
 // ------------------------------------------------------------------ drawing
 
 /// Rebuilds the card's UI when the request, the selection or the typed text change.
-pub fn draw(mut commands: Commands, m: Res<Moment>, live: Res<Live>, root: Res<CardRoot>, f: Res<UiFonts>, mut seen: Local<u64>) {
+pub fn draw(mut commands: Commands, mut m: ResMut<Moment>, live: Res<Live>, root: Res<CardRoot>, f: Res<UiFonts>, mut seen: Local<u64>) {
     if *seen == m.version {
         return;
     }
     *seen = m.version;
     commands.entity(root.0).despawn_children();
+    // while folding, the answered card stays
+    if let Some((r, title)) = m.holding.clone() {
+        let body = build(&mut commands, &f, &r, &title, &m, 1);
+        commands.entity(root.0).add_child(body);
+        return;
+    }
     let w = waiting(&live, &m);
-    let Some(r) = w.get(m.index) else { return };
-    let body = build(&mut commands, &f, r, live.title(&r.info.task), &m, w.len());
+    let Some(r) = w.get(m.index).map(|r| (*r).clone()) else { return };
+    let title = live.title(&r.info.task).to_string();
+    let n = w.len();
+    let body = build(&mut commands, &f, &r, &title, &m, n);
     commands.entity(root.0).add_child(body);
+    m.bypass_change_detection().current = Some((r, title));
 }
 
 fn build(c: &mut Commands, f: &UiFonts, r: &RequestView, title: &str, m: &Moment, n: usize) -> Entity {

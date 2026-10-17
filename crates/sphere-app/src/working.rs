@@ -186,7 +186,7 @@ pub fn setup(
     let lm = meshes.add(line_mesh(vec![[0.0; 3], [1.0, 0.0, 0.0]], vec![1.0, 1.0]));
     let mut m = GlowMaterial::new(Kind::Line, crate::theme::now_lin(Role::Line), 0.9);
     m.u.a.y = 0.0;
-    let line = c.spawn((TrackLine, Mesh3d(lm), MeshMaterial3d(gmats.add(m)), Transform::default())).id();
+    let line = c.spawn((TrackLine, Mesh3d(lm), MeshMaterial3d(gmats.add(m)), Transform::default(), bevy::camera::visibility::NoFrustumCulling)).id();
     let mut g = crate::geo::Geo::new();
     crate::geo::ring(&mut g, 13.0, 2.2);
     crate::geo::ring(&mut g, 3.0, 6.0);

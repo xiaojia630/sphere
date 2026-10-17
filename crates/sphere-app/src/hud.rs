@@ -284,7 +284,7 @@ pub fn update_readout(
     q: Query<&MeshMaterial3d<PanelMaterial>, With<ReadoutLink>>,
 ) {
     let d = &decks.list[CORE];
-    let op = clamp(1.0 - ctl.focus_amt * 1.4, 0.0, 1.0) * clamp(d.u_reveal * 1.4, 0.0, 1.0) * (1.0 - ctl.orb);
+    let op = clamp(1.0 - ctl.focus_amt * 1.4, 0.0, 1.0) * clamp(d.u_reveal * 1.4, 0.0, 1.0) * (1.0 - ctl.orb) * (1.0 - ctl.moment);
     for h in &q {
         if mats.get(&h.0).is_some_and(|m| m.u.size.w != op) {
             if let Some(mut m) = mats.get_mut(&h.0) {

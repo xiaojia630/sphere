@@ -135,8 +135,18 @@ fn demo_request(live: &mut Live) {
         agent_request: None,
         revises: None,
     };
-    live.requests = vec![RequestView { info, status: sphere_proto::RequestStatus::Open, opened_at: "2026-10-16T17:52:00Z".into() }];
-    live.titles = vec![("t1".into(), "Fix flaky login test".into())];
+    let mut r2 = info.clone();
+    r2.id = "r2".into();
+    r2.task = "t2".into();
+    r2.tool = "Edit".into();
+    r2.summary = "Squash and merge the login fix into main".into();
+    let mut r3 = info.clone();
+    r3.id = "r3".into();
+    r3.task = "t3".into();
+    r3.summary = "minio stopped because its disk is full; clear old caches and restart it".into();
+    let rv = |i: sphere_proto::RequestInfo| RequestView { info: i, status: sphere_proto::RequestStatus::Open, opened_at: "2026-10-16T17:52:00Z".into() };
+    live.requests = vec![rv(info), rv(r2), rv(r3)];
+    live.titles = vec![("t1".into(), "Fix flaky login test".into()), ("t2".into(), "Merge the login fix".into()), ("t3".into(), "Restart minio".into())];
     live.version += 1;
 }
 

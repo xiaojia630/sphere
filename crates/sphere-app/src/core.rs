@@ -57,6 +57,10 @@ pub struct CoreCtl {
     pub work: f32,
     /// the core spins faster while an agent works
     pub work_spin: f32,
+    /// the Agent moment: the core draws back, 0..1
+    pub moment: f32,
+    /// the amber flare when a request rises (decays)
+    pub flare: f32,
 }
 
 impl CoreCtl {
@@ -82,6 +86,8 @@ impl CoreCtl {
             orb: 0.0,
             work: 0.0,
             work_spin: 1.0,
+            moment: 0.0,
+            flare: 0.0,
         };
         if intro {
             c.spacing.set(165.0);
@@ -821,11 +827,15 @@ pub fn update_core(
     if ctl.work > 0.001 {
         tgt = tgt.slerp(Quat::from_euler(EulerRot::YXZ, 24.0 * DEG, -4.0 * DEG, 0.0), ctl.work);
     }
+    // the Agent moment tilts it back 14°
+    if ctl.moment > 0.001 {
+        tgt = tgt.slerp(Quat::from_rotation_x(-14.0 * DEG), ctl.moment);
+    }
     // where the core sits: up a little when open, aside and smaller in the Working view
     if let Ok(mut tr) = tfs.get_mut(decks.root) {
         let w = ctl.work;
-        tr.translation = Vec3::new(-260.0 * w, CORE_Y - 26.0 * ctl.orb - 192.0 * w, 0.0);
-        tr.scale = Vec3::splat(lerp(1.0, 0.52, w));
+        tr.translation = Vec3::new(-260.0 * w, CORE_Y - 26.0 * ctl.orb - 192.0 * w, -140.0 * ctl.moment);
+        tr.scale = Vec3::splat(lerp(1.0, 0.52, w) * lerp(1.0, 0.82, ctl.moment));
     }
     let k = 1.0 - (-3.2 * dt).exp();
     if ctl.auto_orient {
@@ -955,7 +965,7 @@ pub fn update_core(
         };
         d.u_depth = (ctl.depth.x + d.hi.x * 8.0 + if i == VOICE { voice_lvl * 30.0 } else { 0.0 }).max(0.0);
         d.u_hi = d.hi.x * 0.9 + flash;
-        d.u_fade = (1.0 - ctl.focus_amt * d.focus_fade) * (1.0 - if i == CORE { 0.1 } else { 0.38 } * ctl.orb) * (1.0 - smooth(0.3, 0.93, c)) * (1.0 - 0.35 * clamp(c, 0.0, 1.0)) * (1.0 - smooth(0.06, 0.7, d.u_pinch));
+        d.u_fade = (1.0 - ctl.focus_amt * d.focus_fade) * (1.0 - if i == CORE { 0.1 } else { 0.38 } * ctl.orb) * (1.0 - 0.14 * ctl.moment) * (1.0 - smooth(0.3, 0.93, c)) * (1.0 - 0.35 * clamp(c, 0.0, 1.0)) * (1.0 - smooth(0.06, 0.7, d.u_pinch));
         d.u_reveal = out_cubic((boot - 0.15 - d.reveal_at) / 0.9);
     }
     // the sphere grows a little in Orbit, and breathes while the stack is collapsed
@@ -1055,6 +1065,11 @@ pub fn update_materials(
         }
         let mut u = cur.u;
         u.color = crate::theme::deck_lin(info.deck, info.role);
+        // the Agent moment's amber flare pulls the core's own colours toward amber
+        if info.deck == CORE && ctl.flare > 0.01 && matches!(info.role, Role::Hot | Role::Fill | Role::Line) {
+            let w = (0.85 * ctl.flare).min(0.85) * if info.role == Role::Line { 0.55 } else { 1.0 };
+            u.color = u.color.lerp(crate::theme::now_lin(Role::Acc), w);
+        }
         u.c2 = crate::theme::deck_b2_lin(info.deck);
         u.a = Vec4::new(alpha, info.wall, d.u_reveal, d.u_hi);
         u.b = Vec4::new(d.u_fade, d.u_depth, 0.0, d.u_pinch);

@@ -11,6 +11,7 @@ mod glow;
 mod hud;
 mod live;
 mod moment;
+mod momentfx;
 mod mouse;
 mod orbit;
 mod panel;
@@ -141,8 +142,9 @@ fn main() {
         .init_resource::<mouse::MouseState>()
         .init_resource::<apps::Open>()
         .init_resource::<working::Working>()
+        .init_resource::<momentfx::MomentFx>()
         .init_resource::<hud::FrameStats>()
-        .add_systems(Startup, (sound::setup, setup_core, setup_cameras, hud::setup_panels, hud::setup_backdrop, hud::setup_overlay, cmdbar::setup, visor::setup, fx::setup, homepanels::setup, orbit::setup, working::setup, mouse::setup, mouse::setup_reticle).chain())
+        .add_systems(Startup, (sound::setup, setup_core, setup_cameras, hud::setup_panels, hud::setup_backdrop, hud::setup_overlay, cmdbar::setup, visor::setup, fx::setup, homepanels::setup, orbit::setup, working::setup, momentfx::setup, mouse::setup, mouse::setup_reticle).chain())
         .add_systems(First, (tick_sim, theme::animate))
         .add_systems(
             Update,
@@ -150,8 +152,8 @@ fn main() {
                 (keys, stage_view, camera_rig, update_core, spin_system, update_materials, panel::update_panels, hud::update_readout, hud::update_backdrop)
                     .chain(),
                 (live::sync, live::transitions, moment::update, summon::notify, live::tick_toasts, panel::rebuild_agents_ui, hud::update_readout_text, hud::update_clock, panel::blink_system, homepanels::update, homepanels::draw_rolodex, homepanels::draw_say).chain(),
-                (term::pump, cmdbar::keys, moment::keys, term::read_keys, home::keys, orbit::keys, working::keys, visor::buttons, mouse::update, home::apply, apps::apply).chain(),
-                (working::update, working::place_panels, working::draw).chain(),
+                (term::pump, cmdbar::keys, moment::keys, term::read_keys, home::keys, orbit::keys, working::keys, momentfx::keys, visor::buttons, mouse::update, home::apply, apps::apply).chain(),
+                (working::update, working::place_panels, working::draw, momentfx::flows, momentfx::draw, momentfx::draw_sats).chain(),
                 (orbit::update, mouse::draw_reticle, visor::draw_buttons, visor::ticker, visor::toasts, home::landed_sound, home::step_view, fx::update, term::draw, cmdbar::draw, moment::draw).chain(),
                 (hud::frame_stats, hud::bench, hud::shot).chain(),
             )
@@ -300,7 +302,7 @@ fn theme_bloom(theme: Res<theme::Theme>, ctl: Res<CoreCtl>, mut q: Query<&mut be
         return;
     }
     // core open dims the bloom by a third
-    let i = 0.22 * theme::bloom() / 0.6 * (1.0 - 0.32 * ctl.orb);
+    let i = 0.22 * (theme::bloom() + 0.5 * ctl.flare) / 0.6 * (1.0 - 0.32 * ctl.orb);
     for mut b in &mut q {
         if (b.intensity - i).abs() > 1e-4 {
             b.intensity = i;

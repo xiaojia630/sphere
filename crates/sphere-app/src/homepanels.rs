@@ -232,13 +232,13 @@ pub fn setup(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut image
     spawn_panel_quad(c, &mut meshes, &mut pmats, &ui, &PanelSpec { id: PanelId::Rail, w, h, home: anchor('r', 1546.0, 't', 236.0, w, h), home_scale: 1.0, side: -1.0, phase: 0.2, show_at: show_at(5), unframed: true });
 
     // ---- say: centre 800, top 886, 780 wide
-    let (w, h) = (780.0, 64.0);
+    let (w, h) = (780.0, 96.0);
     let ui = spawn_ui_panel(c, &mut images, w, h, s, -17);
     let b = c.spawn(Node { width: percent(100), height: percent(100), flex_direction: FlexDirection::Column, align_items: AlignItems::Center, justify_content: JustifyContent::Center, ..default() }).id();
     c.entity(ui.root).add_child(b);
     let t = c.spawn((SayText, Text::new(IDLE), font(&f.ui600, 12.0, 3.36), TextColor(dim), LineHeight::Px(16.0), TextLayout { justify: Justify::Center, ..default() })).id();
     c.entity(b).add_child(t);
-    spawn_panel_quad(c, &mut meshes, &mut pmats, &ui, &PanelSpec { id: PanelId::Say, w, h, home: anchor('c', 800.0, 't', 886.0, w, h), home_scale: 1.0, side: 0.0, phase: 6.1, show_at: show_at(7), unframed: true });
+    spawn_panel_quad(c, &mut meshes, &mut pmats, &ui, &PanelSpec { id: PanelId::Say, w, h, home: anchor('c', 800.0, 't', 858.0, w, h), home_scale: 1.0, side: 0.0, phase: 6.1, show_at: show_at(7), unframed: true });
 
     c.init_resource::<Rolodex>();
     c.init_resource::<Say>();
@@ -338,7 +338,7 @@ pub fn draw_rolodex(
 }
 
 /// Types Sphere's words into the Say line at 30 ms a character; back to the idle hint after 9 s.
-pub fn draw_say(time: Res<Time<Real>>, mut say: ResMut<Say>, mut q: Query<(&mut Text, &mut TextColor, &mut TextFont), With<SayText>>) {
+pub fn draw_say(time: Res<Time<Real>>, mut say: ResMut<Say>, mut q: Query<(&mut Text, &mut TextColor, &mut TextFont, &mut LineHeight, &mut bevy::text::LetterSpacing), With<SayText>>) {
     let dt = time.delta_secs();
     let mut changed = false;
     if !say.text.is_empty() {
@@ -358,15 +358,21 @@ pub fn draw_say(time: Res<Time<Real>>, mut say: ResMut<Say>, mut q: Query<(&mut 
     if !changed && !say.is_changed() {
         return;
     }
-    for (mut t, mut c, mut f) in &mut q {
+    for (mut t, mut c, mut f, mut lh, mut ls) in &mut q {
         if say.text.is_empty() {
             t.0 = IDLE.into();
             c.0 = role_color(Role::Dim);
             f.font_size = FontSize::Px(12.0);
+            *lh = LineHeight::Px(16.0);
+            *ls = bevy::text::LetterSpacing::Px(3.36);
         } else {
             t.0 = say.text.chars().take(say.shown).collect();
             c.0 = role_color(Role::Hot);
-            f.font_size = FontSize::Px(23.0);
+            // long lines read smaller
+            let size = if say.text.chars().count() > 70 { 19.0 } else { 23.0 };
+            f.font_size = FontSize::Px(size);
+            *lh = LineHeight::Px(size * 1.35);
+            *ls = bevy::text::LetterSpacing::Px(size * 0.02);
         }
     }
 }
