@@ -2,9 +2,12 @@
 //! (assets/sounds/README.md) and embedded in the binary. Any system calls `Sound::play` (or `play_q`, which
 //! stays quiet when another sound just played); `flush` starts them. M mutes (saved); muting also stops speech.
 //! Speech goes through macOS `say` with the voice the prototype picks on a Mac (Daniel, en-GB).
-use bevy::audio::{AudioPlayer, AudioSource, PlaybackSettings, Volume};
+//!
+//! Playback runs on its own thread: it opens the audio device and decodes the sounds once, after the window is up,
+//! so neither delays the first frame nor costs the frame a sound plays in.
 use bevy::prelude::*;
 use std::process::{Child, Command, Stdio};
+use std::sync::mpsc;
 use std::time::Instant;
 
 macro_rules! sounds {
@@ -17,7 +20,7 @@ sounds!(hover, tick, click, toggle, progress, toast, open, close, whoosh, collap
 
 #[derive(Resource)]
 pub struct Sound {
-    handles: Vec<Handle<AudioSource>>,
+    tx: Option<mpsc::Sender<(usize, f32, f32)>>,
     queue: Vec<(usize, f32, f32)>,
     last: Vec<Option<Instant>>,
     any_last: Option<Instant>,
@@ -143,11 +146,36 @@ fn save_muted(m: bool) {
     let _ = std::fs::write(f, if m { "1" } else { "0" });
 }
 
-pub fn setup(mut commands: Commands, mut sources: ResMut<Assets<AudioSource>>, args: Res<crate::Args>) {
-    let handles = DATA.iter().map(|b| sources.add(AudioSource { bytes: (*b).into() })).collect();
+/// The playback thread: decoded sounds, mixed into the default output device.
+fn start_audio() -> mpsc::Sender<(usize, f32, f32)> {
+    let (tx, rx) = mpsc::channel::<(usize, f32, f32)>();
+    let _ = std::thread::Builder::new().name("sphere-audio".into()).spawn(move || {
+        use rodio::Source;
+        let Ok(mut sink) = rodio::DeviceSinkBuilder::open_default_sink() else { return };
+        sink.log_on_drop(false);
+        let decoded: Vec<Option<(u16, u32, Vec<f32>)>> = DATA.iter().map(|b| decode(b)).collect();
+        while let Ok((i, gain, pitch)) = rx.recv() {
+            let Some((ch, rate, data)) = &decoded[i] else { continue };
+            let (Some(ch), Some(rate)) = (std::num::NonZero::new(*ch), std::num::NonZero::new(*rate)) else { continue };
+            let src = rodio::buffer::SamplesBuffer::new(ch, rate, data.clone()).speed(2f32.powf(pitch / 12.0)).amplify(gain);
+            sink.mixer().add(src);
+        }
+    });
+    tx
+}
+
+/// 16-bit PCM WAV to interleaved f32 samples.
+fn decode(bytes: &[u8]) -> Option<(u16, u32, Vec<f32>)> {
+    let r = hound::WavReader::new(std::io::Cursor::new(bytes)).ok()?;
+    let spec = r.spec();
+    let data = r.into_samples::<i16>().filter_map(Result::ok).map(|v| v as f32 / 32768.0).collect();
+    Some((spec.channels, spec.sample_rate, data))
+}
+
+pub fn setup(mut commands: Commands, args: Res<crate::Args>) {
     let muted = std::fs::read_to_string(muted_file()).map(|s| s.trim() == "1").unwrap_or(false);
     commands.insert_resource(Sound {
-        handles,
+        tx: if args.offline() { None } else { Some(start_audio()) },
         queue: Vec::new(),
         last: vec![None; NAMES.len()],
         any_last: None,
@@ -157,8 +185,8 @@ pub fn setup(mut commands: Commands, mut sources: ResMut<Assets<AudioSource>>, a
     });
 }
 
-/// Starts the queued sounds (one self-despawning player each).
-pub fn flush(mut commands: Commands, mut s: ResMut<Sound>) {
+/// Hands the queued sounds to the playback thread.
+pub fn flush(mut s: ResMut<Sound>) {
     if s.queue.is_empty() {
         return;
     }
@@ -166,9 +194,10 @@ pub fn flush(mut commands: Commands, mut s: ResMut<Sound>) {
     if s.muted || s.off {
         return;
     }
-    for (i, gain, pitch) in q {
-        let settings = PlaybackSettings { speed: 2f32.powf(pitch / 12.0), ..PlaybackSettings::DESPAWN }.with_volume(Volume::Linear(gain));
-        commands.spawn((AudioPlayer(s.handles[i].clone()), settings));
+    if let Some(tx) = &s.tx {
+        for item in q {
+            let _ = tx.send(item);
+        }
     }
 }
 
@@ -186,5 +215,6 @@ mod tests {
     fn every_sound_is_embedded() {
         assert_eq!(NAMES.len(), 22);
         assert!(DATA.iter().all(|d| d.len() > 1000 && &d[0..4] == b"RIFF"));
+        assert!(DATA.iter().all(|d| decode(d).is_some_and(|(c, r, v)| c > 0 && r > 0 && !v.is_empty())));
     }
 }

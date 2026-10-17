@@ -37,6 +37,70 @@ pub fn install(app: &mut App) {
 #[cfg(not(target_os = "macos"))]
 pub fn install(_app: &mut App) {}
 
+/// Sphere stays resident: closing the window (the close button) hides it instead of quitting, and Cmd+Q quits.
+/// While it is hidden or fully covered nothing draws: every camera is off (their view textures are freed after a
+/// few frames) and the loop wakes only for events and twice a second for live updates. It shows again in one
+/// frame. Visible, it runs at full rate even when another app has focus (Bevy's default caps that at 60 Hz).
+pub fn residency(
+    mut occluded: MessageReader<bevy::window::WindowOccluded>,
+    mut closes: MessageReader<bevy::window::WindowCloseRequested>,
+    mut cams: Query<&mut Camera>,
+    mut ws: ResMut<bevy::winit::WinitSettings>,
+    mut hidden: Local<bool>,
+    mut exit: MessageWriter<AppExit>,
+    args: Res<crate::Args>,
+) {
+    use bevy::winit::UpdateMode;
+    if closes.read().count() > 0 {
+        if cfg!(target_os = "macos") && args.bench.is_none() {
+            hide();
+        } else {
+            exit.write(AppExit::Success);
+        }
+    }
+    let mut now = *hidden;
+    for e in occluded.read() {
+        // a bench measures drawing, covered or not
+        now = e.occluded && args.bench.is_none();
+    }
+    if now != *hidden {
+        *hidden = now;
+        if now {
+            let idle = UpdateMode::reactive_low_power(std::time::Duration::from_millis(500));
+            *ws = bevy::winit::WinitSettings { focused_mode: idle, unfocused_mode: idle };
+        } else {
+            // everything draws once (panels that changed while hidden catch up); the panel gate trims it next frame
+            for mut c in &mut cams {
+                c.is_active = true;
+            }
+            *ws = visible_settings();
+        }
+    }
+    if *hidden {
+        for mut c in &mut cams {
+            if c.is_active {
+                c.is_active = false;
+            }
+        }
+    }
+}
+
+pub fn visible_settings() -> bevy::winit::WinitSettings {
+    bevy::winit::WinitSettings { focused_mode: bevy::winit::UpdateMode::Continuous, unfocused_mode: bevy::winit::UpdateMode::Continuous }
+}
+
+#[cfg(target_os = "macos")]
+fn hide() {
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::NSApplication;
+    if let Some(mtm) = MainThreadMarker::new() {
+        NSApplication::sharedApplication(mtm).hide(None);
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn hide() {}
+
 #[cfg(target_os = "macos")]
 fn toggle() {
     use objc2::MainThreadMarker;

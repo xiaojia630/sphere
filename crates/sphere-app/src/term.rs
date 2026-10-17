@@ -127,9 +127,29 @@ pub struct Terms {
     pub version: u64,
     /// The first tab's look-test setup (bash with the Sphere prompt) for `--shot`, `--bench` and `--demo`.
     pub demo: bool,
+    /// Tabs being connected off the main thread at start (sphere-host may need starting); shown as connecting.
+    pub pending: Option<Mutex<mpsc::Receiver<Vec<Terminal>>>>,
 }
 
 impl Terms {
+    /// Connects your tabs in the background: the ones still alive in sphere-host from the last run, or a new
+    /// shell (running `first` when given). The first frame doesn't wait for the host.
+    pub fn connect(&mut self, first: Option<String>) {
+        let (tx, rx) = mpsc::channel();
+        self.pending = Some(Mutex::new(rx));
+        let _ = std::thread::Builder::new().name("sphere-terms-connect".into()).spawn(move || {
+            let mut tabs: Vec<Terminal> = crate::stats::timed("hostterm::running (connect/start sphere-host)", crate::hostterm::running).iter().filter_map(|ch| Terminal::host(Some(ch))).collect();
+            if tabs.is_empty() {
+                let t = Terminal::host(None).or_else(|| Terminal::spawn(None, false).map_err(|e| eprintln!("could not start a terminal: {e}")).ok());
+                if let (Some(cmd), Some(t)) = (first.as_deref(), t.as_ref()) {
+                    t.send(format!("{cmd}\n").as_bytes());
+                }
+                tabs.extend(t);
+            }
+            let _ = tx.send(tabs);
+        });
+    }
+
     pub fn active(&self) -> Option<&Terminal> {
         self.tabs.get(self.active)
     }
@@ -289,6 +309,12 @@ impl Terminal {
 
 /// Drain every tab's PTY output into its VT state; close tabs whose shell exited.
 pub fn pump(mut terms: ResMut<Terms>) {
+    let got = terms.pending.as_ref().and_then(|p| p.lock().ok()?.try_recv().ok());
+    if let Some(tabs) = got {
+        terms.pending = None;
+        terms.tabs.extend(tabs);
+        terms.version += 1;
+    }
     for t in terms.tabs.iter_mut() {
         pump_one(t);
     }
@@ -303,10 +329,13 @@ fn pump_one(t: &mut Terminal) {
     {
         let mut guard = t.inner.lock().unwrap();
         let i = &mut *guard;
-        loop {
+        // a re-attached tab replays up to 1 MB: parse it over a few frames rather than in one
+        let mut budget: usize = 256 * 1024;
+        while budget > 0 {
             match i.rx.try_recv() {
                 Ok(b) => {
                     i.parser.advance(&mut i.term, &b);
+                    budget = budget.saturating_sub(b.len());
                     got = true;
                 }
                 Err(mpsc::TryRecvError::Empty) => break,
@@ -646,7 +675,9 @@ pub fn app_cursor(t: &Terminal) -> bool {
 /// The header's right side: the active tab and how many there are.
 fn tabs_label(terms: &Terms) -> String {
     let name = terms.active().map(|t| t.name.to_uppercase()).unwrap_or_default();
-    if terms.tabs.len() > 1 {
+    if terms.tabs.is_empty() && terms.pending.is_some() {
+        "CONNECTING…".to_string()
+    } else if terms.tabs.len() > 1 {
         format!("{name} · TAB {} / {}", terms.active + 1, terms.tabs.len())
     } else if terms.demo {
         "BASH · LIVE PTY".to_string()

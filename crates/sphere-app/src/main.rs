@@ -22,6 +22,7 @@ mod sound;
 mod summon;
 mod sysstats;
 mod theme;
+mod stats;
 mod term;
 mod util;
 mod visor;
@@ -134,6 +135,7 @@ pub struct CamCore;
 pub struct CamPanels;
 
 fn main() {
+    stats::mark_start();
     let args = parse_args();
     interactive_qos();
     let mut app = App::new();
@@ -189,6 +191,10 @@ fn main() {
             r.add_systems(bevy::render::Render, wait_for_gpu.after(bevy::render::RenderSystems::Render));
         }
     }
+    app.add_systems(Last, stats::report);
+    if !args.headless() {
+        app.insert_resource(summon::visible_settings()).add_systems(Last, summon::residency.after(panel::gate_panel_cameras));
+    }
     if let Some(r) = app.get_sub_app_mut(bevy::render::RenderApp) {
         r.add_systems(bevy::render::Render, render_thread_qos);
     }
@@ -212,6 +218,7 @@ fn default_plugins(args: &Args) -> impl PluginGroup {
                 mode: if std::env::var("SPHERE_FS").is_ok() { bevy::window::WindowMode::BorderlessFullscreen(bevy::window::MonitorSelection::Primary) } else { bevy::window::WindowMode::Windowed },
                 ..default()
             }),
+            close_when_requested: false,
             ..default()
         })
     }

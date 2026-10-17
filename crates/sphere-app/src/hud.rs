@@ -65,18 +65,7 @@ pub fn setup_panels(
     let first = if demo { Some(args.cmd.clone().unwrap_or_else(|| default_cmd.to_string())) } else { args.cmd.clone() };
     let mut terms = Terms { demo, ..default() };
     if !demo {
-        // your tabs from the last run, still alive in sphere-host
-        for ch in crate::hostterm::running() {
-            if let Some(t) = Terminal::host(Some(&ch)) {
-                terms.tabs.push(t);
-            }
-        }
-        if terms.tabs.is_empty() {
-            terms.open_tab();
-            if let (Some(cmd), Some(t)) = (first.as_deref(), terms.tabs.first()) {
-                t.send(format!("{cmd}\n").as_bytes());
-            }
-        }
+        terms.connect(first);
     } else {
         match Terminal::spawn(first.as_deref(), demo) {
             Ok(t) => terms.tabs.push(t),
@@ -429,6 +418,9 @@ pub fn frame_stats(time: Res<Time<Real>>, sim: Res<Sim>, mut st: ResMut<FrameSta
     }
     let ms = time.delta_secs() * 1000.0;
     st.frames += 1;
+    if ms > 50.0 && crate::stats::on() {
+        eprintln!("stats: long frame {ms:.0} ms (frame {}) at {:.0} ms", st.frames, crate::stats::ms());
+    }
     if st.frames > 20 {
         st.recent.push(ms);
         if st.recent.len() > 300 {
