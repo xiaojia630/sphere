@@ -140,6 +140,51 @@ fn demo_request(live: &mut Live) {
     live.version += 1;
 }
 
+/// When an agent finishes or fails: a toast, the sound, and (finished) Sphere says so, like the prototype's end.
+pub fn transitions(
+    svc: Res<Service>,
+    args: Res<crate::Args>,
+    mut seen: Local<Option<std::collections::HashMap<String, TaskState>>>,
+    mut toasts: ResMut<Toasts>,
+    mut sound: ResMut<crate::sound::Sound>,
+    mut say: ResMut<crate::homepanels::Say>,
+    mut fx: ResMut<crate::fx::Fx>,
+) {
+    if args.offline() {
+        return;
+    }
+    let s = svc.shared.lock().unwrap();
+    let now: std::collections::HashMap<String, TaskState> = s.tasks.iter().map(|t| (t.id.clone(), t.state)).collect();
+    let Some(prev) = seen.as_ref() else {
+        // what was already finished when the app started isn't news
+        *seen = Some(now);
+        return;
+    };
+    for t in &s.tasks {
+        let before = prev.get(&t.id).copied();
+        if before == Some(t.state) {
+            continue;
+        }
+        match t.state {
+            TaskState::Done if before.is_some() => {
+                toasts.push_quiet(format!("{} is done", t.title));
+                sound.play("done");
+                fx.shock(crate::util::Role::Ok);
+                let words = format!("Done. {} is finished.", t.title);
+                sound.speak(&words);
+                say.say(words);
+            }
+            TaskState::Failed if before.is_some() => {
+                toasts.push_quiet(format!("{} failed", t.title));
+                sound.play_with("error", 0.6, 0.0);
+            }
+            _ => {}
+        }
+    }
+    drop(s);
+    *seen = Some(now);
+}
+
 pub fn tick_toasts(time: Res<Time<Real>>, mut toasts: ResMut<Toasts>, mut sound: ResMut<crate::sound::Sound>) {
     if toasts.pending_sound {
         toasts.pending_sound = false;

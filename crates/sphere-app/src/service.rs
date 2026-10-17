@@ -29,12 +29,72 @@ pub struct Shared {
     pub notes: Vec<String>,
     /// how long the last snapshot took to come back
     pub rtt_ms: Option<f32>,
+    /// each task's run as the Working view shows it: steps, what it said, files
+    pub runs: std::collections::HashMap<String, Run>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct RunStep {
+    pub id: String,
+    pub kind: sphere_proto::StepKind,
+    pub tool: String,
+    pub title: String,
+    pub detail: String,
+    /// None while running
+    pub ok: Option<bool>,
+    pub output: String,
+    pub at: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Run {
+    pub steps: Vec<RunStep>,
+    /// what the agent said, oldest first
+    pub says: Vec<String>,
+    pub files: Vec<sphere_proto::FileStat>,
+    pub version: u64,
+}
+
+impl Run {
+    /// Folds one event into the run.
+    pub fn apply(&mut self, ev: &sphere_proto::Event) {
+        use sphere_proto::EventBody as B;
+        match &ev.body {
+            B::Step { id, step_kind, tool, title, detail, .. } => {
+                self.steps.push(RunStep { id: id.clone(), kind: *step_kind, tool: tool.clone(), title: title.clone(), detail: detail.clone(), ok: None, output: String::new(), at: ev.at.clone() });
+            }
+            B::StepDone { id, ok, output } => {
+                if let Some(s) = self.steps.iter_mut().rev().find(|s| &s.id == id) {
+                    s.ok = Some(*ok);
+                    if let Some(o) = output {
+                        s.output = match &o.tail {
+                            Some(t) => format!("{}\n…\n{}", o.head, t),
+                            None => o.head.clone(),
+                        };
+                    }
+                }
+            }
+            B::Say { text } => self.says.push(text.clone()),
+            B::FilesTouched { files } => self.files = files.clone(),
+            _ => return,
+        }
+        // keep it bounded
+        if self.steps.len() > 400 {
+            self.steps.drain(..100);
+        }
+        if self.says.len() > 50 {
+            self.says.drain(..10);
+        }
+        self.version += 1;
+    }
 }
 
 pub enum Cmd {
     Start { repo: String, prompt: String },
     Answer { request: String, answer: AnswerKind, text: Option<String> },
     Send { task: String, text: String },
+    Interrupt { task: String },
+    Stop { task: String },
 }
 
 #[derive(Resource, Clone)]
@@ -163,6 +223,22 @@ async fn session(sh: &Arc<Mutex<Shared>>, c: &Client, rx: &mut mpsc::UnboundedRe
     c.hello(ClientKind::App).await.map_err(|e| e.to_string())?;
     let snap = c.snapshot().await.map_err(|e| e.to_string())?;
     let seq = snap.seq;
+    // backfill the runs of the most recent tasks up to the snapshot, then the subscription carries on
+    let mut recent: Vec<&TaskView> = snap.tasks.iter().collect();
+    recent.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    let ids: Vec<String> = recent.iter().take(8).map(|t| t.id.clone()).collect();
+    let mut runs = std::collections::HashMap::new();
+    for id in ids {
+        let p = sphere_client::HistoryParams { task: Some(id.clone()), before: Some(seq + 1), limit: Some(2000) };
+        if let Ok(evs) = c.history(p).await {
+            let mut r = Run::default();
+            for e in &evs {
+                r.apply(e);
+            }
+            runs.insert(id, r);
+        }
+    }
+    sh.lock().unwrap().runs = runs;
     apply(sh, snap);
     let (_, mut sub) = c.subscribe(seq, None).await.map_err(|e| e.to_string())?;
     set_link(sh, Link::Connected);
@@ -172,7 +248,12 @@ async fn session(sh: &Arc<Mutex<Shared>>, c: &Client, rx: &mut mpsc::UnboundedRe
     loop {
         tokio::select! {
             u = sub.next() => match u {
-                Some(Update::Event(_)) => dirty = true,
+                Some(Update::Event(ev)) => {
+                    dirty = true;
+                    let mut s = sh.lock().unwrap();
+                    s.runs.entry(ev.task.clone()).or_default().apply(&ev);
+                    s.version += 1;
+                }
                 Some(Update::Live(_)) => {}
                 Some(Update::Lagged(e)) => return Err(format!("resyncing: {}", e.message)),
                 Some(Update::Closed) | None => return Err("sphered closed the connection".into()),
@@ -232,5 +313,7 @@ async fn command(c: &Client, cmd: Cmd) -> Result<(), String> {
             }
         }
         Cmd::Send { task, text } => c.send(&task, &text).await.map_err(|e| format!("could not send: {e}")),
+        Cmd::Interrupt { task } => c.interrupt(&task).await.map_err(|e| format!("could not interrupt: {e}")),
+        Cmd::Stop { task } => c.stop(&task).await.map_err(|e| format!("could not stop: {e}")),
     }
 }

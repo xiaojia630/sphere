@@ -2,7 +2,7 @@
 //! rise on light beams onto a spinnable orbit. A, the dock's Apps button, typing "apps", or holding the sphere
 //! opens it; Esc, A, or a click on the sphere closes it. ← → (or the wheel, or a drag) spin it; Enter or a
 //! click opens the front app. Terminal and Agents open their real panels; the rest come later.
-use crate::core::{CoreCtl, CoreRoot, CoreTilt, CORE_Y};
+use crate::core::{CoreCtl, CoreTilt};
 use crate::fonts::UiFonts;
 use crate::geo::*;
 use crate::glow::{GlowMaterial, Kind, ATTR_HOLO};
@@ -268,7 +268,6 @@ pub fn update(
         Query<&mut Visibility, With<OrbMarker>>,
         Query<(&Tile, &mut Transform, &mut Visibility, &MeshMaterial3d<PanelMaterial>)>,
         Query<(&Beam, &mut Transform, &mut Visibility, &MeshMaterial3d<GlowMaterial>)>,
-        Query<&mut Transform, With<CoreRoot>>,
     )>,
     tilt: Query<&GlobalTransform, With<CoreTilt>>,
     cam: Query<&GlobalTransform, With<crate::CamCore>>,
@@ -320,10 +319,6 @@ pub fn update(
                 open.app(i, &mut toasts);
             }
         }
-    }
-    // the core rises a little (stage y + 26 is world y - 26)
-    for mut tr in &mut sets.p4() {
-        tr.translation.y = CORE_Y - 26.0 * amt;
     }
     let vis = if amt > 0.002 { Visibility::Inherited } else { Visibility::Hidden };
     let a = orb.a.x;

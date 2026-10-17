@@ -106,6 +106,7 @@ impl PanelId {
             PanelId::Apps => Some(Hue::Apps),
             PanelId::Tele => Some(Hue::Tele),
             PanelId::Rail => Some(Hue::Rail),
+            PanelId::Work | PanelId::Chip => Some(Hue::Code),
             PanelId::Terminal | PanelId::Brand | PanelId::Tile => None,
         }
     }
@@ -150,6 +151,10 @@ pub enum PanelId {
     Say,
     /// a core-open app tile
     Tile,
+    /// the Working view's run, output and edit panels
+    Work,
+    /// a Working view step chip
+    Chip,
 }
 
 #[derive(Component)]
@@ -164,6 +169,8 @@ pub struct Panel {
     pub tilt: Vec2,
     /// seconds since the frame started drawing in (boot, or the card rising)
     pub draw_t: f32,
+    /// a Working view panel: (how open the view is, how far forward the output is)
+    pub work: Option<(f32, f32)>,
     /// home position in world units (stage px mapped to world, z = 0 plane)
     pub home: Vec3,
     pub home_scale: f32,
@@ -313,6 +320,7 @@ pub fn spawn_panel_quad(
                 dragging: false,
                 tilt: Vec2::ZERO,
                 draw_t: 0.0,
+                work: None,
             },
         ))
         .id()
@@ -368,6 +376,28 @@ pub fn update_panels(
         if ctl.mode == Mode::Orbit {
             tz -= 110.0;
             top *= 0.5;
+        }
+        // the Working view: its own panels come in; the home's draw back (the wordmark stays, Say moves under the core)
+        if let Some((amt, big)) = p.work {
+            top = amt;
+            tz -= (1.0 - amt) * 260.0;
+            tsc *= lerp(0.92, 1.0, amt);
+            if big > 0.0 {
+                tx = lerp(tx, 0.0, big);
+                ty = lerp(ty, 20.0, big);
+                tz = lerp(tz, 230.0, big);
+                tsc *= lerp(1.0, 1.57, big);
+                trx *= 1.0 - big;
+                try_ *= 1.0 - big;
+            }
+        } else if ctl.work > 0.0 && p.id != PanelId::Brand && p.id != PanelId::Moment {
+            if p.id == PanelId::Say {
+                tx -= 170.0 * ctl.work;
+            } else {
+                tx -= p.side * 200.0 * ctl.work;
+                tz -= 300.0 * ctl.work;
+                top *= 1.0 - 0.93 * ctl.work;
+            }
         }
         // core open: the side panels step aside and back
         if ctl.orb > 0.0 && !matches!(p.id, PanelId::Brand | PanelId::Say | PanelId::Moment | PanelId::Terminal) {

@@ -53,6 +53,10 @@ pub struct CoreCtl {
     pub landed: bool,
     /// how open the core is (the app orbit), 0..1
     pub orb: f32,
+    /// the Working view: the core slides aside, 0..1
+    pub work: f32,
+    /// the core spins faster while an agent works
+    pub work_spin: f32,
 }
 
 impl CoreCtl {
@@ -76,6 +80,8 @@ impl CoreCtl {
             flash: 0.0,
             landed: false,
             orb: 0.0,
+            work: 0.0,
+            work_spin: 1.0,
         };
         if intro {
             c.spacing.set(165.0);
@@ -317,7 +323,6 @@ pub struct Deck {
 pub struct Decks {
     pub list: Vec<Deck>,
     pub tilt: Entity,
-    #[allow(dead_code)]
     pub root: Entity,
     pub voice_lvl: f32,
 }
@@ -811,7 +816,17 @@ pub fn update_core(
     let boot = sim.boot_t;
     // core orientation
     // core open: tipped back 62° like a holo-table
-    let tgt = if ctl.orb > 0.001 { ctl.q_target.slerp(Quat::from_rotation_x(-62.0 * DEG), ctl.orb) } else { ctl.q_target };
+    let mut tgt = if ctl.orb > 0.001 { ctl.q_target.slerp(Quat::from_rotation_x(-62.0 * DEG), ctl.orb) } else { ctl.q_target };
+    // the Working view turns the core toward the work (yaw 24°, pitch -4°)
+    if ctl.work > 0.001 {
+        tgt = tgt.slerp(Quat::from_euler(EulerRot::YXZ, 24.0 * DEG, -4.0 * DEG, 0.0), ctl.work);
+    }
+    // where the core sits: up a little when open, aside and smaller in the Working view
+    if let Ok(mut tr) = tfs.get_mut(decks.root) {
+        let w = ctl.work;
+        tr.translation = Vec3::new(-260.0 * w, CORE_Y - 26.0 * ctl.orb - 192.0 * w, 0.0);
+        tr.scale = Vec3::splat(lerp(1.0, 0.52, w));
+    }
     let k = 1.0 - (-3.2 * dt).exp();
     if ctl.auto_orient {
         ctl.q_user = ctl.q_user.slerp(tgt, k);
@@ -854,7 +869,7 @@ pub fn update_core(
     ctl.spacing.step(dt);
     ctl.depth.step(dt);
     ctl.zoom.step(dt);
-    let spin_target = 1.0;
+    let spin_target = ctl.work_spin;
     ctl.spin_mul = lerp(ctl.spin_mul, spin_target, 1.0 - (-3.0 * dt).exp());
     let spin_mul = ctl.spin_mul;
     ctl.depth_amt = if ctl.mode == Mode::Depth { clamp((ctl.spacing.x - 10.0) / 80.0, 0.0, 1.0) } else { 0.0 };

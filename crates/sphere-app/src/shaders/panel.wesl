@@ -51,6 +51,12 @@ fn over(dst: vec4<f32>, src: vec4<f32>) -> vec4<f32> {
     return src + dst * (1.0 - src.a);
 }
 
+// Panel opacity, applied the way CSS does (in sRGB, over the dark scene): blending here is linear, so the
+// prototype's `opacity: .07` is .07^2.2 of the light, not .07.
+fn fade() -> f32 {
+    return pow(clamp(u.size.w, 0.0, 1.0), 2.2);
+}
+
 // UI is drawn in the Balanced colours; swap each pixel that is one of them for the current theme's colour.
 // Texels are premultiplied, so compare the straight colour (tolerant for faint edge pixels).
 fn retheme(c: vec4<f32>) -> vec4<f32> {
@@ -86,7 +92,7 @@ fn fs_panel(i: VOut) -> @location(0) vec4<f32> {
 
     if (u.p.x > 2.5) {
         // bare text, no glass or frame
-        return tex * u.size.w;
+        return tex * fade();
     }
     if (u.p.x > 1.5) {
         // core readout: black radial backdrop, then the text
@@ -94,7 +100,7 @@ fn fs_panel(i: VOut) -> @location(0) vec4<f32> {
         let ba = mix(0.7, 0.42, clamp(rr / 0.58, 0.0, 1.0)) * (1.0 - smoothstep(0.58, 1.0, rr)) * u.p.y;
         col = vec4<f32>(0.0, 0.0, 0.0, ba * inb);
         col = over(col, tex);
-        return col * u.size.w;
+        return col * fade();
     }
 
     // glass: smoke + the prototype's line-tinted gradient, clipped to the chamfered outline
@@ -183,5 +189,5 @@ fn fs_panel(i: VOut) -> @location(0) vec4<f32> {
     let bar = bx * by * u.q.x;
     col = over(col, vec4<f32>(u.fill.rgb * bar, bar));
 
-    return col * u.size.w;
+    return col * fade();
 }

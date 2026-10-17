@@ -132,7 +132,7 @@ pub fn keys(
     mut toasts: ResMut<Toasts>,
     mut terms: ResMut<crate::term::Terms>,
     moment: Res<crate::moment::Moment>,
-    (mut acts, mut open, mut say, mut sound): (ResMut<crate::home::Acts>, ResMut<crate::apps::Open>, ResMut<crate::homepanels::Say>, ResMut<crate::sound::Sound>),
+    (mut acts, mut open, mut say, mut sound, mut working): (ResMut<crate::home::Acts>, ResMut<crate::apps::Open>, ResMut<crate::homepanels::Say>, ResMut<crate::sound::Sound>, ResMut<crate::working::Working>),
 ) {
     let cmd = super_down(&keys);
     for e in ev.read() {
@@ -158,7 +158,7 @@ pub fn keys(
                 bar.open = false;
                 let t = text.trim();
                 if !home_command(t, &mut acts, &mut open, &mut toasts) {
-                    run(t, &svc, &mut toasts, &mut terms, &mut focus, &mut say, &mut sound);
+                    run(t, &svc, &mut toasts, &mut terms, &mut focus, &mut say, &mut sound, &mut working);
                 }
             }
             Key::Backspace => {
@@ -247,7 +247,7 @@ fn home_command(t: &str, acts: &mut crate::home::Acts, open: &mut crate::apps::O
     true
 }
 
-fn run(text: &str, svc: &Service, toasts: &mut Toasts, terms: &mut crate::term::Terms, focus: &mut Focus, say: &mut crate::homepanels::Say, sound: &mut crate::sound::Sound) {
+fn run(text: &str, svc: &Service, toasts: &mut Toasts, terms: &mut crate::term::Terms, focus: &mut Focus, say: &mut crate::homepanels::Say, sound: &mut crate::sound::Sound, working: &mut crate::working::Working) {
     if text.is_empty() {
         return;
     }
@@ -283,6 +283,8 @@ fn run(text: &str, svc: &Service, toasts: &mut Toasts, terms: &mut crate::term::
             let words = format!("On it. I started an agent for “{short}” in {name}.");
             sound.speak(&words);
             say.say(words);
+            // watch it work
+            working.open_latest();
             remember(&repo);
             svc.send(Cmd::Start { repo, prompt });
         }
