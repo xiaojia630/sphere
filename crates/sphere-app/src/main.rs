@@ -51,6 +51,8 @@ pub struct Args {
     pub apps: bool,
     /// open the Working view at start, for screenshots
     pub work: bool,
+    /// only the core (the app icon render)
+    pub icon: bool,
     pub collapsed: bool,
     pub focus_term: bool,
     pub msaa: bool,
@@ -74,7 +76,7 @@ impl Args {
 }
 
 fn parse_args() -> Args {
-    let mut a = Args { cmd: None, bench: None, shot: None, frames: 120, depth: false, orbit: false, apps: false, work: false, collapsed: false, focus_term: false, msaa: true, size: (1600, 1000), dt: 1.0 / 20.0, demo: false, live: false, moment: false, theme: None };
+    let mut a = Args { cmd: None, bench: None, shot: None, frames: 120, depth: false, orbit: false, apps: false, work: false, icon: false, collapsed: false, focus_term: false, msaa: true, size: (1600, 1000), dt: 1.0 / 20.0, demo: false, live: false, moment: false, theme: None };
     let mut it = std::env::args().skip(1);
     while let Some(s) = it.next() {
         match s.as_str() {
@@ -86,6 +88,7 @@ fn parse_args() -> Args {
             "--orbit" => a.orbit = true,
             "--apps" => a.apps = true,
             "--work" => a.work = true,
+            "--icon" => a.icon = true,
             "--collapsed" => a.collapsed = true,
             "--term" => a.focus_term = true,
             "--no-msaa" => a.msaa = false,

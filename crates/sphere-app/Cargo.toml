@@ -28,6 +28,9 @@ libc.workspace = true
 global-hotkey = "=0.9.0"
 objc2 = "=0.6.5"
 objc2-app-kit = { version = "=0.3.2", default-features = false, features = ["std", "NSApplication", "NSResponder", "NSRunningApplication"] }
+objc2-foundation = { version = "=0.3.2", default-features = false, features = ["std", "NSString", "NSBundle", "NSError", "NSSet"] }
+objc2-user-notifications = { version = "=0.3.2", default-features = false, features = ["std", "block2", "UNUserNotificationCenter", "UNNotificationContent", "UNNotificationRequest", "UNNotificationTrigger", "UNNotificationSound"] }
+block2 = "=0.6.2"
 
 [features]
 # Linux Wayland sessions: build with `--features wayland` (needs libwayland-dev).

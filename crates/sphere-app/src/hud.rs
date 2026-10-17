@@ -278,13 +278,14 @@ fn build_readout_ui(commands: &mut Commands, root: Entity, f: &UiFonts, agents: 
 }
 
 pub fn update_readout(
+    args: Res<Args>,
     ctl: Res<CoreCtl>,
     decks: Res<Decks>,
     mut mats: ResMut<Assets<PanelMaterial>>,
     q: Query<&MeshMaterial3d<PanelMaterial>, With<ReadoutLink>>,
 ) {
     let d = &decks.list[CORE];
-    let op = clamp(1.0 - ctl.focus_amt * 1.4, 0.0, 1.0) * clamp(d.u_reveal * 1.4, 0.0, 1.0) * (1.0 - ctl.orb) * (1.0 - ctl.moment);
+    let op = clamp(1.0 - ctl.focus_amt * 1.4, 0.0, 1.0) * clamp(d.u_reveal * 1.4, 0.0, 1.0) * (1.0 - ctl.orb) * (1.0 - ctl.moment) * if args.icon { 0.0 } else { 1.0 };
     for h in &q {
         if mats.get(&h.0).is_some_and(|m| m.u.size.w != op) {
             if let Some(mut m) = mats.get_mut(&h.0) {
@@ -393,6 +394,9 @@ pub fn setup_overlay(mut commands: Commands, f: Res<UiFonts>, off: Res<Offscreen
         ))
         .id();
 commands.entity(root).add_child(stats);
+    if args.icon {
+        commands.entity(root).insert(Visibility::Hidden);
+    }
     commands.insert_resource(OverlayRoot(root));
 }
 

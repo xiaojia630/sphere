@@ -25,6 +25,7 @@ pub fn install(app: &mut App) {
         eprintln!("could not register Option+Space: {e}");
         return;
     }
+    native::authorize();
     GlobalHotKeyEvent::set_event_handler(Some(|e: GlobalHotKeyEvent| {
         if e.state() == HotKeyState::Pressed {
             toggle();
@@ -77,13 +78,17 @@ pub fn notify(live: Res<Live>, win: Query<&Window, With<PrimaryWindow>>, args: R
     *seen = ids;
 }
 
-/// `osascript` with the text as arguments (never spliced into the script). Shown under Script Editor's name
-/// until Sphere ships as an app bundle with its own notification rights.
+/// Native notifications when Sphere runs as Sphere.app (they show under its name); `osascript` otherwise (with the
+/// text as arguments, never spliced into the script; those show under Script Editor's name).
 fn post(title: &str, body: &str) {
     if !cfg!(target_os = "macos") {
         return;
     }
     let body: String = body.chars().take(180).collect();
+    #[cfg(target_os = "macos")]
+    if native::post(title, &body) {
+        return;
+    }
     let _ = std::process::Command::new("osascript")
         .args([
             "-e",
@@ -99,4 +104,42 @@ fn post(title: &str, body: &str) {
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn();
+}
+
+/// UNUserNotificationCenter, available only inside an app bundle (it aborts in a bare binary, so check first).
+#[cfg(target_os = "macos")]
+mod native {
+    use objc2_foundation::{NSBundle, NSString};
+    use objc2_user_notifications::{UNAuthorizationOptions, UNMutableNotificationContent, UNNotificationRequest, UNNotificationSound, UNUserNotificationCenter};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    fn bundled() -> bool {
+        NSBundle::mainBundle().bundleIdentifier().is_some()
+    }
+
+    pub fn authorize() {
+        if !bundled() {
+            return;
+        }
+        let center = UNUserNotificationCenter::currentNotificationCenter();
+        let done = block2::RcBlock::new(|_ok: objc2::runtime::Bool, _err: *mut objc2_foundation::NSError| {});
+        center.requestAuthorizationWithOptions_completionHandler(UNAuthorizationOptions::Alert | UNAuthorizationOptions::Sound, &done);
+    }
+
+    pub fn post(title: &str, body: &str) -> bool {
+        if !bundled() {
+            return false;
+        }
+        static N: AtomicU64 = AtomicU64::new(0);
+        let center = UNUserNotificationCenter::currentNotificationCenter();
+        let c = UNMutableNotificationContent::new();
+        c.setTitle(&NSString::from_str("Sphere"));
+        c.setSubtitle(&NSString::from_str(title));
+        c.setBody(&NSString::from_str(body));
+        c.setSound(Some(&UNNotificationSound::defaultSound()));
+        let id = NSString::from_str(&format!("sphere-{}", N.fetch_add(1, Ordering::Relaxed)));
+        let req = UNNotificationRequest::requestWithIdentifier_content_trigger(&id, &c, None);
+        center.addNotificationRequest_withCompletionHandler(&req, None);
+        true
+    }
 }

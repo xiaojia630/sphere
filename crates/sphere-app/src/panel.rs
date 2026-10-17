@@ -347,10 +347,12 @@ pub fn update_panels(
     mut ctl: ResMut<CoreCtl>,
     focus: Res<Focus>,
     moment: Res<crate::moment::Moment>,
+    args: Res<crate::Args>,
     mut mats: ResMut<Assets<PanelMaterial>>,
     mut q: Query<(&mut Panel, &mut Transform, &mut Visibility), Without<ReadoutLink>>,
 ) {
     let (dt, t) = (sim.dt, sim.t);
+    let icon = args.icon;
     // the core fades back for the focused terminal, and partly for the Agent moment card so its text reads
     let ft = if focus.terminal { 1.0 } else if moment.shown { 0.5 } else { 0.0 };
     ctl.focus_amt += (ft - ctl.focus_amt) * (1.0 - (-6.0 * dt).exp());
@@ -488,7 +490,7 @@ pub fn update_panels(
         p.rx.t = trx;
         p.ry.t = try_;
         p.sc.t = tsc;
-        p.op.t = top;
+        p.op.t = if icon { 0.0 } else { top };
         p.px.step(dt);
         p.py.step(dt);
         p.pz.step(dt);
