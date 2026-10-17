@@ -2,6 +2,8 @@
 mod cmdbar;
 mod core;
 mod fonts;
+mod fx;
+mod home;
 mod geo;
 mod glow;
 mod hud;
@@ -37,6 +39,8 @@ pub struct Args {
     pub shot: Option<String>,
     pub frames: u32,
     pub depth: bool,
+    pub orbit: bool,
+    pub collapsed: bool,
     pub focus_term: bool,
     pub msaa: bool,
     pub size: (u32, u32),
@@ -59,7 +63,7 @@ impl Args {
 }
 
 fn parse_args() -> Args {
-    let mut a = Args { cmd: None, bench: None, shot: None, frames: 120, depth: false, focus_term: false, msaa: true, size: (1600, 1000), dt: 1.0 / 20.0, demo: false, live: false, moment: false, theme: None };
+    let mut a = Args { cmd: None, bench: None, shot: None, frames: 120, depth: false, orbit: false, collapsed: false, focus_term: false, msaa: true, size: (1600, 1000), dt: 1.0 / 20.0, demo: false, live: false, moment: false, theme: None };
     let mut it = std::env::args().skip(1);
     while let Some(s) = it.next() {
         match s.as_str() {
@@ -68,6 +72,8 @@ fn parse_args() -> Args {
             "--shot" => a.shot = it.next(),
             "--frames" => a.frames = it.next().and_then(|v| v.parse().ok()).unwrap_or(120),
             "--depth" => a.depth = true,
+            "--orbit" => a.orbit = true,
+            "--collapsed" => a.collapsed = true,
             "--term" => a.focus_term = true,
             "--no-msaa" => a.msaa = false,
             "--demo" => a.demo = true,
@@ -117,8 +123,11 @@ fn main() {
         .init_resource::<live::Toasts>()
         .init_resource::<cmdbar::CmdBar>()
         .init_resource::<moment::Moment>()
+        .init_resource::<home::Acts>()
+        .init_resource::<home::View>()
+        .init_resource::<fx::Fx>()
         .init_resource::<hud::FrameStats>()
-        .add_systems(Startup, (sound::setup, setup_core, setup_cameras, hud::setup_panels, hud::setup_backdrop, hud::setup_overlay, cmdbar::setup).chain())
+        .add_systems(Startup, (sound::setup, setup_core, setup_cameras, hud::setup_panels, hud::setup_backdrop, hud::setup_overlay, cmdbar::setup, fx::setup).chain())
         .add_systems(First, (tick_sim, theme::animate))
         .add_systems(
             Update,
@@ -126,7 +135,7 @@ fn main() {
                 (keys, stage_view, camera_rig, update_core, spin_system, update_materials, panel::update_panels, hud::update_readout, hud::update_backdrop)
                     .chain(),
                 (live::sync, moment::update, summon::notify, live::tick_toasts, panel::rebuild_agents_ui, hud::update_readout_text, hud::update_clock, panel::blink_system).chain(),
-                (term::pump, cmdbar::keys, moment::keys, term::read_keys, term::draw, cmdbar::draw, moment::draw).chain(),
+                (term::pump, cmdbar::keys, moment::keys, term::read_keys, home::keys, home::apply, home::landed_sound, home::step_view, fx::update, term::draw, cmdbar::draw, moment::draw).chain(),
                 (hud::frame_stats, hud::bench, hud::shot).chain(),
             )
                 .chain(),
@@ -282,9 +291,9 @@ fn theme_bloom(theme: Res<theme::Theme>, mut q: Query<&mut bevy::post_process::b
 }
 
 #[allow(clippy::type_complexity)]
-fn camera_rig(sv: Res<StageView>, ctl: Res<CoreCtl>, mut cams: Query<&mut Transform, Or<(With<CamCore>, With<CamPanels>)>>) {
+fn camera_rig(sv: Res<StageView>, ctl: Res<CoreCtl>, view: Res<home::View>, mut cams: Query<&mut Transform, Or<(With<CamCore>, With<CamPanels>)>>) {
     for mut t in &mut cams {
-        t.translation = Vec3::new(0.0, sv.base_y, sv.d * ctl.zoom.x);
+        t.translation = Vec3::new(view.px.x, sv.base_y + view.py.x, sv.d * ctl.zoom.x);
     }
 }
 
@@ -293,6 +302,13 @@ fn keys(mut ctl: ResMut<CoreCtl>, args: Res<Args>, mut once: Local<bool>, win: Q
         *once = true;
         if args.depth {
             ctl.set_mode(Mode::Depth);
+        }
+        if args.orbit {
+            ctl.set_mode(Mode::Orbit);
+        }
+        if args.collapsed {
+            ctl.collapsed = true;
+            ctl.collapse_t = 0.0;
         }
     }
     if let Ok(w) = win.single() {

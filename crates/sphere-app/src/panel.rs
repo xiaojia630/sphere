@@ -341,6 +341,10 @@ pub fn update_panels(
                 top *= 0.3;
             }
         }
+        if ctl.mode == Mode::Orbit {
+            tz -= 110.0;
+            top *= 0.5;
+        }
         let focused_me = p.id == PanelId::Terminal && focus.terminal;
         if p.id == PanelId::Moment {
             // the card: up while a request waits, flat and still so its text reads cleanly

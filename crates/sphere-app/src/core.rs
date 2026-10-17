@@ -22,6 +22,8 @@ pub struct Sim {
 pub enum Mode {
     Flat,
     Depth,
+    /// the rings fold around the core like a gyroscope
+    Orbit,
 }
 
 #[derive(Resource)]
@@ -37,6 +39,18 @@ pub struct CoreCtl {
     pub pointer: Option<Vec2>, // 0..1 in window
     pub focus_amt: f32,
     pub depth_amt: f32,
+    /// the core eases back to its pose; off while you turn it by hand, until a mode change or reset
+    pub auto_orient: bool,
+    /// drag inertia, rad/s about world Y (x) and X (y)
+    pub omega: Vec2,
+    /// the whole stack folded onto the sphere (X)
+    pub collapsed: bool,
+    /// seconds since the last collapse/expand (for the stagger)
+    pub collapse_t: f32,
+    /// added highlight on every deck, decays e^-3.2dt
+    pub flash: f32,
+    /// every collapsed ring has landed (flash and the drop sound once)
+    pub landed: bool,
 }
 
 impl CoreCtl {
@@ -53,6 +67,12 @@ impl CoreCtl {
             pointer: None,
             focus_amt: 0.0,
             depth_amt: 0.0,
+            auto_orient: true,
+            omega: Vec2::ZERO,
+            collapsed: false,
+            collapse_t: 10.0,
+            flash: 0.0,
+            landed: false,
         };
         if intro {
             c.spacing.set(165.0);
@@ -68,7 +88,10 @@ impl CoreCtl {
         self.q_target = match m {
             Mode::Flat => Quat::IDENTITY,
             Mode::Depth => Quat::from_euler(EulerRot::YXZ, -36.0 * DEG, 14.0 * DEG, 0.0),
+            Mode::Orbit => Quat::from_euler(EulerRot::YXZ, -12.0 * DEG, 16.0 * DEG, 0.0),
         };
+        self.auto_orient = true;
+        self.omega = Vec2::ZERO;
     }
 }
 
@@ -269,6 +292,20 @@ pub struct Deck {
     pub u_reveal: f32,
     pub u_hi: f32,
     pub u_fade: f32,
+    /// Orbit fold (gyroscope) for the outer four rings
+    pub f: Spring,
+    pub fold_e: Option<Vec3>,
+    pub prec: Vec3,
+    pub prec_a: f32,
+    /// collapse onto the sphere (whole stack, X)
+    pub c: Spring,
+    pub c_dir: f32,
+    pub c_ax: f32,
+    /// this ring alone folded onto a ghost circle (double-click)
+    pub g: Spring,
+    pub r_min: f32,
+    pub r_max: f32,
+    pub u_pinch: f32,
 }
 
 #[derive(Resource)]
@@ -468,8 +505,19 @@ pub fn setup_core(
 
     let mk = |zi: f32, reveal_at: f32, focus_fade: f32| -> (f32, f32, f32) { (zi, reveal_at, focus_fade) };
     let defs = [mk(-3.0, 0.55, 0.0), mk(-2.0, 0.44, 0.0), mk(-1.0, 0.33, 0.6), mk(0.0, 0.22, 0.75), mk(1.0, 0.11, 0.8), mk(2.0, 0.0, 0.8)];
+    // Orbit: spring, fold angles (Euler XYZ, deg) and precession (rad/s) per ring; radii per deck
+    let orbit: [(f32, f32, Option<Vec3>, Vec3); 6] = [
+        (36.0, 10.0, Some(Vec3::new(72.0, 0.0, 0.0)), Vec3::new(0.0, 0.11, 0.0)),
+        (44.0, 11.0, Some(Vec3::new(0.0, 70.0, 0.0)), Vec3::new(0.14, 0.0, 0.0)),
+        (52.0, 12.0, Some(Vec3::new(-44.0, 48.0, 0.0)), Vec3::new(0.0, -0.17, 0.0)),
+        (60.0, 13.0, Some(Vec3::new(52.0, -40.0, 0.0)), Vec3::new(0.0, 0.23, 0.0)),
+        (60.0, 13.0, None, Vec3::ZERO),
+        (60.0, 13.0, None, Vec3::ZERO),
+    ];
+    let radii = [(336.0, 412.0), (270.0, 336.0), (210.0, 270.0), (176.0, 210.0), (118.0, 176.0), (0.0, 118.0)];
     let mut decks = Vec::new();
-    for (zi, reveal_at, focus_fade) in defs {
+    for (i, (zi, reveal_at, focus_fade)) in defs.into_iter().enumerate() {
+        let (fk, fc, fold_e, prec) = orbit[i];
         let droot = b.commands.spawn((Transform::default(), Visibility::default())).id();
         let fold = b.commands.spawn((Transform::default(), Visibility::default())).id();
         b.commands.entity(droot).add_child(fold);
@@ -485,6 +533,17 @@ pub fn setup_core(
             u_reveal: 0.0,
             u_hi: 0.0,
             u_fade: 1.0,
+            f: Spring::new(0.0, fk, fc),
+            fold_e: fold_e.map(|v| v * DEG),
+            prec,
+            prec_a: 0.0,
+            c: Spring::new(0.0, 74.0, 2.0 * 0.86 * 74f32.sqrt()),
+            c_dir: if i % 2 == 0 { 1.0 } else { -1.0 },
+            c_ax: i as f32 * 72.0 * DEG,
+            g: Spring::new(0.0, 80.0, 15.0),
+            r_min: radii[i].0,
+            r_max: radii[i].1,
+            u_pinch: 0.0,
         });
     }
     let fold = |i: usize| decks[i].fold;
@@ -748,7 +807,16 @@ pub fn update_core(
     // core orientation
     let tgt = ctl.q_target;
     let k = 1.0 - (-3.2 * dt).exp();
-    ctl.q_user = ctl.q_user.slerp(tgt, k);
+    if ctl.auto_orient {
+        ctl.q_user = ctl.q_user.slerp(tgt, k);
+    } else if ctl.omega.length() > 1e-4 {
+        // coasting after a drag: premultiplied about world Y, then X
+        let om = ctl.omega;
+        ctl.q_user = (Quat::from_rotation_x(om.y * dt) * Quat::from_rotation_y(om.x * dt) * ctl.q_user).normalize();
+        ctl.omega *= (-2.4 * dt).exp();
+    }
+    ctl.flash *= (-3.2 * dt).exp();
+    ctl.collapse_t += dt;
     let (px, py) = ctl.pointer.map(|p| (p.x - 0.5, p.y - 0.5)).unwrap_or((0.0, 0.0));
     let qp = Quat::from_euler(EulerRot::YXZ, px * 7.0 * DEG, py * 5.0 * DEG, 0.0);
     let kp = 1.0 - (-3.0 * dt).exp();
@@ -767,6 +835,10 @@ pub fn update_core(
         Mode::Flat => {
             ctl.spacing.t = 8.0 + 72.0 * tilt_k;
             ctl.depth.t = 3.0 + 40.0 * tilt_k;
+        }
+        Mode::Orbit => {
+            ctl.spacing.t = 0.0;
+            ctl.depth.t = 16.0;
         }
     }
     ctl.spacing.step(dt);
@@ -792,16 +864,86 @@ pub fn update_core(
     let voice_lvl = decks.voice_lvl;
 
     // decks
+    let orbit = ctl.mode == Mode::Orbit;
+    // collapse stagger: outermost first when folding in, innermost first when expanding
+    const STAGGER: [f32; 5] = [0.0, 0.07, 0.155, 0.235, 0.32];
+    let (collapsed, ct, flash, spacing) = (ctl.collapsed, ctl.collapse_t, ctl.flash, ctl.spacing.x);
+    let mut orbit_scale = 0.0;
+    let mut all_landed = true;
     for (i, d) in decks.list.iter_mut().enumerate() {
         d.hi.t = 0.0;
         d.hi.step(dt);
-        if let Ok(mut tr) = tfs.get_mut(d.root) {
-            tr.translation.z = d.zi * ctl.spacing.x + d.hi.x * 14.0;
+        // Orbit: the outer rings fold around the core and precess
+        d.f.t = if orbit && d.fold_e.is_some() { 1.0 } else { 0.0 };
+        d.f.step(dt);
+        d.prec_a += dt * d.f.x;
+        let qf = match d.fold_e {
+            Some(e) => {
+                let p = d.prec * d.prec_a;
+                let full = Quat::from_euler(EulerRot::XYZ, p.x, p.y, p.z) * Quat::from_euler(EulerRot::XYZ, e.x, e.y, e.z);
+                Quat::IDENTITY.slerp(full, clamp(d.f.x, 0.0, 1.0))
+            }
+            None => Quat::IDENTITY,
+        };
+        if i == TIME {
+            orbit_scale = clamp(d.f.x, 0.0, 1.0);
         }
+        // collapse: rings 0..5 (not the core) fold onto the sphere
+        let mut c = 0.0;
+        if i < CORE {
+            let order = if collapsed { i } else { 4 - i };
+            if ct >= STAGGER[order] {
+                let tgt = if collapsed { 1.0 } else { 0.0 };
+                if d.c.t != tgt {
+                    d.c.t = tgt;
+                    // in: k 74, damping .86; out: k 62, damping .64
+                    let (k, z) = if collapsed { (74.0, 0.86) } else { (62.0, 0.64) };
+                    d.c.k = k;
+                    d.c.c = 2.0 * z * f32::sqrt(k);
+                }
+            }
+            d.c.step(dt);
+            c = d.c.x.max(0.0);
+            if collapsed && c < 0.9 {
+                all_landed = false;
+            }
+        }
+        let rg = (d.r_min + d.r_max) * 0.5;
+        let land = 0.9 * 104.0;
+        let scale = if i < CORE { lerp(1.0, land / rg.max(1.0), c) } else { 1.0 };
+        let ax = d.c_ax + d.c_dir * c * 40.0 * DEG;
+        let rot = Quat::from_axis_angle(Vec3::new(ax.cos(), ax.sin(), 0.0), d.c_dir * c * 80.0 * DEG);
+        if let Ok(mut tr) = tfs.get_mut(d.fold) {
+            tr.rotation = rot * qf;
+            tr.scale = Vec3::splat(scale);
+        }
+        if let Ok(mut tr) = tfs.get_mut(d.root) {
+            let z = d.zi * spacing + d.hi.x * 14.0;
+            tr.translation.z = lerp(z, 2.0 * spacing, clamp(c, 0.0, 1.0));
+        }
+        // a single ring folded onto its own radius
+        d.g.step(dt);
+        d.u_pinch = clamp(d.g.x, 0.0, 1.0);
+        let smooth = |a: f32, b: f32, x: f32| {
+            let t = clamp((x - a) / (b - a), 0.0, 1.0);
+            t * t * (3.0 - 2.0 * t)
+        };
         d.u_depth = (ctl.depth.x + d.hi.x * 8.0 + if i == VOICE { voice_lvl * 30.0 } else { 0.0 }).max(0.0);
-        d.u_hi = d.hi.x * 0.9;
-        d.u_fade = 1.0 - ctl.focus_amt * d.focus_fade;
+        d.u_hi = d.hi.x * 0.9 + flash;
+        d.u_fade = (1.0 - ctl.focus_amt * d.focus_fade) * (1.0 - smooth(0.3, 0.93, c)) * (1.0 - 0.35 * clamp(c, 0.0, 1.0)) * (1.0 - smooth(0.06, 0.7, d.u_pinch));
         d.u_reveal = out_cubic((boot - 0.15 - d.reveal_at) / 0.9);
+    }
+    // the sphere grows a little in Orbit, and breathes while the stack is collapsed
+    let breathe = if collapsed { 1.0 + 0.03 * (1.25 * t).sin() } else { 1.0 };
+    if let Ok(mut tr) = tfs.get_mut(decks.list[CORE].fold) {
+        tr.scale = Vec3::splat((1.0 + 0.14 * orbit_scale) * breathe);
+    }
+    if collapsed && all_landed && !ctl.landed {
+        ctl.landed = true;
+        ctl.flash = 0.8;
+    }
+    if !collapsed {
+        ctl.landed = false;
     }
 
     // dynamic geometry
@@ -890,7 +1032,10 @@ pub fn update_materials(
         u.color = crate::theme::deck_lin(info.deck, info.role);
         u.c2 = crate::theme::deck_b2_lin(info.deck);
         u.a = Vec4::new(alpha, info.wall, d.u_reveal, d.u_hi);
-        u.b = Vec4::new(d.u_fade, d.u_depth, 0.0, 0.0);
+        u.b = Vec4::new(d.u_fade, d.u_depth, 0.0, d.u_pinch);
+        if cur.kind == Kind::Ring && info.deck != CORE {
+            u.c.x = (d.r_min + d.r_max) * 0.5;
+        }
         if info.tag == Tag::Dots {
             u.c.z = 3.0 * pr;
         }
