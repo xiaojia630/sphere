@@ -147,7 +147,7 @@ fn main() {
         .insert_resource(ClearColor(Color::BLACK))
         .add_plugins(default_plugins(&args))
         .add_plugins((glow::GlowPlugin, panel::PanelPlugin))
-        .add_systems(PreStartup, (setup_offscreen, panel::setup_atlas))
+        .add_systems(PreStartup, (setup_offscreen, panel::setup_atlas, no_gpu_clustering))
         .add_systems(PostStartup, panel::finish_atlas)
         .insert_resource(Sim { dt: 1.0 / 60.0, t: 0.0, boot_t: 0.0, fixed_dt: args.shot.as_ref().map(|_| args.dt), frozen: false })
         .insert_resource(CoreCtl::new(true))
@@ -251,6 +251,12 @@ pub fn interactive_qos() {
     unsafe {
         libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_USER_INTERACTIVE, 0);
     }
+}
+
+/// We have no lights, so the GPU light clustering Bevy runs for every 3D view (compute passes, buffers, bind
+/// groups) is pure cost; the CPU path with nothing to cluster is free.
+fn no_gpu_clustering(mut s: ResMut<bevy::light::cluster::GlobalClusterSettings>) {
+    s.gpu_clustering = None;
 }
 
 /// The render thread too: this runs in the render world, on that thread, and marks it once.

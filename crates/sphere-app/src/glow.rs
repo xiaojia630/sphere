@@ -23,6 +23,8 @@ pub enum Kind {
     Fres,
     Text,
     Backdrop,
+    /// the voice spokes: a ring whose lengths the vertex shader animates (see `vs_spokes`)
+    Spokes,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, ShaderType)]
@@ -105,6 +107,7 @@ impl Material for GlowMaterial {
             Kind::Fres => ("vs_fres", "fs_fres"),
             Kind::Text => ("vs_text", "fs_text"),
             Kind::Backdrop => ("vs_text", "fs_backdrop"),
+            Kind::Spokes => ("vs_spokes", "fs_ring"),
         };
         d.vertex.entry_point = Some(vs.into());
         let frag = d.fragment.as_mut().unwrap();

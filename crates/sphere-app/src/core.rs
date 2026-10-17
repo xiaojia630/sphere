@@ -378,7 +378,7 @@ fn add_geo(
     dynk: Option<Dyn>,
 ) -> (Entity, Handle<Mesh>) {
     let mh = b.meshes.add(geo.into_mesh());
-    let mut m = glow_mat(Kind::Ring, role, alpha);
+    let mut m = glow_mat(if tag == Tag::Spokes { Kind::Spokes } else { Kind::Ring }, role, alpha);
     m.u.a.y = wall;
     let mut e = b.commands.spawn((
         Mesh3d(mh.clone()),
@@ -643,9 +643,11 @@ pub fn setup_core(
     ticks_geo(&mut g, 125.0, 60, 4.6, 1.0, 0, 0.0);
     add_geo(&mut b, VOICE, fold(VOICE), g, Role::Line, 0.5, 0.3, -TAU / 30.0, Tag::None, None);
     let mut sp = Geo::new();
-    write_spokes_geo(&mut sp, &vec![(0.0, 0.3, 0.0); NSP], 145.0, 112.0);
+    spokes_static_geo(&mut sp);
     let spokes: Vec<(f32, f32, f32)> = (0..NSP).map(|i| (i as f32 / NSP as f32 * TAU, 0.0, i as f32 * 0.37)).collect();
-    let (_, spokes_mesh) = add_geo(&mut b, VOICE, fold(VOICE), sp, Role::Fill, 0.9, 0.5, 0.0, Tag::Spokes, Some(Dyn::Spokes));
+    let (se, spokes_mesh) = add_geo(&mut b, VOICE, fold(VOICE), sp, Role::Fill, 0.9, 0.5, 0.0, Tag::Spokes, Some(Dyn::Spokes));
+    // its mesh holds unit coordinates the shader expands, so its bounds say nothing
+    b.commands.entity(se).insert(bevy::camera::visibility::NoFrustumCulling);
 
     // Layer 6 · the glass sphere itself
     build_sphere(&mut b, fold(CORE));
@@ -785,7 +787,19 @@ fn spawn_sph(b: &mut B, parent: Entity, mesh: Handle<Mesh>, kind: Kind, role: Ro
     b.commands.entity(parent).add_child(e);
 }
 
+/// Voice spokes, built once: per spoke a ribbon (x = side offset, y = 0 at the inner end, 1 at the outer) and its
+/// wall, k = the spoke's index. `vs_spokes` places and animates them.
+fn spokes_static_geo(g: &mut Geo) {
+    let hw = 1.1;
+    for i in 0..NSP {
+        let a = i as f32 / NSP as f32 * TAU;
+        g.quad([-hw, 0.0, a], [hw, 0.0, a], [hw, 1.0, a], [-hw, 1.0, a], i as f32);
+        g.wall([0.0, 0.0, a], [0.0, 1.0, a], i as f32);
+    }
+}
+
 /// Voice spokes: 12 vertices each (a flat ribbon plus its wall), levels drive their length.
+#[allow(dead_code)]
 fn write_spokes_geo(g: &mut Geo, spokes: &[(f32, f32, f32)], rw: f32, wl: f32) {
     for (a, v, _) in spokes {
         let (s, c) = a.sin_cos();
@@ -986,16 +1000,13 @@ pub fn update_core(
     let rebuild_time = (now - *last_min).abs() > 0.2;
     let rebuild_agents = agents.version != *last_ver;
     agents.tick(dt);
-    // spokes mesh is rebuilt every frame
-    let mut sg = Geo::new();
-    write_spokes_geo(&mut sg, &a.spokes, 145.0 + ctl.focus_amt * 165.0, 112.0 * (1.0 - ctl.focus_amt * 0.35));
-    let (g_spokes, g_time, g_ag) = (sg, if rebuild_time { Some(build_time_dyn(now)) } else { None }, if rebuild_agents { Some(build_agents_dyn(&agents.list)) } else { None });
+    // (the spokes animate in their vertex shader; see `update_materials`)
+    let (g_time, g_ag) = (if rebuild_time { Some(build_time_dyn(now)) } else { None }, if rebuild_agents { Some(build_agents_dyn(&agents.list)) } else { None });
     let mut g_time = g_time;
     let mut g_ag = g_ag.map(|a| a.into_iter().map(Some).collect::<Vec<_>>());
-    let mut g_spokes = Some(g_spokes);
     for (d, mh) in &dyns {
         let geo = match d {
-            Dyn::Spokes => g_spokes.take(),
+            Dyn::Spokes => None,
             Dyn::TimeElapsed => g_time.as_mut().map(|g| std::mem::take(&mut g.0)),
             Dyn::TimeEvents => g_time.as_mut().map(|g| std::mem::take(&mut g.1)),
             Dyn::TimeNow => g_time.as_mut().map(|g| std::mem::take(&mut g.2)),
@@ -1050,6 +1061,7 @@ pub fn update_materials(
     win: Query<&Window, With<bevy::window::PrimaryWindow>>,
     mut mats: ResMut<Assets<GlowMaterial>>,
     q: Query<(&MeshMaterial3d<GlowMaterial>, &GlowInfo)>,
+    core: Res<CoreAssets>,
 ) {
     let pr = win.single().map(|w| w.scale_factor()).unwrap_or(1.0);
     for (h, info) in &q {
@@ -1081,6 +1093,9 @@ pub fn update_materials(
         }
         if info.tag == Tag::Shell {
             u.d = Vec4::new(sim.t, 0.0, 0.0, 0.0);
+        }
+        if info.tag == Tag::Spokes {
+            u.d = Vec4::new(sim.t, core.energy, 145.0 + ctl.focus_amt * 165.0, 112.0 * (1.0 - ctl.focus_amt * 0.35));
         }
         if info.tag == Tag::Orb {
             let o = ctl.orb;

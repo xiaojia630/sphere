@@ -302,11 +302,11 @@ pub fn ticker(
     theme: Res<Theme>,
     args: Res<crate::Args>,
     mut acc: Local<f32>,
-    mut q: Query<(&mut Text, &mut Node, &ComputedNode), With<TickerRow>>,
+    mut q: Query<(&mut Text, &mut UiTransform, &ComputedNode), With<TickerRow>>,
 ) {
     *acc += sim.dt;
     let rebuild = *acc > 3.0 || q.iter().next().is_some_and(|(t, _, _)| t.0.is_empty());
-    for (mut t, mut n, cn) in &mut q {
+    for (mut t, mut ut, cn) in &mut q {
         if rebuild {
             *acc = 0.0;
             let mut items: Vec<String> = Vec::new();
@@ -337,7 +337,8 @@ pub fn ticker(
         if v.ticker_w > 0.0 && v.ticker_x < -v.ticker_w {
             v.ticker_x += v.ticker_w;
         }
-        n.left = px(v.ticker_x);
+        // moved by its transform, not `left`, so scrolling doesn't relayout the UI every frame
+        ut.translation = Val2::px(v.ticker_x, 0.0);
     }
 }
 

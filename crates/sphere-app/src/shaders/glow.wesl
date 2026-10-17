@@ -65,6 +65,31 @@ fn fs_ring(i: VOut) -> @location(0) vec4<f32> {
     return vec4<f32>(mix(m.color.rgb, m.c2.rgb, t2), clamp(a, 0.0, 1.0));
 }
 
+// ---------------- voice spokes ----------------
+// A static mesh: per spoke a ribbon (x = side offset, y = 0 inner end / 1 outer end) and its wall, attr.w = the
+// spoke's index. Each spoke's length follows the same slow sine the CPU used to rebuild the mesh with every frame.
+// d = (t, energy, inner radius, length scale)
+@vertex
+fn vs_spokes(v: VIn) -> VOut {
+    var o: VOut;
+    let i = v.attr.w;
+    let ang = v.attr.z;
+    let ph = i * 0.37 + m.d.x * (1.1 + (i % 9.0) * 0.14);
+    let lvl = (0.22 + (sin(ph * 0.7 + i * 0.28) * 0.5 + 0.5) * 0.3) * m.d.y;
+    let r = m.d.z + v.position.y * (4.0 + lvl * m.d.w);
+    let s = sin(ang);
+    let c = cos(ang);
+    let side = v.position.x;
+    var p = vec3<f32>(s * r + c * side, c * r - s * side, -v.attr.y * m.b.y);
+    let len = max(length(p.xy), 1.0);
+    let sc = mix(1.0, m.c.x / len, m.b.w);
+    p = vec3<f32>(p.x * sc, p.y * sc, p.z);
+    o.clip = mesh_position_local_to_clip(get_world_from_local(v.instance_index), vec4<f32>(p, 1.0));
+    o.attr = vec4<f32>(v.attr.x, v.attr.y, ang, 0.45 + lvl * 0.55);
+    o.extra = vec4<f32>(0.0);
+    return o;
+}
+
 // ---------------- sphere lines / faces ----------------
 @vertex
 fn vs_line(v: VIn) -> VOut {

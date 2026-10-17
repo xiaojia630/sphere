@@ -381,9 +381,13 @@ pub fn update(
         tr.translation = pad;
         tr.rotation = Quat::from_mat3(&Mat3::from_cols(side, up, fwd));
         tr.scale = Vec3::new(TILE_W * 0.5 * 0.62, len, 1.0);
-        if let Some(mut m) = gmats.get_mut(&h.0) {
-            m.u.a.x = alpha;
-            m.u.color = crate::theme::now_lin(Role::Fill);
+        // only when it differs: `get_mut` makes the renderer prepare the material again
+        let color = crate::theme::now_lin(Role::Fill);
+        if gmats.get(&h.0).is_some_and(|m| m.u.a.x != alpha || m.u.color != color) {
+            if let Some(mut m) = gmats.get_mut(&h.0) {
+                m.u.a.x = alpha;
+                m.u.color = color;
+            }
         }
     }
     // the footer: "■ Enter to open" on the front tile

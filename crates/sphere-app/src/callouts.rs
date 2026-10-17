@@ -91,6 +91,19 @@ pub fn update(
     let ly = |i: usize| ys.iter().find(|y| y.0 == i).map(|y| y.1).unwrap_or(0.0);
     let an = |i: usize| anchors.iter().find(|a| a.0 == i).map(|a| a.1).unwrap_or(Vec2::ZERO);
     let line = crate::theme::now(Role::Line);
+    // hidden: nothing to place (writing the nodes anyway would relayout the UI every frame)
+    if vis == Visibility::Hidden {
+        for (_, _, mut v) in &mut sets.p0() {
+            v.set_if_neq(vis);
+        }
+        for (_, _, _, mut v, _) in &mut sets.p1() {
+            v.set_if_neq(vis);
+        }
+        for (_, _, mut v) in &mut sets.p2() {
+            v.set_if_neq(vis);
+        }
+        return;
+    }
     for (c, mut n, mut v) in &mut sets.p0() {
         v.set_if_neq(vis);
         n.left = px(col_x);
@@ -114,9 +127,6 @@ pub fn update(
         let a = an(dt.0);
         n.left = px(a.x - 2.6);
         n.top = px(a.y - 2.6);
-    }
-    if vis == Visibility::Hidden {
-        return;
     }
     let s = stats.get();
     for (cs, mut t) in &mut sets.p3() {

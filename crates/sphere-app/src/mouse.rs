@@ -435,13 +435,20 @@ pub fn draw_reticle(
     let typing_area = matches!(ms.hit, Some(Hit::Visor));
     for (mut n, mut tr, mut v) in &mut q.p0() {
         v.set_if_neq(if typing_area { Visibility::Hidden } else { Visibility::Inherited });
-        n.left = px(at.x - 22.0);
-        n.top = px(at.y - 22.0);
+        // writes only on change, so a still cursor doesn't relayout the UI every frame
+        let (l, t) = (px(at.x - 22.0), px(at.y - 22.0));
+        if n.left != l || n.top != t {
+            n.left = l;
+            n.top = t;
+        }
         let (rot, sc) = if ms.dragging { (0.0, 1.55) } else if hov { (45.0, 1.25) } else { (0.0, 1.0) };
         let cur = tr.rotation.as_degrees();
-        tr.rotation = Rot2::degrees(lerp(cur, rot, (12.0 * dt).min(1.0)));
+        let r = lerp(cur, rot, (12.0 * dt).min(1.0));
         let s = lerp(tr.scale.x, sc, (12.0 * dt).min(1.0));
-        tr.scale = Vec2::splat(s);
+        if (r - cur).abs() > 1e-3 || (s - tr.scale.x).abs() > 1e-4 {
+            tr.rotation = Rot2::degrees(r);
+            tr.scale = Vec2::splat(s);
+        }
     }
     let tip = match ms.hit {
         Some(Hit::Ring(i)) => Some(i),
@@ -451,8 +458,11 @@ pub fn draw_reticle(
     for (mut n, mut v) in &mut q.p1() {
         v.set_if_neq(if tip.is_some() && !ms.dragging { Visibility::Inherited } else { Visibility::Hidden });
         let x = if p.x + 22.0 + 260.0 > w { p.x - 22.0 - 260.0 } else { p.x + 22.0 };
-        n.left = px(x);
-        n.top = px(p.y + 18.0);
+        let (l, t) = (px(x), px(p.y + 18.0));
+        if n.left != l || n.top != t {
+            n.left = l;
+            n.top = t;
+        }
     }
     if let Some(i) = tip {
         let s = stats.get();
