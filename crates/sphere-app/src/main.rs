@@ -9,6 +9,7 @@ mod live;
 mod moment;
 mod panel;
 mod service;
+mod summon;
 mod term;
 mod util;
 
@@ -116,13 +117,16 @@ fn main() {
             (
                 (keys, stage_view, camera_rig, update_core, spin_system, update_materials, panel::update_panels, hud::update_readout, hud::update_backdrop)
                     .chain(),
-                (live::sync, moment::update, live::tick_toasts, panel::rebuild_agents_ui, hud::update_readout_text, hud::update_clock, panel::blink_system).chain(),
+                (live::sync, moment::update, summon::notify, live::tick_toasts, panel::rebuild_agents_ui, hud::update_readout_text, hud::update_clock, panel::blink_system).chain(),
                 (term::pump, cmdbar::keys, moment::keys, term::read_keys, term::draw, cmdbar::draw, moment::draw).chain(),
                 (hud::frame_stats, hud::bench, hud::shot).chain(),
             )
                 .chain(),
         )
         .add_systems(Last, panel::gate_panel_cameras);
+    if !args.offline() {
+        summon::install(&mut app);
+    }
     if args.shot.is_some() {
         app.add_plugins(ScheduleRunnerPlugin::run_loop(std::time::Duration::from_millis(1)));
         // Offscreen there is no swap chain to throttle submission, and a software rasteriser would let queued

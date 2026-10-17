@@ -13,6 +13,7 @@ This is milestone 1: the service, the process holder, the CLI and a fake agent f
 | `sphered` | The service: store, hub, policy, workspaces, supervisor, API server. |
 | `sphere-client` | Async client library. |
 | `sphere-cli` | The `sphere` binary. |
+| `sphere-app` | The desktop app (`sphere-app`): core, panels, command bar, terminal tabs, Agent moment. |
 | `fake-claude` | A scripted stand-in for `claude`, driven by the fixtures in `crates/fake-claude/fixtures`. Used by the tests. |
 
 ## Build and install
@@ -21,7 +22,7 @@ You need a recent stable Rust toolchain and git. To run real agents you need Cla
 
 ```
 cargo build --release
-install -m755 target/release/{sphere,sphered,sphere-host} ~/.local/bin/
+install -m755 target/release/{sphere,sphered,sphere-host,sphere-app} ~/.local/bin/
 sphere doctor
 ```
 
@@ -84,30 +85,28 @@ Set `SPHERE_LIVE_CLAUDE` to the command if `claude` is not on your PATH.
 ## Credits
 
 The idea of a small process that outlives the UI and owns the terminals comes from [herdr](https://github.com/herdrdev/herdr) (Apache-2.0). Sphere is built with its design in mind; no herdr code is used here.
-## sphere-app (M0 look test)
+## The Sphere app (M2)
 
-A small native Rust/Bevy program that checks the approved HUD look (the web prototype, Balanced theme) can be matched natively: the ring-deck core with bloom and a Depth view, a glass Agents panel and a live terminal panel, both rendered from Bevy UI to a texture and shown on tilted 3D quads.
+`sphere-app` is the desktop app: the core, the glass panels, a command bar, terminal tabs and the Agent moment card. It is a client of sphered like the CLI, and starts sphered when nothing is running.
 
-### Run the look test
+    cargo build --release
+    target/release/sphere-app
 
-    cargo run --release
+Keys:
 
-Keys: `D` toggles the Depth view, `T` focuses the terminal (or click it), `Esc` releases it. While focused, the keyboard goes to the shell.
+- `/` or Cmd+K: the command bar. Type a task and press Enter to start an agent: `repo: task` picks the repo (a folder in `~/Projects`, or a path), otherwise the last repo used, otherwise the folder the app runs in. `> message` talks to the agent you heard from last. `t` opens a terminal tab.
+- The Agent moment card rises when an agent needs you. Enter answers yes (Run, Apply, Allow, Approve), E changes (type, then Enter), L is later, Esc puts the card away until something new arrives, the arrows step through the others. A question takes an option's number or a typed answer.
+- Terminal: T focuses it, Esc releases it, Cmd+T new tab, Cmd+W close, Cmd+1..9 switch, Cmd+V paste. Tabs run your login shell and live in the app for now (sphered has no terminal API yet).
+- Option+Space (macOS) brings Sphere up over anything and hides it again. When something needs you while Sphere isn't in front, you get a notification.
+- D toggles the Depth view.
 
-Flags:
+Flags: `--demo` (the look test's sample agents, no service), `--moment` (with `--demo`: the card with a sample request), `--live` (screenshots and benches against the real service), `--cmd "<command>"` (what the first terminal tab runs), `--bench <seconds>`, `--shot <png> [--frames N] [--depth] [--term]`, `--size WxH`, `--no-msaa`. `SPHERE_SOCKET` points the app at another sphered.
 
-- `--cmd "<command>"` what the terminal runs first (default: `git log --graph --color --oneline -20`, then an interactive prompt)
-- `--bench <seconds>` log fps and p50/p99 frame time, then exit (needs a window)
-- `--shot <png> [--frames N] [--depth] [--term]` render N frames offscreen, save a PNG, exit (no window needed)
-- `--size WxH`, `--no-msaa`
+`--shot` renders offscreen and needs no window. `--bench` and `--shot` use the demo data unless `--live` is given.
 
-The window is 1600x1000. The frame-time overlay (fps, p50, p99) is top left.
+Linux: needs X11 dev libs by default (`--features wayland` for Wayland). The hotkey and notifications are macOS only for now. No GPU (CI, containers): `scripts/shot-swiftshader.sh --shot look/out.png --frames 120 --no-msaa` uses a software Vulkan driver.
 
-Linux: needs X11 dev libs by default (`--features wayland` for Wayland, needs libwayland). macOS: `cargo run --release` should work as is (Metal), untested. If your rustc is slightly older than a dependency requires, add `--ignore-rust-version`.
-
-No GPU (CI, containers): `scripts/shot-swiftshader.sh --shot look/out.png --frames 120 --no-msaa` uses a software Vulkan driver. Frame rates there mean nothing.
-
-Images in `look/`: `compare.png` (prototype left, Rust right), `rust-flat.png`, `rust-depth.png`, `rust-terminal.png`.
+Images in `look/` are from the M0 look test: `compare.png` (prototype left, Rust right), `rust-flat.png`, `rust-depth.png`, `rust-terminal.png`.
 
 ### Credits
 
