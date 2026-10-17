@@ -45,7 +45,7 @@ pub fn waiting<'a>(live: &'a Live, m: &Moment) -> Vec<&'a RequestView> {
 }
 
 /// Shows the card when a request arrives that wasn't put away, hides it when nothing waits.
-pub fn update(live: Res<Live>, mut m: ResMut<Moment>, mut seen: Local<u64>) {
+pub fn update(live: Res<Live>, mut m: ResMut<Moment>, mut seen: Local<u64>, mut sound: ResMut<crate::sound::Sound>) {
     if *seen == live.version {
         return;
     }
@@ -58,6 +58,7 @@ pub fn update(live: Res<Live>, mut m: ResMut<Moment>, mut seen: Local<u64>) {
     let shown = !w.is_empty() && (m.shown || fresh);
     if shown != m.shown {
         m.shown = shown;
+        sound.play(if shown { "open" } else { "close" });
         if !shown {
             m.editing = false;
             m.text.clear();
@@ -69,7 +70,7 @@ pub fn update(live: Res<Live>, mut m: ResMut<Moment>, mut seen: Local<u64>) {
     m.version += 1;
 }
 
-pub fn keys(mut ev: MessageReader<KeyboardInput>, focus: Res<Focus>, mut m: ResMut<Moment>, live: Res<Live>, svc: Res<Service>) {
+pub fn keys(mut ev: MessageReader<KeyboardInput>, focus: Res<Focus>, mut m: ResMut<Moment>, live: Res<Live>, svc: Res<Service>, mut sound: ResMut<crate::sound::Sound>) {
     for e in ev.read() {
         if e.state != ButtonState::Pressed || !m.shown || focus.cmd || focus.terminal {
             continue;
@@ -91,6 +92,7 @@ pub fn keys(mut ev: MessageReader<KeyboardInput>, focus: Res<Focus>, mut m: ResM
                         // A question's typed answer is a yes carrying the answer; anything else is a change.
                         let kind = if req.info.kind == RequestKind::Question { AnswerKind::Yes } else { AnswerKind::Change };
                         answer(&mut m, &svc, &id, kind, Some(text.trim().to_string()));
+                        sound.play_with("confirm", 0.7, 0.0);
                     }
                 }
                 Key::Backspace => {
@@ -112,6 +114,7 @@ pub fn keys(mut ev: MessageReader<KeyboardInput>, focus: Res<Focus>, mut m: ResM
                     m.editing = true;
                 } else {
                     answer(&mut m, &svc, &id, AnswerKind::Yes, None);
+                    sound.play_with("confirm", 0.7, 0.0);
                 }
             }
             Key::Escape => {
@@ -122,8 +125,14 @@ pub fn keys(mut ev: MessageReader<KeyboardInput>, focus: Res<Focus>, mut m: ResM
             Key::ArrowRight if n > 1 => m.index = (m.index + 1) % n,
             Key::ArrowLeft if n > 1 => m.index = (m.index + n - 1) % n,
             Key::Character(c) => match c.to_ascii_lowercase().as_str() {
-                "e" => m.editing = true,
-                "l" => answer(&mut m, &svc, &id, AnswerKind::Later, None),
+                "e" => {
+                    m.editing = true;
+                    sound.play("click");
+                }
+                "l" => {
+                    answer(&mut m, &svc, &id, AnswerKind::Later, None);
+                    sound.play_with("whoosh", 0.6, 0.0);
+                }
                 d if req.info.kind == RequestKind::Question && d.len() == 1 && d.as_bytes()[0].is_ascii_digit() => {
                     let i = (d.as_bytes()[0] - b'0') as usize;
                     if let Some(label) = options(&req.info.input).get(i.wrapping_sub(1)) {

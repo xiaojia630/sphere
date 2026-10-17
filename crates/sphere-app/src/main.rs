@@ -9,6 +9,7 @@ mod live;
 mod moment;
 mod panel;
 mod service;
+mod sound;
 mod summon;
 mod sysstats;
 mod theme;
@@ -117,7 +118,7 @@ fn main() {
         .init_resource::<cmdbar::CmdBar>()
         .init_resource::<moment::Moment>()
         .init_resource::<hud::FrameStats>()
-        .add_systems(Startup, (setup_core, setup_cameras, hud::setup_panels, hud::setup_backdrop, hud::setup_overlay, cmdbar::setup).chain())
+        .add_systems(Startup, (sound::setup, setup_core, setup_cameras, hud::setup_panels, hud::setup_backdrop, hud::setup_overlay, cmdbar::setup).chain())
         .add_systems(First, (tick_sim, theme::animate))
         .add_systems(
             Update,
@@ -131,7 +132,7 @@ fn main() {
                 .chain(),
         )
         .add_systems(Last, panel::gate_panel_cameras)
-        .add_systems(PostUpdate, (panel::theme_panels, theme_bloom));
+        .add_systems(PostUpdate, (panel::theme_panels, theme_bloom, sound::flush));
     if !args.offline() {
         summon::install(&mut app);
     }

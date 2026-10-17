@@ -27,11 +27,18 @@ impl Live {
 pub struct Toasts {
     pub list: Vec<(String, f32)>,
     pub version: u64,
+    pending_sound: bool,
 }
 
 impl Toasts {
+    /// A toast with its sound (skipped when another sound just played).
     pub fn push(&mut self, s: impl Into<String>) {
-        self.list.push((s.into(), 4.5));
+        self.pending_sound = true;
+        self.push_quiet(s);
+    }
+    /// A toast whose event already made its own sound.
+    pub fn push_quiet(&mut self, s: impl Into<String>) {
+        self.list.push((s.into(), 2.4 + 0.42));
         if self.list.len() > 3 {
             self.list.remove(0);
         }
@@ -133,7 +140,11 @@ fn demo_request(live: &mut Live) {
     live.version += 1;
 }
 
-pub fn tick_toasts(time: Res<Time<Real>>, mut toasts: ResMut<Toasts>) {
+pub fn tick_toasts(time: Res<Time<Real>>, mut toasts: ResMut<Toasts>, mut sound: ResMut<crate::sound::Sound>) {
+    if toasts.pending_sound {
+        toasts.pending_sound = false;
+        sound.play_q("toast", 150);
+    }
     let dt = time.delta_secs();
     let before = toasts.list.len();
     for t in toasts.list.iter_mut() {

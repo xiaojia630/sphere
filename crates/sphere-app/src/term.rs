@@ -631,6 +631,7 @@ pub fn read_keys(
     moment: Res<crate::moment::Moment>,
     mut theme: ResMut<crate::theme::Theme>,
     mut toasts: ResMut<crate::live::Toasts>,
+    mut sound: ResMut<crate::sound::Sound>,
 ) {
     let ctrl = keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
     let alt = keys.pressed(KeyCode::AltLeft) || keys.pressed(KeyCode::AltRight);
@@ -680,10 +681,19 @@ pub fn read_keys(
         if !focus.terminal {
             match e.key_code {
                 KeyCode::KeyT => focus.terminal = true,
+                KeyCode::KeyM if !e.repeat => {
+                    let m = !sound.muted;
+                    sound.set_muted(m);
+                    if !m {
+                        sound.play("toggle");
+                    }
+                    toasts.push_quiet(if m { "Sound off" } else { "Sound on" });
+                }
                 KeyCode::KeyC => {
                     let next = theme.id.next();
                     theme.set(next);
-                    toasts.push(format!("Theme · {}", next.label()));
+                    sound.play("theme");
+                    toasts.push_quiet(format!("Theme · {}", next.label()));
                 }
                 KeyCode::KeyD => {
                     let m = if ctl.mode == crate::core::Mode::Depth { crate::core::Mode::Flat } else { crate::core::Mode::Depth };
