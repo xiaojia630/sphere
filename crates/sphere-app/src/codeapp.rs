@@ -788,12 +788,12 @@ pub fn draw(mut commands: Commands, app: Res<CodeApp>, svc: Res<Service>, roots:
     if app.amt.x < 0.001 && !app.open {
         return;
     }
-    let (task, run, agents, sver) = {
+    let (task, run, agents, sver, link) = {
         let s = svc.shared.lock().unwrap();
         let t = pick(&app, &s.tasks).cloned();
         let run = t.as_ref().and_then(|t| s.runs.get(&t.id).cloned()).unwrap_or_default();
         let agents: Vec<TaskView> = t.as_ref().map(|t| repo_tasks(&s.tasks, &t.repo).into_iter().take(3).cloned().collect()).unwrap_or_default();
-        (t, run, agents, s.version)
+        (t, run, agents, s.version, s.link.clone())
     };
     let key = (app.version, sver, theme.version, time.elapsed_secs() as i64 / 30);
     if *seen == key {
@@ -820,7 +820,12 @@ pub fn draw(mut commands: Commands, app: Res<CodeApp>, svc: Res<Service>, roots:
     let Some(t) = task else {
         let b = ui.body(c, root(Pane::Diff));
         let h = ui.header(c, "Diff", "", ui.dim);
-        let m = c.spawn((Text::new("No agent has worked on a repo yet. Start one with /  (repo: what to do)."), font(&f.ui500, 13.0, 0.5), TextColor(ui.line), Node { margin: UiRect::all(px(18)), ..default() })).id();
+        let msg = match &link {
+            Some(crate::service::Link::Down(e)) => format!("sphered isn't running ({}): agents and their changes come from it", clip(e, 70)),
+            Some(crate::service::Link::Connecting) | Some(crate::service::Link::Starting) => "Connecting to sphered…".to_string(),
+            _ => "No agent has worked on a repo yet. Start one with /  (repo: what to do).".to_string(),
+        };
+        let m = c.spawn((Text::new(msg), font(&f.ui500, 13.0, 0.5), TextColor(ui.line), Node { margin: UiRect::all(px(18)), ..default() })).id();
         c.entity(b).add_children(&[h, m]);
         for p in [Pane::Task, Pane::Tree, Pane::Tests, Pane::Acts] {
             let b = ui.body(c, root(p));

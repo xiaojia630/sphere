@@ -109,6 +109,8 @@ pub struct GitApp {
     gcur: usize,
     /// reads so far (the preview is read again after each)
     loads: u64,
+    /// look tests: SPHERE_GIT_KEYS played once the first repo is in
+    pending: Vec<KeyCode>,
     preview: Vec<(char, String)>,
     preview_rx: Option<Mutex<mpsc::Receiver<Preview>>>,
     preview_for: String,
@@ -139,6 +141,7 @@ impl Default for GitApp {
             bcur: 0,
             gcur: 0,
             loads: 0,
+            pending: Vec::new(),
             preview: Vec::new(),
             preview_rx: None,
             preview_for: String::new(),
@@ -326,6 +329,7 @@ pub fn keys(
         codes.push(e.key_code);
     }
     // clicks on the panes: a button presses its key, a row picks its item
+    codes.append(&mut app.pending);
     for c in clicks.take(1) {
         match c {
             Click::Key(k) => codes.push(k),
@@ -576,6 +580,27 @@ pub fn update(sim: Res<crate::core::Sim>, mut atlases: ResMut<AppAtlases>, mut a
             }
             if app.sel >= app.repos.len() {
                 app.sel = 0;
+            }
+            if app.repo.is_none() {
+                // a repo's first read: start on its current branch
+                app.bcur = repo.branches.iter().position(|b| b.current).unwrap_or(0);
+                if let Ok(keys) = std::env::var("SPHERE_GIT_KEYS") {
+                    app.pending = keys
+                        .chars()
+                        .filter_map(|k| match k {
+                            'j' => Some(KeyCode::KeyJ),
+                            'k' => Some(KeyCode::KeyK),
+                            't' => Some(KeyCode::Tab),
+                            'e' => Some(KeyCode::Enter),
+                            'v' => Some(KeyCode::KeyV),
+                            ']' => Some(KeyCode::BracketRight),
+                            '[' => Some(KeyCode::BracketLeft),
+                            ',' => Some(KeyCode::Comma),
+                            '.' => Some(KeyCode::Period),
+                            _ => None,
+                        })
+                        .collect();
+                }
             }
             app.repo = Some(repo);
         }
@@ -842,10 +867,15 @@ fn draw_graph(c: &mut Commands, ui: &Ui, root: Entity, r: &Repo, cursor: usize, 
     let b = ui.body(c, root);
     let n = r.graph.len();
     let first = first_row(cursor, n, GRAPH_ROWS);
-    let right = if n > GRAPH_ROWS { format!("{}–{} of {n} · V graph", first + 1, (first + GRAPH_ROWS).min(n)) } else { "all branches · V graph".to_string() };
+    let right = if n > GRAPH_ROWS { format!("{}–{} of {n}", first + 1, (first + GRAPH_ROWS).min(n)) } else { "all branches".to_string() };
     let h = ui.header(c, "Graph", &right, ui.dim);
     let list = c.spawn(Node { flex_direction: FlexDirection::Column, padding: UiRect { left: px(16), right: px(16), top: px(8), ..default() }, ..default() }).id();
     c.entity(b).add_children(&[h, list]);
+    // back to the tilted graph
+    let chip = c.spawn((Node { position_type: PositionType::Absolute, right: px(150), top: px(10), padding: UiRect { left: px(6), right: px(6), top: px(2), bottom: px(1) }, border: UiRect::all(px(1)), ..default() }, BorderColor::all(with_alpha(ui.line, 0.45)), Click::Key(KeyCode::KeyV))).id();
+    let ct = ui.text(c, "V GRAPH", &ui.f.ui700, 9.5, 1.4, ui.line);
+    c.entity(chip).add_child(ct);
+    c.entity(b).add_child(chip);
     if n == 0 {
         let t = ui.text(c, "No commits yet", &ui.f.ui500, 13.0, 0.4, ui.dim);
         c.entity(list).add_child(t);
@@ -1159,4 +1189,70 @@ fn draw_strip(c: &mut Commands, ui: &Ui, root: Entity, agents: &[TaskView]) {
     let l2 = ui.text(c, "B BRANCH   F FETCH   L PULL   P PUSH   V GRAPH   [ ] REPO   ESC CLOSE", &ui.f.ui600, 10.0, 1.6, ui.dim);
     c.entity(legend).add_children(&[l1, l2]);
     c.entity(r).add_children(&[sp, legend]);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::gitdata::{Branch, GraphRow};
+
+    fn app() -> GitApp {
+        let mut a = GitApp::default();
+        let ch = |p: &str| Change { path: p.into(), code: 'M', from: None, added: None, removed: None };
+        let graph = ["*", "|\\", "*", "|/", "*"].iter().enumerate().map(|(i, l)| GraphRow { lanes: l.to_string(), hash: if l.starts_with('*') { format!("h{i}") } else { String::new() }, ..Default::default() }).collect();
+        a.repo = Some(Repo { staged: vec![ch("a")], unstaged: vec![ch("b"), ch("c")], branches: (0..9).map(|i| Branch { name: format!("b{i}"), ..Default::default() }).collect(), graph, ..Default::default() });
+        a
+    }
+
+    #[test]
+    fn the_repo_window_follows_the_selection() {
+        assert_eq!(window_first(0, 12), 0);
+        assert_eq!(window_first(2, 12), 0);
+        assert_eq!(window_first(3, 12), 1);
+        assert_eq!(window_first(11, 12), 9);
+        assert_eq!(window_first(1, 2), 0);
+        assert_eq!((first_row(0, 20, 6), first_row(5, 20, 6), first_row(6, 20, 6), first_row(19, 20, 6), first_row(2, 3, 6)), (0, 0, 1, 14, 0));
+    }
+
+    #[test]
+    fn j_and_k_move_in_the_zone_tab_picked() {
+        let mut a = app();
+        a.step(1);
+        a.step(1);
+        a.step(1);
+        assert_eq!(a.cursor, 2, "files stop at the last one");
+        a.step(-5);
+        assert_eq!(a.cursor, 0);
+        a.next_zone();
+        assert_eq!(a.zone, Zone::Branches);
+        for _ in 0..20 {
+            a.step(1);
+        }
+        assert_eq!(a.bcur, 8);
+        // the graph zone is only on Tab in the list view
+        a.next_zone();
+        assert_eq!(a.zone, Zone::Files);
+        a.flat = true;
+        a.next_zone();
+        a.next_zone();
+        assert_eq!(a.zone, Zone::Graph);
+        a.step(1);
+        assert_eq!(a.gcur, 2, "connector rows are skipped");
+        a.step(1);
+        assert_eq!(a.gcur, 4);
+        a.step(1);
+        assert_eq!(a.gcur, 4);
+        a.step(-1);
+        assert_eq!(a.gcur, 2);
+    }
+
+    #[test]
+    fn stepping_with_nothing_loaded_does_nothing() {
+        let mut a = GitApp::default();
+        a.step(1);
+        a.next_zone();
+        a.step(-1);
+        assert_eq!((a.cursor, a.bcur, a.gcur), (0, 0, 0));
+        assert!(a.changes().is_empty());
+    }
 }
