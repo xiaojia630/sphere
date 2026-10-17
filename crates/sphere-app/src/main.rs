@@ -56,7 +56,8 @@ pub struct Args {
     pub work: bool,
     /// only the core (the app icon render)
     pub icon: bool,
-    /// anti-aliasing on the core: msaa4 (default), msaa2, smaa, fxaa
+    /// anti-aliasing on the core: smaa (default; a post pass, so the three window cameras share one non-MSAA
+    /// texture, at about a third of MSAA's memory), msaa4, msaa2, fxaa, none
     pub aa: String,
     /// `--offscreen` with `--bench`: render into an image and wait for the GPU each frame, so the numbers are the
     /// whole frame's cost, not the display's refresh
@@ -88,7 +89,7 @@ impl Args {
 }
 
 fn parse_args() -> Args {
-    let mut a = Args { cmd: None, bench: None, shot: None, frames: 120, depth: false, orbit: false, apps: false, work: false, icon: false, aa: std::env::var("SPHERE_AA").unwrap_or_else(|_| "msaa4".into()), offscreen: false, collapsed: false, focus_term: false, msaa: true, size: (1600, 1000), dt: 1.0 / 20.0, demo: false, live: false, moment: false, theme: None };
+    let mut a = Args { cmd: None, bench: None, shot: None, frames: 120, depth: false, orbit: false, apps: false, work: false, icon: false, aa: std::env::var("SPHERE_AA").unwrap_or_else(|_| "smaa".into()), offscreen: false, collapsed: false, focus_term: false, msaa: true, size: (1600, 1000), dt: 1.0 / 20.0, demo: false, live: false, moment: false, theme: None };
     let mut it = std::env::args().skip(1);
     while let Some(s) = it.next() {
         match s.as_str() {
@@ -102,10 +103,13 @@ fn parse_args() -> Args {
             "--work" => a.work = true,
             "--icon" => a.icon = true,
             "--offscreen" => a.offscreen = true,
-            "--aa" => a.aa = it.next().unwrap_or_else(|| "msaa4".into()),
+            "--aa" => a.aa = it.next().unwrap_or_else(|| "smaa".into()),
             "--collapsed" => a.collapsed = true,
             "--term" => a.focus_term = true,
-            "--no-msaa" => a.msaa = false,
+            "--no-msaa" => {
+                a.msaa = false;
+                a.aa = "none".into();
+            }
             "--demo" => a.demo = true,
             "--live" => a.live = true,
             "--moment" => a.moment = true,
