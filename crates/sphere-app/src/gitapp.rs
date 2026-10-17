@@ -303,6 +303,25 @@ pub fn setup(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut image
 }
 
 #[allow(clippy::too_many_arguments)]
+/// What the wheel does over a pane: step the cursor of a zone, or press a key.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Scroll {
+    Zone(Zone, KeyCode),
+    Key(KeyCode),
+}
+
+fn scroll_target(pane: Option<u8>, down: bool) -> Option<Scroll> {
+    let k = if down { KeyCode::KeyJ } else { KeyCode::KeyK };
+    match Pane::all().get(pane? as usize)? {
+        Pane::Repo(_) => Some(Scroll::Key(if down { KeyCode::BracketRight } else { KeyCode::BracketLeft })),
+        Pane::Branches => Some(Scroll::Zone(Zone::Branches, k)),
+        Pane::Graph | Pane::Commit => Some(Scroll::Zone(Zone::Graph, k)),
+        Pane::Status => Some(Scroll::Zone(Zone::Files, k)),
+        _ => None,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 pub fn keys(
     mut ev: MessageReader<bevy::input::keyboard::KeyboardInput>,
     keys: Res<ButtonInput<KeyCode>>,
@@ -310,7 +329,7 @@ pub fn keys(
     mut app: ResMut<GitApp>,
     mut sound: ResMut<crate::sound::Sound>,
     mut toasts: ResMut<crate::live::Toasts>,
-    mut clicks: ResMut<crate::appframe::AppClicks>,
+    (mut clicks, mut scrolls): (ResMut<crate::appframe::AppClicks>, ResMut<crate::appframe::AppScrolls>),
     mut cmd_was: Local<bool>,
 ) {
     let mut focus = focus;
@@ -330,6 +349,20 @@ pub fn keys(
     }
     // clicks on the panes: a button presses its key, a row picks its item
     codes.append(&mut app.pending);
+    // the wheel moves the cursor of the zone under it
+    for (pane, n) in scrolls.take(1) {
+        if let Some(t) = scroll_target(pane, n > 0) {
+            let (zone, key) = match t {
+                Scroll::Zone(z, k) => (Some(z), k),
+                Scroll::Key(k) => (None, k),
+            };
+            if let Some(z) = zone.filter(|z| *z != app.zone) {
+                app.zone = z;
+                app.version += 1;
+            }
+            codes.extend(std::iter::repeat_n(key, n.unsigned_abs() as usize));
+        }
+    }
     for c in clicks.take(1) {
         match c {
             Click::Key(k) => codes.push(k),
@@ -998,7 +1031,7 @@ fn draw_graph3d(c: &mut Commands, ui: &Ui, root: Entity, r: &Repo, yaw_deg: f32)
         c.entity(area).add_child(chip);
     }
     let foot = c.spawn(Node { position_type: PositionType::Absolute, left: px(16), bottom: px(10), column_gap: px(14), ..default() }).id();
-    for (label, key) in [("< TURN ,", KeyCode::Comma), ("TURN . >", KeyCode::Period), ("V LIST", KeyCode::KeyV)] {
+    for (label, key) in [("‹ TURN ,", KeyCode::Comma), ("TURN . ›", KeyCode::Period), ("V LIST", KeyCode::KeyV)] {
         let part = c.spawn((Node { padding: UiRect::axes(px(4), px(2)), ..default() }, Click::Key(key))).id();
         let ft = ui.text(c, label, &ui.f.ui600, 9.5, 2.0, ui.dim);
         c.entity(part).add_child(ft);
@@ -1194,6 +1227,17 @@ fn draw_strip(c: &mut Commands, ui: &Ui, root: Entity, agents: &[TaskView]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wheel_targets_per_pane() {
+        let i = |p: Pane| Pane::all().iter().position(|x| *x == p).map(|i| i as u8);
+        assert_eq!(scroll_target(i(Pane::Graph), true), Some(Scroll::Zone(Zone::Graph, KeyCode::KeyJ)));
+        assert_eq!(scroll_target(i(Pane::Commit), false), Some(Scroll::Zone(Zone::Graph, KeyCode::KeyK)));
+        assert_eq!(scroll_target(i(Pane::Branches), true), Some(Scroll::Zone(Zone::Branches, KeyCode::KeyJ)));
+        assert_eq!(scroll_target(i(Pane::Status), false), Some(Scroll::Zone(Zone::Files, KeyCode::KeyK)));
+        assert_eq!(scroll_target(i(Pane::Repo(1)), true), Some(Scroll::Key(KeyCode::BracketRight)));
+        assert_eq!(scroll_target(i(Pane::Remote), true), None);
+    }
     use crate::gitdata::{Branch, GraphRow};
 
     fn app() -> GitApp {

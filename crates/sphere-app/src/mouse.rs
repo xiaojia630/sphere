@@ -44,6 +44,7 @@ pub struct MouseState {
     last_click: Option<(Vec2, f32)>,
     pending_click: Option<(Hit, f32)>,
     wheel_acc: f32,
+    pane_wheel: crate::appframe::WheelAcc,
     t: f32,
     /// for the reticle
     pub dragging: bool,
@@ -130,7 +131,7 @@ pub fn update(
     mut ctl: ResMut<CoreCtl>,
     mut ms: ResMut<MouseState>,
     (mut acts, mut sound, mut toasts): (ResMut<Acts>, ResMut<crate::sound::Sound>, ResMut<crate::live::Toasts>),
-    (mut rolo, mut fx, mut open, sv, mut pclicks): (ResMut<crate::homepanels::Rolodex>, ResMut<crate::fx::Fx>, ResMut<crate::apps::Open>, Res<crate::core::StageView>, ResMut<crate::appframe::PanelClicks>),
+    (mut rolo, mut fx, mut open, sv, mut pclicks, mut scrolls, parts): (ResMut<crate::homepanels::Rolodex>, ResMut<crate::fx::Fx>, ResMut<crate::apps::Open>, Res<crate::core::StageView>, ResMut<crate::appframe::PanelClicks>, ResMut<crate::appframe::AppScrolls>, Query<&crate::appframe::AppPart>),
 ) {
     let dt = time.delta_secs();
     ms.t += dt;
@@ -191,6 +192,15 @@ pub fn update(
                     rolo.sel = ((rolo.sel as i32 + step).rem_euclid(n)) as usize;
                     rolo.version += 1;
                     sound.play("tick");
+                }
+            }
+            // an app pane: the wheel scrolls what is under the pointer (Ctrl keeps the depth push)
+            Hit::Panel(e, PanelId::App | PanelId::AppBare | PanelId::AppFrame) if !ctrl => {
+                let n = ms.pane_wheel.feed(e, dy);
+                if let (n, Ok(part)) = (n, parts.get(e)) {
+                    if n != 0 && part.pane.is_some() {
+                        scrolls.push(part.app, part.pane, n);
+                    }
                 }
             }
             Hit::Panel(e, _) if !ctrl => {

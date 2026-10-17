@@ -771,6 +771,17 @@ fn name_of(p: &Path) -> String {
 }
 
 #[allow(clippy::too_many_arguments)]
+/// The key (and Shift) the wheel presses over a pane: the columns step their rows, the preview scrolls.
+fn scroll_key(pane: Option<u8>, down: bool) -> Option<(KeyCode, bool)> {
+    let k = if down { KeyCode::KeyJ } else { KeyCode::KeyK };
+    match pane? as usize {
+        PARENT | CUR => Some((k, false)),
+        PREVIEW => Some((k, true)),
+        _ => None,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 pub fn keys(
     mut ev: MessageReader<bevy::input::keyboard::KeyboardInput>,
     keys: Res<ButtonInput<KeyCode>>,
@@ -779,7 +790,7 @@ pub fn keys(
     sim: Res<crate::core::Sim>,
     mut sound: ResMut<crate::sound::Sound>,
     mut toasts: ResMut<crate::live::Toasts>,
-    mut clicks: ResMut<crate::appframe::AppClicks>,
+    (mut clicks, mut scrolls): (ResMut<crate::appframe::AppClicks>, ResMut<crate::appframe::AppScrolls>),
     mut cmd_was: Local<bool>,
 ) {
     let mut focus = focus;
@@ -797,6 +808,11 @@ pub fn keys(
             continue;
         }
         codes.push((e.key_code, shift));
+    }
+    for (pane, n) in scrolls.take(APP) {
+        if let Some(k) = scroll_key(pane, n > 0) {
+            codes.extend(std::iter::repeat_n(k, n.unsigned_abs() as usize));
+        }
     }
     // clicks on the panes: a button presses its key, a row picks its item
     for c in clicks.take(APP) {
@@ -1371,6 +1387,15 @@ fn column_into(c: &mut Commands, ui: &Ui, b: Entity, col: Col) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wheel_keys_per_pane() {
+        assert_eq!(scroll_key(Some(CUR as u8), true), Some((KeyCode::KeyJ, false)));
+        assert_eq!(scroll_key(Some(PARENT as u8), false), Some((KeyCode::KeyK, false)));
+        assert_eq!(scroll_key(Some(PREVIEW as u8), true), Some((KeyCode::KeyJ, true)));
+        assert_eq!(scroll_key(Some(PREVIEW as u8), false), Some((KeyCode::KeyK, true)));
+        assert_eq!(scroll_key(Some(PINS as u8), true), None);
+    }
 
     fn tmp(name: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("sphere-files-{name}-{}", std::process::id()));

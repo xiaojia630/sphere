@@ -300,6 +300,75 @@ pub fn route_clicks(
     }
 }
 
+/// Wheel px that make one scroll step in an app pane.
+pub const WHEEL_STEP: f32 = 40.0;
+/// Steps one frame of wheel may make, so a fling doesn't flood an app.
+const WHEEL_MAX: i32 = 6;
+
+/// The wheel over one pane, accumulated into steps (a different pane starts over).
+#[derive(Default)]
+pub struct WheelAcc {
+    acc: f32,
+    at: Option<Entity>,
+}
+
+impl WheelAcc {
+    /// Adds a wheel delta (positive = wheel up) over `at`; returns whole steps, positive = down.
+    pub fn feed(&mut self, at: Entity, dy: f32) -> i32 {
+        if self.at != Some(at) {
+            self.at = Some(at);
+            self.acc = 0.0;
+        }
+        self.acc += dy;
+        let n = (self.acc / WHEEL_STEP).abs().floor() as i32;
+        self.acc -= self.acc.signum() * n as f32 * WHEEL_STEP;
+        if n == 0 {
+            return 0;
+        }
+        let down = if dy > 0.0 { -1 } else { 1 };
+        down * n.min(WHEEL_MAX)
+    }
+}
+
+/// Wheel steps on app panes, per app: (app, pane index in `AppPart`, steps; positive = down).
+#[derive(Resource, Default)]
+pub struct AppScrolls(Vec<(u8, Option<u8>, i32)>);
+
+impl AppScrolls {
+    pub fn push(&mut self, app: u8, pane: Option<u8>, n: i32) {
+        self.0.push((app, pane, n));
+    }
+    pub fn take(&mut self, app: u8) -> Vec<(Option<u8>, i32)> {
+        let (mine, rest): (Vec<_>, Vec<_>) = self.0.drain(..).partition(|c| c.0 == app);
+        self.0 = rest;
+        mine.into_iter().map(|c| (c.1, c.2)).collect()
+    }
+}
+
+/// Scroll steps as the keys the pane answers to (`key(pane, down)`), one press per step.
+pub fn scroll_keys(steps: Vec<(Option<u8>, i32)>, key: impl Fn(Option<u8>, bool) -> Option<KeyCode>) -> Vec<KeyCode> {
+    let mut out = Vec::new();
+    for (pane, n) in steps {
+        if let Some(k) = key(pane, n > 0) {
+            out.extend(std::iter::repeat_n(k, n.unsigned_abs() as usize));
+        }
+    }
+    out
+}
+
+/// Look tests: SPHERE_TEST_WHEEL="app,pane,steps" scrolls a pane (steps > 0 = down) once, five seconds in.
+pub fn test_wheel(sim: Res<crate::core::Sim>, mut scrolls: ResMut<AppScrolls>, mut done: Local<bool>) {
+    if *done || sim.t < 5.0 {
+        return;
+    }
+    *done = true;
+    let Ok(v) = std::env::var("SPHERE_TEST_WHEEL") else { return };
+    let f: Vec<i32> = v.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+    if f.len() == 3 {
+        scrolls.push(f[0] as u8, Some(f[1] as u8), f[2]);
+    }
+}
+
 /// Look tests: SPHERE_TEST_CLICK="app,pane,x,y" clicks there (pane px) once, four seconds in.
 pub fn test_click(sim: Res<crate::core::Sim>, mut clicks: ResMut<PanelClicks>, quads: Query<(Entity, &AppPart), With<PaneRoot>>, mut done: Local<bool>) {
     if *done || sim.t < 4.0 {
@@ -342,5 +411,38 @@ impl Ui<'_> {
             self.line(c, parent, a + dir * s, a + dir * e, w, col);
             s += dash + gap;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wheel_accumulates_into_steps() {
+        let mut world = World::new();
+        let (a, b) = (world.spawn_empty().id(), world.spawn_empty().id());
+        let mut w = WheelAcc::default();
+        assert_eq!(w.feed(a, -15.0), 0);
+        assert_eq!(w.feed(a, -15.0), 0);
+        assert_eq!(w.feed(a, -15.0), 1);
+        assert_eq!(w.feed(a, 85.0), -2);
+        // 5 left over; the other pane starts over
+        assert_eq!(w.feed(b, -30.0), 0);
+        assert_eq!(w.feed(b, -30.0), 1);
+        // a fling is capped
+        assert_eq!(w.feed(b, -4000.0), WHEEL_MAX);
+    }
+
+    #[test]
+    fn scrolls_go_to_their_app_and_become_keys() {
+        let mut s = AppScrolls::default();
+        s.push(1, Some(4), 2);
+        s.push(2, Some(0), -1);
+        assert_eq!(s.take(1), vec![(Some(4), 2)]);
+        assert!(s.take(1).is_empty());
+        assert_eq!(s.take(2), vec![(Some(0), -1)]);
+        let keys = scroll_keys(vec![(Some(4), 2), (Some(9), 1), (Some(4), -1)], |p, down| (p == Some(4)).then_some(if down { KeyCode::KeyJ } else { KeyCode::KeyK }));
+        assert_eq!(keys, vec![KeyCode::KeyJ, KeyCode::KeyJ, KeyCode::KeyK]);
     }
 }

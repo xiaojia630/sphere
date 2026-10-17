@@ -277,6 +277,18 @@ pub fn setup(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut image
 }
 
 #[allow(clippy::too_many_arguments)]
+/// The key the wheel presses over a pane (indices of `Pane::ALL`).
+fn scroll_key(pane: Option<u8>, down: bool) -> Option<KeyCode> {
+    match (Pane::ALL.get(pane? as usize)?, down) {
+        (Pane::Diff, true) => Some(KeyCode::KeyJ),
+        (Pane::Diff, false) => Some(KeyCode::KeyK),
+        (Pane::Tree, true) => Some(KeyCode::BracketRight),
+        (Pane::Tree, false) => Some(KeyCode::BracketLeft),
+        _ => None,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 pub fn keys(
     mut ev: MessageReader<bevy::input::keyboard::KeyboardInput>,
     keys: Res<ButtonInput<KeyCode>>,
@@ -286,7 +298,7 @@ pub fn keys(
     sim: Res<crate::core::Sim>,
     mut sound: ResMut<crate::sound::Sound>,
     mut toasts: ResMut<crate::live::Toasts>,
-    mut clicks: ResMut<crate::appframe::AppClicks>,
+    (mut clicks, mut scrolls): (ResMut<crate::appframe::AppClicks>, ResMut<crate::appframe::AppScrolls>),
     mut cmd_was: Local<bool>,
 ) {
     let mut focus = focus;
@@ -305,6 +317,8 @@ pub fn keys(
         }
         codes.push(e.key_code);
     }
+    // the wheel: over the diff it steps lines, over the files it steps files
+    codes.extend(crate::appframe::scroll_keys(scrolls.take(0), scroll_key));
     // clicks on the panes: a button presses its key, a row picks its item
     for c in clicks.take(0) {
         match c {
@@ -1311,6 +1325,17 @@ fn draw_strip(c: &mut Commands, ui: &Ui, root: Entity, agents: &[TaskView], cur:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wheel_keys_per_pane() {
+        let i = |p: Pane| Pane::ALL.iter().position(|x| *x == p).map(|i| i as u8);
+        assert_eq!(scroll_key(i(Pane::Diff), true), Some(KeyCode::KeyJ));
+        assert_eq!(scroll_key(i(Pane::Diff), false), Some(KeyCode::KeyK));
+        assert_eq!(scroll_key(i(Pane::Tree), true), Some(KeyCode::BracketRight));
+        assert_eq!(scroll_key(i(Pane::Tree), false), Some(KeyCode::BracketLeft));
+        assert_eq!(scroll_key(i(Pane::Tests), true), None);
+        assert_eq!(scroll_key(None, true), None);
+    }
     use crate::review::{DiffLine, FileDiff, Hunk, Status};
 
     fn hunk(n: usize) -> Hunk {
