@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Builds Sphere.app: the desktop app with sphered, sphere-host and the sphere CLI next to it, an icon rendered
 # from the core, ad-hoc signed. Notifications then show as Sphere, and Option+Space activates the app cleanly.
-# usage: scripts/package-macos-app.sh            -> target/Sphere.app
+# usage: scripts/package-macos-app.sh            -> target/Sphere.app, target/Sphere-<version>.dmg and .zip
+# The app is ad-hoc signed, not notarized: on another Mac, open it the first time with right-click > Open.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
@@ -44,4 +45,18 @@ if [ -s "$tmp/core.png" ]; then
 fi
 rm -rf "$tmp"
 codesign --force --deep --sign - "$app" >/dev/null
+# a disk image to share: the app and a link to Applications, to drag it across
+dmg=target/Sphere-${version}.dmg
+stage=$(mktemp -d)
+cp -R "$app" "$stage/"
+ln -s /Applications "$stage/Applications"
+rm -f "$dmg"
+hdiutil create -quiet -volname "Sphere" -srcfolder "$stage" -ov -format UDZO "$dmg"
+rm -rf "$stage"
+# and a zip next to it
+zip=target/Sphere-${version}-macos.zip
+rm -f "$zip"
+(cd target && ditto -c -k --keepParent Sphere.app "$(basename "$zip")")
 echo "$app"
+echo "$dmg"
+echo "$zip"
