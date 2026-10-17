@@ -38,6 +38,13 @@ fn vs_panel(v: VIn) -> VOut {
     return o;
 }
 
+// how much a content texel glows: only bright text does (dim labels and small figures stay crisp, as with the
+// prototype's text-shadow on the hot text)
+fn glow_tap(uv: vec2<f32>) -> f32 {
+    let c = textureSample(content, content_samp, uv);
+    return c.a * smoothstep(0.38, 0.85, max(c.r, max(c.g, c.b)));
+}
+
 // panel uv (0..1) to the atlas
 fn atl(t: vec2<f32>) -> vec2<f32> {
     return u.r.xy + t * u.r.zw;
@@ -128,10 +135,10 @@ fn fs_panel(i: VOut) -> @location(0) vec4<f32> {
     let r = 2.2;
     let tw = vec2<f32>(r / w, r / h);
     var gl = 0.0;
-    gl += textureSample(content, content_samp, atl(clamp(cuv + vec2<f32>(tw.x, 0.0), vec2<f32>(0.0), vec2<f32>(1.0)))).a;
-    gl += textureSample(content, content_samp, atl(clamp(cuv - vec2<f32>(tw.x, 0.0), vec2<f32>(0.0), vec2<f32>(1.0)))).a;
-    gl += textureSample(content, content_samp, atl(clamp(cuv + vec2<f32>(0.0, tw.y), vec2<f32>(0.0), vec2<f32>(1.0)))).a;
-    gl += textureSample(content, content_samp, atl(clamp(cuv - vec2<f32>(0.0, tw.y), vec2<f32>(0.0), vec2<f32>(1.0)))).a;
+    gl += glow_tap(atl(clamp(cuv + vec2<f32>(tw.x, 0.0), vec2<f32>(0.0), vec2<f32>(1.0))));
+    gl += glow_tap(atl(clamp(cuv - vec2<f32>(tw.x, 0.0), vec2<f32>(0.0), vec2<f32>(1.0))));
+    gl += glow_tap(atl(clamp(cuv + vec2<f32>(0.0, tw.y), vec2<f32>(0.0), vec2<f32>(1.0))));
+    gl += glow_tap(atl(clamp(cuv - vec2<f32>(0.0, tw.y), vec2<f32>(0.0), vec2<f32>(1.0))));
     gl = gl * 0.25 * inb * u.p.w;
     col = over(col, vec4<f32>(u.line.rgb * gl * 0.55, gl * 0.35) * mask);
     col = over(col, tex * mask);

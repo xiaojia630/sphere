@@ -187,10 +187,12 @@ pub struct CodeRoots {
     corelab: Entity,
 }
 
-pub fn setup(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut atlas: ResMut<PanelAtlas>, mut pmats: ResMut<Assets<PanelMaterial>>, args: Res<crate::Args>, mut app: ResMut<CodeApp>) {
+pub fn setup(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut images: ResMut<Assets<Image>>, (home, mut atlases): (Res<PanelAtlas>, ResMut<AppAtlases>), mut pmats: ResMut<Assets<PanelMaterial>>, args: Res<crate::Args>, mut app: ResMut<CodeApp>) {
     if args.code {
         app.open();
     }
+    // the app's own atlas, sharper than the home's (see `AppAtlases`)
+    let mut atlas = Atlas::new(&mut commands, &mut images, home.scale * APP_SHARP, -11);
     let c = &mut commands;
     let at = |x: f32, y: f32, w: f32, h: f32, z: f32| {
         let mut p = stage_to_world(WS_CX + K * (x + w / 2.0 - WS_W / 2.0), WS_CY + K * (y + h / 2.0 - WS_H / 2.0));
@@ -218,6 +220,7 @@ pub fn setup(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut atlas
     let e = spawn_panel_quad(c, &mut meshes, &mut pmats, &ui, &PanelSpec { id: PanelId::AppBare, w: lw, h: lh, home, home_scale: 1.0, side: 0.0, phase: 2.2, show_at: 0.0, unframed: false });
     c.entity(e).insert(CodeCoreLabel);
     c.insert_resource(CodeRoots { panes, corelab: ui.root });
+    atlases.add(0, atlas);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -492,10 +495,11 @@ fn run_tests(app: &mut CodeApp, wd: String, toasts: &mut crate::live::Toasts) {
 
 /// Springs, the core's corner, reading the review in the background, test progress and action results.
 #[allow(clippy::too_many_arguments)]
-pub fn update(sim: Res<crate::core::Sim>, mut app: ResMut<CodeApp>, mut ctl: ResMut<CoreCtl>, svc: Res<Service>, mut toasts: ResMut<crate::live::Toasts>, mut sound: ResMut<crate::sound::Sound>) {
+pub fn update(sim: Res<crate::core::Sim>, mut atlases: ResMut<AppAtlases>, mut app: ResMut<CodeApp>, mut ctl: ResMut<CoreCtl>, svc: Res<Service>, mut toasts: ResMut<crate::live::Toasts>, mut sound: ResMut<crate::sound::Sound>) {
     app.amt.t = if app.open { 1.0 } else { 0.0 };
     app.amt.step(sim.dt);
     ctl.app = clamp(app.amt.x, 0.0, 1.0);
+    atlases.want(0, app.open || app.amt.x > 0.001);
     if let Some((_, until)) = app.armed {
         if sim.t > until {
             app.armed = None;
@@ -701,7 +705,7 @@ fn draw_task(c: &mut Commands, ui: &Ui, root: Entity, t: &TaskView, run: &crate:
     c.entity(inner).add_child(title);
     // the base can be a commit: show it short
     let base: String = t.base.clone().unwrap_or_else(|| "main".into()).chars().take(9).collect();
-    let branch = if t.in_place { "in place".to_string() } else { format!("{} ← {}", clip(t.branch.as_deref().unwrap_or("-").trim_start_matches("sphere/"), 13), base) };
+    let branch = if t.in_place { "in place".to_string() } else { format!("{} from {}", clip(t.branch.as_deref().unwrap_or("-").trim_start_matches("sphere/"), 12), base) };
     let agent = match &t.model {
         Some(m) => format!("Claude Code · {}", clip(m, 12)),
         None => "Claude Code".into(),

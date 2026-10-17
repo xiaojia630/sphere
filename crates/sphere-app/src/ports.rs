@@ -80,11 +80,11 @@ impl PortsApp {
 #[derive(Resource)]
 pub struct PortsRoots(Workspace);
 
-pub fn setup(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut atlas: ResMut<PanelAtlas>, mut pmats: ResMut<Assets<PanelMaterial>>, args: Res<crate::Args>, mut app: ResMut<PortsApp>) {
+pub fn setup(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut images: ResMut<Assets<Image>>, (home, mut atlases): (Res<PanelAtlas>, ResMut<AppAtlases>), mut pmats: ResMut<Assets<PanelMaterial>>, args: Res<crate::Args>, mut app: ResMut<PortsApp>) {
     if args.open_app.as_deref() == Some("ports") {
         app.open();
     }
-    let ws = spawn_workspace(&mut commands, &mut meshes, &mut atlas, &mut pmats, APP, &PANES);
+    let ws = spawn_workspace(&mut commands, &mut meshes, &mut images, &home, &mut atlases, &mut pmats, APP, &PANES);
     commands.insert_resource(PortsRoots(ws));
 }
 
@@ -195,9 +195,10 @@ pub fn keys(
     }
 }
 
-pub fn update(sim: Res<crate::core::Sim>, mut app: ResMut<PortsApp>, mut ctl: ResMut<CoreCtl>, mut toasts: ResMut<crate::live::Toasts>, mut sound: ResMut<crate::sound::Sound>) {
+pub fn update(sim: Res<crate::core::Sim>, mut atlases: ResMut<AppAtlases>, mut app: ResMut<PortsApp>, mut ctl: ResMut<CoreCtl>, mut toasts: ResMut<crate::live::Toasts>, mut sound: ResMut<crate::sound::Sound>) {
     let open = app.open;
     step_open(open, &mut app.amt, sim.dt, &mut ctl);
+    atlases.want(APP, open || app.amt.x > 0.001);
     if app.armed.is_some_and(|t| sim.t > t) {
         app.armed = None;
         app.version += 1;

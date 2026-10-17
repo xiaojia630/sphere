@@ -154,10 +154,12 @@ pub struct GitRoots {
     corelab: Entity,
 }
 
-pub fn setup(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut atlas: ResMut<PanelAtlas>, mut pmats: ResMut<Assets<PanelMaterial>>, args: Res<crate::Args>, mut app: ResMut<GitApp>) {
+pub fn setup(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut images: ResMut<Assets<Image>>, (home, mut atlases): (Res<PanelAtlas>, ResMut<AppAtlases>), mut pmats: ResMut<Assets<PanelMaterial>>, args: Res<crate::Args>, mut app: ResMut<GitApp>) {
     if args.git {
         app.open();
     }
+    // the app's own atlas, sharper than the home's (see `AppAtlases`)
+    let mut atlas = Atlas::new(&mut commands, &mut images, home.scale * APP_SHARP, -11 - 1);
     let c = &mut commands;
     let at = |x: f32, y: f32, w: f32, h: f32, z: f32| {
         let mut p = stage_to_world(WS_CX + K * (x + w / 2.0 - WS_W / 2.0), WS_CY + K * (y + h / 2.0 - WS_H / 2.0));
@@ -183,6 +185,7 @@ pub fn setup(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut atlas
     let e = spawn_panel_quad(c, &mut meshes, &mut pmats, &ui, &PanelSpec { id: PanelId::AppBare, w: lw, h: lh, home, home_scale: 1.0, side: 0.0, phase: 2.6, show_at: 0.0, unframed: false });
     c.entity(e).insert(GitPart(None));
     c.insert_resource(GitRoots { panes, corelab: ui.root });
+    atlases.add(1, atlas);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -328,10 +331,11 @@ pub fn keys(
 
 /// Springs, the core's corner, reading the repos in the background, previews and action results.
 #[allow(clippy::too_many_arguments)]
-pub fn update(sim: Res<crate::core::Sim>, mut app: ResMut<GitApp>, mut ctl: ResMut<CoreCtl>, svc: Res<Service>, mut bar: ResMut<CmdBar>, mut toasts: ResMut<crate::live::Toasts>, mut sound: ResMut<crate::sound::Sound>) {
+pub fn update(sim: Res<crate::core::Sim>, mut atlases: ResMut<AppAtlases>, mut app: ResMut<GitApp>, mut ctl: ResMut<CoreCtl>, svc: Res<Service>, mut bar: ResMut<CmdBar>, mut toasts: ResMut<crate::live::Toasts>, mut sound: ResMut<crate::sound::Sound>) {
     app.amt.t = if app.open { 1.0 } else { 0.0 };
     app.amt.step(sim.dt);
     ctl.app = ctl.app.max(clamp(app.amt.x, 0.0, 1.0));
+    atlases.want(1, app.open || app.amt.x > 0.001);
     // what you typed in the bar for us
     if let Some((t, text)) = bar.out.take() {
         match t {

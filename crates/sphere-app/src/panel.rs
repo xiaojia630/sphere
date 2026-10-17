@@ -228,8 +228,9 @@ pub struct PanelUiCamera;
 /// Every panel's UI is laid out side by side in one texture, drawn by one UI camera (rather than a camera and a
 /// texture per panel). Rects are packed in shelves as panels spawn during Startup; `finish_atlas` then makes the
 /// texture as tall as they need. It's a render target only: no CPU copy.
-#[derive(Resource)]
-pub struct PanelAtlas {
+/// One atlas: a render-target texture and the UI camera that draws panels' UI into it, packed in shelves as panels
+/// spawn during Startup. `finish` makes it as tall as its panels need. It's a render target only: no CPU copy.
+pub struct Atlas {
     pub image: Handle<Image>,
     pub camera: Entity,
     pub scale: f32,
@@ -238,28 +239,97 @@ pub struct PanelAtlas {
     shelf: u32,
 }
 
+impl Atlas {
+    pub fn new(commands: &mut Commands, images: &mut Assets<Image>, scale: f32, order: isize) -> Self {
+        // a placeholder until `finish` knows the size (the camera needs its target to exist)
+        let image = images.add(atlas_image(1));
+        let camera = commands
+            .spawn((
+                Camera2d,
+                Camera { order, clear_color: ClearColorConfig::Custom(Color::NONE), ..default() },
+                RenderTarget::Image(ImageRenderTarget { handle: image.clone(), scale_factor: scale }),
+                Msaa::Off,
+                PanelUiCamera,
+                AtlasForce(0),
+            ))
+            .id();
+        Atlas { image, camera, scale, x: 0, y: 0, shelf: 0 }
+    }
+    pub fn height(&self) -> u32 {
+        (self.y + self.shelf).max(1)
+    }
+    /// Points the panel materials drawn from this atlas at their rects (texture px until now).
+    fn normalise(&self, mats: &mut Assets<PanelMaterial>) {
+        let h = self.height() as f32;
+        let size = Vec4::new(ATLAS_W as f32, h, ATLAS_W as f32, h);
+        for (_, m) in mats.iter_mut() {
+            if m.content.as_ref() == Some(&self.image) {
+                m.u.r /= size;
+            }
+        }
+    }
+}
+
+/// The home screen's panels (and the HUD's): always resident.
+#[derive(Resource)]
+pub struct PanelAtlas(pub Atlas);
+
+impl std::ops::Deref for PanelAtlas {
+    type Target = Atlas;
+    fn deref(&self) -> &Atlas {
+        &self.0
+    }
+}
+impl std::ops::DerefMut for PanelAtlas {
+    fn deref_mut(&mut self) -> &mut Atlas {
+        &mut self.0
+    }
+}
+
+/// Each app's own atlas. An app's texture only exists while the app is open (or folding away), so closed apps
+/// cost no GPU memory; it's drawn at a higher scale than the home's, since app panes sit larger and closer.
+#[derive(Resource, Default)]
+pub struct AppAtlases {
+    list: Vec<(u8, Atlas, bool, bool)>,
+}
+
+impl AppAtlases {
+    pub fn add(&mut self, app: u8, atlas: Atlas) {
+        self.list.push((app, atlas, false, false));
+    }
+    /// Asks for an app's texture (true while it's open or animating).
+    pub fn want(&mut self, app: u8, want: bool) {
+        if let Some(a) = self.list.iter_mut().find(|a| a.0 == app) {
+            a.3 = want;
+        }
+    }
+}
+
+/// Forces an atlas camera to draw for this many more frames (its texture was just made, so it's empty).
+#[derive(Component)]
+pub struct AtlasForce(pub u8);
+
+/// How much sharper than the screen an app's panes are drawn: they show about 1.1 × larger, and nearer.
+pub const APP_SHARP: f32 = 1.3;
+
 pub const ATLAS_W: u32 = 4096;
 /// clear texels between panels, so sampling at a panel's edge never picks up its neighbour
 const GUTTER: u32 = 2;
 
-pub fn setup_atlas(mut commands: Commands, mut images: ResMut<Assets<Image>>, args: Res<crate::Args>, win: Query<&Window, With<bevy::window::PrimaryWindow>>) {
+/// Texture px per stage px for the home's panels: the panel shows at about `k` on screen, so match the screen
+/// pixels (a little over, since panels drift nearer the camera).
+pub fn home_scale(args: &crate::Args, win: &Query<&Window, With<bevy::window::PrimaryWindow>>) -> f32 {
     let sv = StageView::compute(args.size.0 as f32, args.size.1 as f32);
     let dpr = win.single().map(|w| w.scale_factor()).unwrap_or(1.0);
-    // texture px per css px: the panel is shown at about `k` on screen, so match the screen pixels
-    let scale = (sv.k * dpr).max(crate::hud::SCALE_MIN);
+    (sv.k * dpr * 1.1).max(crate::hud::SCALE_MIN)
+}
+
+pub fn setup_atlas(mut commands: Commands, mut images: ResMut<Assets<Image>>, args: Res<crate::Args>, win: Query<&Window, With<bevy::window::PrimaryWindow>>) {
+    let scale = home_scale(&args, &win);
     commands.insert_resource(PanelScale(scale));
-    // a placeholder until `finish_atlas` knows the size (the camera needs its target to exist)
-    let image = images.add(atlas_image(1));
-    let camera = commands
-        .spawn((
-            Camera2d,
-            Camera { order: -10, clear_color: ClearColorConfig::Custom(Color::NONE), ..default() },
-            RenderTarget::Image(ImageRenderTarget { handle: image.clone(), scale_factor: scale }),
-            Msaa::Off,
-            PanelUiCamera,
-        ))
-        .id();
-    commands.insert_resource(PanelAtlas { image, camera, scale, x: 0, y: 0, shelf: 0 });
+    let atlas = Atlas::new(&mut commands, &mut images, scale, -10);
+    commands.insert_resource(PanelAtlas(atlas));
+    commands.insert_resource(AppAtlases::default());
 }
 
 fn atlas_image(h: u32) -> Image {
@@ -268,21 +338,39 @@ fn atlas_image(h: u32) -> Image {
     img
 }
 
-/// Sizes the atlas to what was packed and points every panel material at its rect.
-pub fn finish_atlas(atlas: Res<PanelAtlas>, mut images: ResMut<Assets<Image>>, mut mats: ResMut<Assets<PanelMaterial>>) {
-    let h = (atlas.y + atlas.shelf).max(1);
+/// Sizes the home atlas, and points every panel material at its rect in its atlas.
+pub fn finish_atlas(atlas: Res<PanelAtlas>, apps: Res<AppAtlases>, mut images: ResMut<Assets<Image>>, mut mats: ResMut<Assets<PanelMaterial>>) {
+    let h = atlas.height();
     let _ = images.insert(&atlas.image, atlas_image(h));
-    let size = Vec4::new(ATLAS_W as f32, h as f32, ATLAS_W as f32, h as f32);
-    for (_, m) in mats.iter_mut() {
-        m.u.r /= size;
+    atlas.normalise(&mut mats);
+    for (_, a, _, _) in &apps.list {
+        a.normalise(&mut mats);
     }
     if crate::stats::on() {
         eprintln!("stats: panel atlas {ATLAS_W}x{h} ({:.1} MB)", (ATLAS_W * h * 4) as f64 / 1e6);
+        for (app, a, _, _) in &apps.list {
+            eprintln!("stats: app {app} atlas {ATLAS_W}x{} ({:.1} MB while open)", a.height(), (ATLAS_W * a.height() * 4) as f64 / 1e6);
+        }
+    }
+}
+
+/// Makes an app's texture when it opens and drops it once it has folded away.
+pub fn app_atlas_residency(mut apps: ResMut<AppAtlases>, mut images: ResMut<Assets<Image>>, mut force: Query<&mut AtlasForce>) {
+    for (_, a, alloc, want) in apps.list.iter_mut() {
+        if *want != *alloc {
+            *alloc = *want;
+            let _ = images.insert(&a.image, atlas_image(if *want { a.height() } else { 1 }));
+            if *want {
+                if let Ok(mut f) = force.get_mut(a.camera) {
+                    f.0 = 4;
+                }
+            }
+        }
     }
 }
 
 /// A panel's UI root, placed in its own rect of the atlas (clipped to it).
-pub fn spawn_ui_panel(commands: &mut Commands, atlas: &mut PanelAtlas, w: f32, h: f32) -> UiPanel {
+pub fn spawn_ui_panel(commands: &mut Commands, atlas: &mut Atlas, w: f32, h: f32) -> UiPanel {
     let (pw, ph) = ((w * atlas.scale).ceil() as u32, (h * atlas.scale).ceil() as u32);
     if atlas.x + pw > ATLAS_W {
         atlas.x = 0;
@@ -347,7 +435,7 @@ pub fn spawn_panel_quad(
             fill: if card { lin(Role::Acc) } else { lin(Role::Fill) },
             acc: lin(Role::Acc),
             // 1 framed glass, 2 the core readout (dark backdrop), 3 bare text (the clock)
-            p: Vec4::new(if matches!(s.id, PanelId::Clock | PanelId::Brand | PanelId::Apps | PanelId::Rail | PanelId::Say | PanelId::AppBare) { 3.0 } else if s.unframed { 2.0 } else { 1.0 }, if card { 0.86 } else { 0.36 }, 1.0, 1.0),
+            p: Vec4::new(if matches!(s.id, PanelId::Clock | PanelId::Brand | PanelId::Apps | PanelId::Rail | PanelId::Say | PanelId::AppBare) { 3.0 } else if s.unframed { 2.0 } else { 1.0 }, if card { 0.86 } else { 0.36 }, 1.0, if matches!(s.id, PanelId::App | PanelId::AppBare) { 0.6 } else { 1.0 }),
             from_c,
             to_c,
             q: Vec4::new(0.0, 0.0, 0.0, 0.0),
@@ -822,7 +910,7 @@ pub fn gate_panel_cameras(
     >,
     parents: Query<&ChildOf>,
     roots: Query<&UiTargetCamera>,
-    mut cams: Query<(Entity, &mut Camera), With<PanelUiCamera>>,
+    mut cams: Query<(Entity, &mut Camera, Option<&mut AtlasForce>), With<PanelUiCamera>>,
     mut frames: Local<u32>,
     mut dirty: Local<Vec<Entity>>,
 ) {
@@ -843,8 +931,15 @@ pub fn gate_panel_cameras(
             }
         }
     }
-    for (e, mut cam) in &mut cams {
-        let on = *frames <= PANEL_WARMUP_FRAMES || dirty.contains(&e);
+    for (e, mut cam, force) in &mut cams {
+        let mut forced = false;
+        if let Some(mut f) = force {
+            if f.0 > 0 {
+                f.0 -= 1;
+                forced = true;
+            }
+        }
+        let on = *frames <= PANEL_WARMUP_FRAMES || dirty.contains(&e) || forced;
         if cam.is_active != on {
             cam.is_active = on;
         }

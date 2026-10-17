@@ -79,7 +79,12 @@ pub struct Workspace {
 
 /// Spawns an app's glass, its panes (x, y, w, h, z in workspace px; `bare` ones get no frame) and the label beside
 /// the small core.
-pub fn spawn_workspace(c: &mut Commands, meshes: &mut Assets<Mesh>, atlas: &mut PanelAtlas, pmats: &mut Assets<PanelMaterial>, app: u8, rects: &[([f32; 5], bool)]) -> Workspace {
+/// Spawns an app's glass, its panes and its label in the app's own atlas (made and dropped as the app opens and
+/// closes; see `AppAtlases`).
+#[allow(clippy::too_many_arguments)]
+pub fn spawn_workspace(c: &mut Commands, meshes: &mut Assets<Mesh>, images: &mut Assets<Image>, home_atlas: &PanelAtlas, apps: &mut AppAtlases, pmats: &mut Assets<PanelMaterial>, app: u8, rects: &[([f32; 5], bool)]) -> Workspace {
+    let mut own = Atlas::new(c, images, home_atlas.scale * APP_SHARP, -11 - app as isize);
+    let atlas = &mut own;
     let at = |x: f32, y: f32, w: f32, h: f32, z: f32| {
         let mut p = stage_to_world(WS_CX + K * (x + w / 2.0 - WS_W / 2.0), WS_CY + K * (y + h / 2.0 - WS_H / 2.0));
         p.z = z;
@@ -102,7 +107,9 @@ pub fn spawn_workspace(c: &mut Commands, meshes: &mut Assets<Mesh>, atlas: &mut 
     home.z = 20.0;
     let e = spawn_panel_quad(c, meshes, pmats, &ui, &PanelSpec { id: PanelId::AppBare, w: lw, h: lh, home, home_scale: 1.0, side: 0.0, phase: 2.6, show_at: 0.0, unframed: false });
     c.entity(e).insert(AppPart { app, pane: None });
-    Workspace { panes, corelab: ui.root }
+    let corelab = ui.root;
+    apps.add(app, own);
+    Workspace { panes, corelab }
 }
 
 /// The parts follow how open their app is (a pane `hide` says no to stays away).

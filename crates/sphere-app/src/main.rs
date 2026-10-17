@@ -210,7 +210,7 @@ fn main() {
             )
                 .chain(),
         )
-        .add_systems(Last, panel::gate_panel_cameras)
+        .add_systems(Last, (panel::app_atlas_residency, panel::gate_panel_cameras).chain())
         .add_systems(PostUpdate, (panel::theme_panels, theme_bloom, sound::flush));
     if !args.offline() {
         summon::install(&mut app);
