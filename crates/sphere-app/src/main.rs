@@ -237,8 +237,8 @@ fn task_pools() -> TaskPoolPlugin {
     let pol = |min: usize, max: usize, percent: f32| P { min_threads: min, max_threads: max, percent, on_thread_spawn: hook.clone(), on_thread_destroy: None };
     TaskPoolPlugin {
         task_pool_options: TaskPoolOptions {
-            io: pol(1, 2, 0.1),
-            async_compute: pol(1, 2, 0.1),
+            io: pol(1, 4, 0.25),
+            async_compute: pol(1, 4, 0.25),
             compute: pol(1, usize::MAX, 1.0),
             ..default()
         },
