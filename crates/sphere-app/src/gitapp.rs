@@ -1,8 +1,10 @@
 //! The Git app (design/apps/git): your repos and their state at a glance, a commit graph across branches, the
 //! working tree with staging, a commit box, branches and the remote, over the agents' strip. Everything is read
-//! and done with git in the background. Keys: [ ] repo, J K file, S stage, U unstage, A stage all, X unstage all,
-//! C commit (with M toggling amend), B switch branch, L pull, P push, Esc closes.
+//! and done with git in the background. Keys: [ ] repo, Tab the list J K move in (files, branches, graph),
+//! Enter stage or unstage the file / switch to the branch, S stage, U unstage, A stage all, X unstage all,
+//! C commit (with M toggling amend), B switch branch, F fetch, L pull, P push, V graph/list, Esc closes.
 use crate::appframe::{clip, Click, Ui};
+use crate::gitdata::clip_start;
 use crate::cmdbar::{BarTarget, CmdBar};
 use crate::core::CoreCtl;
 use crate::fonts::UiFonts;
@@ -21,7 +23,13 @@ const WS_H: f32 = 700.0;
 const WS_CX: f32 = 803.0;
 const WS_CY: f32 = 552.0;
 const K: f32 = 1.1;
+/// Repo cards on screen, and repos kept in all.
 const REPOS: usize = 3;
+const REPOS_MAX: usize = 12;
+/// A click on a branch row, a graph row, a stage box (in `Pick`/`Alt`) is numbered from these.
+const BRANCH_PICK: usize = 1000;
+const GRAPH_PICK: usize = 2000;
+const STAGE_ALT: usize = 1000;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Pane {
@@ -57,10 +65,30 @@ impl Pane {
 
 const GRAPH_ROWS: usize = 14;
 const FILE_ROWS: usize = 5;
+const BRANCH_ROWS: usize = 6;
 
-type Loaded = (usize, Repo, Vec<RepoCard>);
+/// (the repos, the selected one, its state, the cards)
+type Loaded = (Vec<PathBuf>, usize, Repo, Vec<RepoCard>);
 type Preview = Vec<(char, String)>;
 type Note = Result<String, String>;
+
+/// Which list J and K move in.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Zone {
+    Files,
+    Branches,
+    Graph,
+}
+
+/// The first repo card shown, so the selected repo is among the REPOS on screen.
+fn window_first(sel: usize, len: usize) -> usize {
+    sel.saturating_sub(REPOS - 1).min(len.saturating_sub(REPOS))
+}
+
+/// The first of `shown` rows to draw so the cursor row is in view.
+fn first_row(cursor: usize, len: usize, shown: usize) -> usize {
+    cursor.saturating_sub(shown - 1).min(len.saturating_sub(shown))
+}
 
 #[derive(Resource)]
 pub struct GitApp {
@@ -75,6 +103,14 @@ pub struct GitApp {
     load_t: f32,
     /// the selected change: staged first, then unstaged
     cursor: usize,
+    zone: Zone,
+    /// the selected branch and graph row
+    bcur: usize,
+    gcur: usize,
+    /// reads so far (the preview is read again after each)
+    loads: u64,
+    /// look tests: SPHERE_GIT_KEYS played once the first repo is in
+    pending: Vec<KeyCode>,
     preview: Vec<(char, String)>,
     preview_rx: Option<Mutex<mpsc::Receiver<Preview>>>,
     preview_for: String,
@@ -101,6 +137,11 @@ impl Default for GitApp {
             load_rx: None,
             load_t: -99.0,
             cursor: 0,
+            zone: Zone::Files,
+            bcur: 0,
+            gcur: 0,
+            loads: 0,
+            pending: Vec::new(),
             preview: Vec::new(),
             preview_rx: None,
             preview_for: String::new(),
@@ -118,6 +159,76 @@ impl GitApp {
     pub fn open(&mut self) {
         self.open = true;
         self.load_t = -99.0;
+        // look for repos again: agents may have started in new ones
+        if !self.loading {
+            self.repos.clear();
+            self.cards.clear();
+            self.repo = None;
+            self.sel = 0;
+            self.cursor = 0;
+            self.bcur = 0;
+            self.gcur = 0;
+        }
+        self.version += 1;
+    }
+    /// Selects repo `i`.
+    fn select_repo(&mut self, i: usize) {
+        if i < self.repos.len() && i != self.sel {
+            self.sel = i;
+            self.repo = None;
+            self.cursor = 0;
+            self.bcur = 0;
+            self.gcur = 0;
+            self.zone = Zone::Files;
+            self.preview.clear();
+            self.load_t = -99.0;
+            self.version += 1;
+        }
+    }
+    /// Rows the cursor of `zone` moves over.
+    fn len_of(&self, zone: Zone) -> usize {
+        match (&self.repo, zone) {
+            (Some(r), Zone::Files) => r.staged.len() + r.unstaged.len(),
+            (Some(r), Zone::Branches) => r.branches.len(),
+            (Some(r), Zone::Graph) => r.graph.len(),
+            _ => 0,
+        }
+    }
+    /// Moves the cursor of the zone J K work in.
+    fn step(&mut self, d: i32) {
+        let n = self.len_of(self.zone);
+        if n == 0 {
+            return;
+        }
+        match self.zone {
+            Zone::Files => self.cursor = (self.cursor as i32 + d).clamp(0, n as i32 - 1) as usize,
+            Zone::Branches => self.bcur = (self.bcur as i32 + d).clamp(0, n as i32 - 1) as usize,
+            Zone::Graph => {
+                // connector rows between commits have nothing to select
+                let Some(r) = &self.repo else { return };
+                let mut i = self.gcur as i32;
+                loop {
+                    i += d.signum();
+                    if !(0..n as i32).contains(&i) {
+                        return;
+                    }
+                    if !r.graph[i as usize].hash.is_empty() {
+                        break;
+                    }
+                }
+                self.gcur = i as usize;
+            }
+        }
+        self.version += 1;
+    }
+    /// The zones Tab goes through.
+    fn next_zone(&mut self) {
+        let flat = self.flat;
+        self.zone = match self.zone {
+            Zone::Files => Zone::Branches,
+            Zone::Branches if flat => Zone::Graph,
+            _ => Zone::Files,
+        };
         self.version += 1;
     }
     pub fn close(&mut self) {
@@ -136,6 +247,9 @@ impl GitApp {
     /// Runs a git action in the background; the outcome comes back as a toast and the repo is read again.
     fn act(&mut self, op: Op) {
         let Some(dir) = self.dir() else { return };
+        self.act_at(dir, op);
+    }
+    fn act_at(&mut self, dir: PathBuf, op: Op) {
         self.busy = true;
         self.version += 1;
         let tx = self.notes.0.clone();
@@ -215,55 +329,102 @@ pub fn keys(
         codes.push(e.key_code);
     }
     // clicks on the panes: a button presses its key, a row picks its item
+    codes.append(&mut app.pending);
     for c in clicks.take(1) {
         match c {
             Click::Key(k) => codes.push(k),
-            Click::Pick(i) => {
-                app.cursor = i;
+            Click::Pick(i) if i >= GRAPH_PICK => {
+                app.zone = Zone::Graph;
+                app.gcur = (i - GRAPH_PICK).min(app.len_of(Zone::Graph).saturating_sub(1));
                 app.version += 1;
             }
-            Click::Alt(i) => {
-                if i < app.repos.len() && i != app.sel {
-                    app.sel = i;
-                    app.repo = None;
-                    app.cursor = 0;
-                    app.load_t = -99.0;
+            // a branch row: the first click selects it, a click on the selected one switches to it
+            Click::Pick(i) if i >= BRANCH_PICK => {
+                let b = i - BRANCH_PICK;
+                if app.zone == Zone::Branches && app.bcur == b {
+                    codes.push(KeyCode::Enter);
+                } else {
+                    app.zone = Zone::Branches;
+                    app.bcur = b.min(app.len_of(Zone::Branches).saturating_sub(1));
                     app.version += 1;
                 }
+            }
+            Click::Pick(i) => {
+                app.zone = Zone::Files;
+                app.cursor = i.min(app.len_of(Zone::Files).saturating_sub(1));
+                app.version += 1;
+            }
+            // a stage box toggles its file
+            Click::Alt(i) if i >= STAGE_ALT => {
+                app.zone = Zone::Files;
+                app.cursor = (i - STAGE_ALT).min(app.len_of(Zone::Files).saturating_sub(1));
+                codes.push(KeyCode::Enter);
+            }
+            Click::Alt(i) => {
+                app.select_repo(i);
+                sound.play("toggle");
             }
         }
     }
     for key in codes {
-        let n = app.changes().len();
-        let sel = app.changes().get(app.cursor).map(|(c, staged)| (c.path.clone(), *staged));
+        let sel = app.changes().get(app.cursor).map(|(c, staged)| (c.path.clone(), c.from.clone(), *staged));
+        // a second action while one runs would race it
+        if app.busy && matches!(key, KeyCode::KeyS | KeyCode::KeyU | KeyCode::KeyA | KeyCode::KeyX | KeyCode::KeyL | KeyCode::KeyP | KeyCode::KeyF | KeyCode::Enter) {
+            toasts.push_quiet("Still working on the last action");
+            continue;
+        }
         match key {
             KeyCode::Escape => {
                 app.close();
                 sound.play_with("collapse", 0.7, 0.0);
             }
-            KeyCode::KeyJ | KeyCode::ArrowDown if n > 0 => {
-                app.cursor = (app.cursor + 1).min(n - 1);
-                app.version += 1;
+            KeyCode::KeyJ | KeyCode::ArrowDown => {
+                app.step(1);
                 sound.play_q("tick", 40);
             }
             KeyCode::KeyK | KeyCode::ArrowUp => {
-                app.cursor = app.cursor.saturating_sub(1);
-                app.version += 1;
+                app.step(-1);
                 sound.play_q("tick", 40);
+            }
+            KeyCode::Tab => {
+                app.next_zone();
+                sound.play("toggle");
             }
             k @ (KeyCode::BracketLeft | KeyCode::BracketRight) => {
                 let m = app.repos.len();
                 if m > 1 {
-                    app.sel = if k == KeyCode::BracketRight { (app.sel + 1) % m } else { (app.sel + m - 1) % m };
-                    app.repo = None;
-                    app.cursor = 0;
-                    app.load_t = -99.0;
-                    app.version += 1;
+                    let to = if k == KeyCode::BracketRight { (app.sel + 1) % m } else { (app.sel + m - 1) % m };
+                    app.select_repo(to);
                     sound.play("toggle");
                 }
             }
+            KeyCode::Enter => match app.zone {
+                Zone::Files => match sel {
+                    Some((p, _, false)) => {
+                        app.act(Op::Stage(p));
+                        sound.play("confirm");
+                    }
+                    Some((p, from, true)) => {
+                        app.act(Op::Unstage(p, from));
+                        sound.play("discard");
+                    }
+                    None => toasts.push_quiet("Nothing to stage"),
+                },
+                Zone::Branches => {
+                    let b = app.repo.as_ref().and_then(|r| r.branches.get(app.bcur)).map(|b| (b.name.clone(), b.current));
+                    match b {
+                        Some((_, true)) => toasts.push_quiet("Already on that branch"),
+                        Some((name, false)) => {
+                            app.act(Op::Switch(name));
+                            sound.play("whoosh");
+                        }
+                        None => {}
+                    }
+                }
+                Zone::Graph => {}
+            },
             KeyCode::KeyS => match sel {
-                Some((p, false)) => {
+                Some((p, _, false)) => {
                     app.act(Op::Stage(p));
                     sound.play("confirm");
                 }
@@ -271,19 +432,27 @@ pub fn keys(
                 None => toasts.push_quiet("Nothing to stage"),
             },
             KeyCode::KeyU => match sel {
-                Some((p, true)) => {
-                    app.act(Op::Unstage(p));
+                Some((p, from, true)) => {
+                    app.act(Op::Unstage(p, from));
                     sound.play("discard");
                 }
                 _ => toasts.push_quiet("Pick a staged file to unstage"),
             },
             KeyCode::KeyA => {
-                app.act(Op::StageAll);
-                sound.play("confirm");
+                if app.repo.as_ref().is_some_and(|r| r.unstaged.is_empty()) {
+                    toasts.push_quiet("Nothing left to stage");
+                } else {
+                    app.act(Op::StageAll);
+                    sound.play("confirm");
+                }
             }
             KeyCode::KeyX => {
-                app.act(Op::UnstageAll);
-                sound.play("discard");
+                if app.repo.as_ref().is_some_and(|r| r.staged.is_empty()) {
+                    toasts.push_quiet("Nothing staged");
+                } else {
+                    app.act(Op::UnstageAll);
+                    sound.play("discard");
+                }
             }
             KeyCode::KeyM => {
                 app.amend = !app.amend;
@@ -292,7 +461,9 @@ pub fn keys(
             }
             KeyCode::KeyC => {
                 let staged = app.repo.as_ref().map(|r| r.staged.len()).unwrap_or(0);
-                if staged == 0 && !app.amend {
+                if app.repo.as_ref().is_some_and(|r| r.card.empty) && app.amend {
+                    toasts.push("There is no commit to amend yet");
+                } else if staged == 0 && !app.amend {
                     toasts.push("Stage something first (S, or A for everything)");
                 } else if let (Some(d), Some(r)) = (app.dir(), &app.repo) {
                     let b = r.card.branch.clone();
@@ -308,6 +479,9 @@ pub fn keys(
             }
             KeyCode::KeyV => {
                 app.flat = !app.flat;
+                if !app.flat && app.zone == Zone::Graph {
+                    app.zone = Zone::Files;
+                }
                 app.version += 1;
                 sound.play("toggle");
             }
@@ -315,6 +489,10 @@ pub fn keys(
                 app.yaw = (app.yaw + if k == KeyCode::Comma { -10.0 } else { 10.0 }).clamp(-60.0, 40.0);
                 app.version += 1;
                 sound.play_q("tick", 40);
+            }
+            KeyCode::KeyF => {
+                app.act(Op::Fetch);
+                sound.play("progress");
             }
             KeyCode::KeyL => {
                 app.act(Op::Pull);
@@ -336,20 +514,22 @@ pub fn update(sim: Res<crate::core::Sim>, mut atlases: ResMut<AppAtlases>, mut a
     app.amt.step(sim.dt);
     ctl.app = ctl.app.max(clamp(app.amt.x, 0.0, 1.0));
     atlases.want(1, app.open || app.amt.x > 0.001);
-    // what you typed in the bar for us
-    if let Some((t, text)) = bar.out.take() {
-        match t {
-            BarTarget::Commit(..) => {
-                let amend = app.amend;
-                app.act(Op::Commit { msg: text, amend });
-                app.amend = false;
-                sound.play("done");
+    // what you typed in the bar for us (it waits while an action runs, so it isn't lost)
+    if !app.busy {
+        if let Some((t, text)) = bar.out.take() {
+            match t {
+                BarTarget::Commit(dir, _) => {
+                    let amend = app.amend;
+                    app.act_at(PathBuf::from(dir), Op::Commit { msg: text, amend });
+                    app.amend = false;
+                    sound.play("done");
+                }
+                BarTarget::Branch(dir) => {
+                    app.act_at(PathBuf::from(dir), Op::Switch(text));
+                    sound.play("whoosh");
+                }
+                other => bar.out = Some((other, text)),
             }
-            BarTarget::Branch(..) => {
-                app.act(Op::Switch(text));
-                sound.play("whoosh");
-            }
-            other => bar.out = Some((other, text)),
         }
     }
     let notes: Vec<Result<String, String>> = app.notes.1.lock().map(|r| r.try_iter().collect()).unwrap_or_default();
@@ -365,9 +545,22 @@ pub fn update(sim: Res<crate::core::Sim>, mut atlases: ResMut<AppAtlases>, mut a
         app.load_t = -99.0;
         app.version += 1;
     }
-    let got = app.load_rx.as_ref().and_then(|r| r.lock().ok()?.try_recv().ok());
-    if let Some((sel, repo, cards)) = got {
+    let got = app.load_rx.as_ref().and_then(|r| match r.lock().ok()?.try_recv() {
+        Ok(v) => Some(Some(v)),
+        Err(mpsc::TryRecvError::Disconnected) => Some(None),
+        Err(_) => None,
+    });
+    if got == Some(None) {
+        // the reader died: try again later
         app.loading = false;
+        app.load_rx = None;
+    }
+    if let Some(Some((repos, sel, repo, cards))) = got {
+        app.loading = false;
+        app.loads += 1;
+        if app.repos != repos {
+            app.repos = repos;
+        }
         // look tests: SPHERE_GIT_REPO=n starts on the nth repo
         if let Some(n) = std::env::var("SPHERE_GIT_REPO").ok().and_then(|v| v.parse::<usize>().ok()).filter(|n| *n != app.sel && app.repo.is_none() && *n < app.repos.len()) {
             app.sel = n;
@@ -375,10 +568,39 @@ pub fn update(sim: Res<crate::core::Sim>, mut atlases: ResMut<AppAtlases>, mut a
             app.cards = cards;
             return;
         }
-        if sel == app.sel {
+        if app.repos.is_empty() {
+            app.repo = None;
+        } else if sel == app.sel {
             let n = repo.staged.len() + repo.unstaged.len();
-            if app.cursor >= n {
-                app.cursor = n.saturating_sub(1);
+            app.cursor = app.cursor.min(n.saturating_sub(1));
+            app.bcur = app.bcur.min(repo.branches.len().saturating_sub(1));
+            app.gcur = app.gcur.min(repo.graph.len().saturating_sub(1));
+            if repo.graph.get(app.gcur).is_some_and(|g| g.hash.is_empty()) {
+                app.gcur = repo.graph.iter().position(|g| !g.hash.is_empty()).unwrap_or(0);
+            }
+            if app.sel >= app.repos.len() {
+                app.sel = 0;
+            }
+            if app.repo.is_none() {
+                // a repo's first read: start on its current branch
+                app.bcur = repo.branches.iter().position(|b| b.current).unwrap_or(0);
+                if let Ok(keys) = std::env::var("SPHERE_GIT_KEYS") {
+                    app.pending = keys
+                        .chars()
+                        .filter_map(|k| match k {
+                            'j' => Some(KeyCode::KeyJ),
+                            'k' => Some(KeyCode::KeyK),
+                            't' => Some(KeyCode::Tab),
+                            'e' => Some(KeyCode::Enter),
+                            'v' => Some(KeyCode::KeyV),
+                            ']' => Some(KeyCode::BracketRight),
+                            '[' => Some(KeyCode::BracketLeft),
+                            ',' => Some(KeyCode::Comma),
+                            '.' => Some(KeyCode::Period),
+                            _ => None,
+                        })
+                        .collect();
+                }
             }
             app.repo = Some(repo);
         }
@@ -393,9 +615,9 @@ pub fn update(sim: Res<crate::core::Sim>, mut atlases: ResMut<AppAtlases>, mut a
     if !app.open {
         return;
     }
-    // the file under the cursor: its change, for the preview
+    // the file under the cursor: its change, for the preview (read again after each load)
     let want = app.changes().get(app.cursor).map(|(c, s)| (c.path.clone(), *s, c.code == '?'));
-    let key = want.as_ref().map(|w| format!("{}{}{}", w.0, w.1, app.repo.as_ref().map(|r| r.unstaged.len() + r.staged.len()).unwrap_or(0))).unwrap_or_default();
+    let key = want.as_ref().map(|w| format!("{}{}{}", w.0, w.1, app.loads)).unwrap_or_default();
     if key != app.preview_for {
         app.preview_for = key;
         match (want, app.dir()) {
@@ -406,7 +628,12 @@ pub fn update(sim: Res<crate::core::Sim>, mut atlases: ResMut<AppAtlases>, mut a
                     let _ = tx.send(gitdata::preview(&d, &p, staged, untracked));
                 });
             }
-            _ => app.preview.clear(),
+            _ => {
+                if !app.preview.is_empty() {
+                    app.preview.clear();
+                    app.version += 1;
+                }
+            }
         }
     }
     // read the repos on open, after an action, and every 4 s (you may change things elsewhere)
@@ -415,35 +642,52 @@ pub fn update(sim: Res<crate::core::Sim>, mut atlases: ResMut<AppAtlases>, mut a
     }
     app.load_t = sim.t;
     app.loading = true;
-    if app.repos.is_empty() || app.repo.is_none() {
-        let agent_repos: Vec<String> = {
-            let s = svc.shared.lock().unwrap();
-            let mut v: Vec<&TaskView> = s.tasks.iter().collect();
-            v.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
-            v.into_iter().map(|t| t.repo.clone()).collect()
-        };
-        if app.repos.is_empty() {
-            app.repos = gitdata::discover(&agent_repos, REPOS);
-        }
-    }
-    let (repos, sel) = (app.repos.clone(), app.sel);
+    let agent_repos: Vec<String> = if app.repos.is_empty() {
+        let s = svc.shared.lock().unwrap();
+        let mut v: Vec<&TaskView> = s.tasks.iter().collect();
+        v.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        v.into_iter().map(|t| t.repo.clone()).collect()
+    } else {
+        Vec::new()
+    };
+    let (known, sel, old) = (app.repos.clone(), app.sel, app.cards.clone());
     let (tx, rx) = mpsc::channel();
     app.load_rx = Some(Mutex::new(rx));
     std::thread::spawn(move || {
-        let Some(dir) = repos.get(sel) else { return };
+        // finding the repos runs git in each, so it happens here, off the frame
+        let repos = if known.is_empty() { gitdata::discover(&agent_repos, REPOS_MAX) } else { known };
+        let sel = sel.min(repos.len().saturating_sub(1));
+        let Some(dir) = repos.get(sel) else {
+            let _ = tx.send((repos, 0, Repo::default(), Vec::new()));
+            return;
+        };
         let repo = gitdata::load(dir);
-        let cards = repos.iter().map(|p| gitdata::card(p)).collect();
-        let _ = tx.send((sel, repo, cards));
+        let first = window_first(sel, repos.len());
+        let cards = repos
+            .iter()
+            .enumerate()
+            .map(|(i, p)| {
+                if i == sel {
+                    repo.card.clone()
+                } else if (first..first + REPOS).contains(&i) {
+                    gitdata::card(p)
+                } else {
+                    old.get(i).filter(|c| c.path == p.to_string_lossy()).cloned().unwrap_or_else(|| gitdata::bare_card(p))
+                }
+            })
+            .collect();
+        let _ = tx.send((repos, sel, repo, cards));
     });
 }
 
 #[allow(clippy::type_complexity)]
 pub fn place(app: Res<GitApp>, mut q: Query<(&mut Panel, &GitPart)>) {
     let amt = clamp(app.amt.x, 0.0, 1.0);
+    let first = window_first(app.sel, app.cards.len());
     for (mut p, part) in &mut q {
         // a repo card with no repo stays away
         let a = match part.0 {
-            Some(Pane::Repo(i)) if i as usize >= app.cards.len() => 0.0,
+            Some(Pane::Repo(i)) if first + i as usize >= app.cards.len() => 0.0,
             _ => amt,
         };
         if p.work.map(|w| w.0) != Some(a) {
@@ -488,45 +732,53 @@ pub fn draw(mut commands: Commands, app: Res<GitApp>, svc: Res<Service>, roots: 
     c.entity(lab).add_children(&[l1, l2]);
     c.entity(roots.corelab).add_child(lab);
     draw_top(c, &ui, root(Pane::Top), &app);
+    let first = window_first(app.sel, app.cards.len());
     for i in 0..REPOS {
-        draw_card(c, &ui, root(Pane::Repo(i as u8)), app.cards.get(i), i == app.sel, i);
+        draw_card(c, &ui, root(Pane::Repo(i as u8)), app.cards.get(first + i), first + i == app.sel, first + i);
     }
     draw_strip(c, &ui, root(Pane::Strip), &agents);
+    let empty_panes = |c: &mut Commands, except_graph: bool| {
+        for p in [Pane::Branches, Pane::Commit, Pane::Status, Pane::Remote].into_iter().chain((!except_graph).then_some(Pane::Graph)) {
+            let b = ui.body(c, root(p));
+            let h = ui.header(c, match p { Pane::Branches => "Branches", Pane::Commit => "Commit", Pane::Status => "Working tree", Pane::Graph => "Graph", _ => "Remote" }, "", ui.dim);
+            c.entity(b).add_child(h);
+        }
+    };
     let Some(r) = &app.repo else {
         let b = ui.body(c, root(Pane::Graph));
         let h = ui.header(c, "Graph", "", ui.dim);
-        let m = c.spawn((Text::new(if app.repos.is_empty() && !app.loading { "No git repos found (agents' repos and ~/Projects)" } else { "Reading…" }), font(&f.ui500, 13.0, 0.5), TextColor(ui.line), Node { margin: UiRect::all(px(18)), ..default() })).id();
+        let m = c.spawn((Text::new(if app.repos.is_empty() && !app.loading { "No git repos found: agents' repos and the repos in ~/Projects show here" } else { "Reading…" }), font(&f.ui500, 13.0, 0.5), TextColor(ui.line), Node { margin: UiRect::all(px(18)), ..default() })).id();
         c.entity(b).add_children(&[h, m]);
-        for p in [Pane::Branches, Pane::Commit, Pane::Status, Pane::Remote] {
-            let b = ui.body(c, root(p));
-            let h = ui.header(c, match p { Pane::Branches => "Branches", Pane::Commit => "Commit", Pane::Status => "Working tree", _ => "Remote" }, "", ui.dim);
-            c.entity(b).add_child(h);
-        }
+        empty_panes(c, true);
         return;
     };
     if let Some(e) = &r.error {
         let b = ui.body(c, root(Pane::Graph));
         let h = ui.header(c, "Graph", "", ui.dim);
-        let m = ui.text(c, clip(e, 80), &f.ui500, 13.0, 0.4, role_color(Role::Bad));
+        let m = c.spawn((Text::new(clip(e, 120)), font(&f.ui500, 13.0, 0.4), TextColor(role_color(Role::Bad)), Node { margin: UiRect::all(px(18)), ..default() })).id();
         c.entity(b).add_children(&[h, m]);
+        empty_panes(c, true);
         return;
     }
-    draw_branches(c, &ui, root(Pane::Branches), r);
+    draw_branches(c, &ui, root(Pane::Branches), r, app.bcur, app.zone == Zone::Branches);
     if app.flat {
-        draw_graph(c, &ui, root(Pane::Graph), r);
+        draw_graph(c, &ui, root(Pane::Graph), r, app.gcur, app.zone == Zone::Graph);
     } else {
         draw_graph3d(c, &ui, root(Pane::Graph), r, app.yaw);
     }
     draw_commit(c, &ui, root(Pane::Commit), r, app.amend, app.busy);
-    draw_status(c, &ui, root(Pane::Status), r, app.cursor, &app.preview, &app.preview_for);
-    draw_remote(c, &ui, root(Pane::Remote), r);
+    draw_status(c, &ui, root(Pane::Status), r, app.cursor, app.zone == Zone::Files, &app.preview);
+    draw_remote(c, &ui, root(Pane::Remote), r, app.busy);
 }
 
 fn draw_top(c: &mut Commands, ui: &Ui, root: Entity, app: &GitApp) {
     let r = c.spawn(Node { width: percent(100), height: percent(100), flex_direction: FlexDirection::Row, align_items: AlignItems::Center, column_gap: px(12), ..default() }).id();
     c.entity(root).add_child(r);
     let name = ui.text(c, "GIT", &ui.f.ui600, 11.0, 3.5, ui.hot);
-    let names: Vec<String> = app.cards.iter().map(|c| c.name.to_uppercase()).collect();
+    let mut names: Vec<String> = app.cards.iter().take(5).map(|c| clip(&c.name.to_uppercase(), 18)).collect();
+    if app.cards.len() > 5 {
+        names.push(format!("+{}", app.cards.len() - 5));
+    }
     let sub = ui.text(c, names.join(" · "), &ui.f.ui500, 11.0, 2.6, ui.dim);
     let sp = c.spawn(Node { flex_grow: 1.0, ..default() }).id();
     let credit = ui.text(c, "git UI after gitui (MIT) · git", &ui.f.ui500, 10.5, 1.0, ui.dim);
@@ -548,12 +800,12 @@ fn draw_card(c: &mut Commands, ui: &Ui, root: Entity, card: Option<&RepoCard>, s
         .id();
     c.entity(root).add_child(b);
     let top = ui.row(c, 8.0);
-    let nm = ui.text(c, k.name.to_uppercase(), &ui.f.display, 13.0, 1.6, ui.hot);
+    let nm = ui.text(c, clip(&k.name.to_uppercase(), 12), &ui.f.display, 13.0, 1.6, ui.hot);
     let dot = c.spawn((Node { width: px(6), height: px(6), ..default() }, BackgroundColor(if k.changed > 0 { role_color(Role::Acc) } else { role_color(Role::Ok) }))).id();
     let sp = c.spawn(Node { flex_grow: 1.0, ..default() }).id();
     let lg = ui.text(c, k.lang.clone(), &ui.f.ui500, 10.0, 2.0, ui.dim);
     c.entity(top).add_children(&[nm, dot, sp, lg]);
-    let br = ui.text(c, format!("⌥ {}", clip(&k.branch, 24)), &ui.f.mono, 11.5, 0.0, ui.line);
+    let br = ui.text(c, format!("⌥ {}", clip_start(&k.branch, 24)), &ui.f.mono, 11.5, 0.0, ui.line);
     let st = ui.row(c, 8.0);
     let a = ui.text(c, format!("↑{}", k.ahead), &ui.f.mono, 11.0, 0.0, role_color(Role::Ok));
     let bh = ui.text(c, format!("↓{}", k.behind), &ui.f.mono, 11.0, 0.0, role_color(Role::Acc));
@@ -564,20 +816,35 @@ fn draw_card(c: &mut Commands, ui: &Ui, root: Entity, card: Option<&RepoCard>, s
     c.entity(b).add_children(&[top, br, st]);
 }
 
-fn draw_branches(c: &mut Commands, ui: &Ui, root: Entity, r: &Repo) {
+fn draw_branches(c: &mut Commands, ui: &Ui, root: Entity, r: &Repo, cursor: usize, active: bool) {
     let b = ui.body(c, root);
-    let h = ui.header(c, "Branches", &format!("{} local", r.branches.len()), ui.dim);
-    let sw = c.spawn((Node { flex_direction: FlexDirection::Row, align_items: AlignItems::Center, height: px(28), margin: UiRect { left: px(12), right: px(12), top: px(10), bottom: px(6) }, padding: UiRect::horizontal(px(10)), border: UiRect::all(px(1)), column_gap: px(8), ..default() }, BorderColor::all(with_alpha(ui.line, 0.4)), Click::Key(KeyCode::KeyB))).id();
+    let n = r.branches.len();
+    let first = first_row(cursor, n, BRANCH_ROWS);
+    let count = if n > BRANCH_ROWS { format!("{}–{} of {n}", first + 1, (first + BRANCH_ROWS).min(n)) } else { format!("{n} local") };
+    let h = ui.header(c, "Branches", &count, ui.dim);
+    let sw = c.spawn((Node { flex_direction: FlexDirection::Row, align_items: AlignItems::Center, height: px(28), margin: UiRect { left: px(12), right: px(12), top: px(10), bottom: px(6) }, padding: UiRect::horizontal(px(10)), border: UiRect::all(px(1)), column_gap: px(8), flex_shrink: 0.0, ..default() }, BorderColor::all(with_alpha(ui.line, 0.4)), Click::Key(KeyCode::KeyB))).id();
     let st = ui.text(c, "› Switch branch…", &ui.f.ui500, 12.5, 0.5, ui.dim);
     let sp = c.spawn(Node { flex_grow: 1.0, ..default() }).id();
     let kb = c.spawn((Node { padding: UiRect { left: px(4), right: px(4), top: px(1), bottom: px(0) }, border: UiRect::all(px(1)), ..default() }, BorderColor::all(with_alpha(ui.line, 0.5)))).id();
     let kt = ui.text(c, "B", &ui.f.ui700, 9.5, 0.5, ui.line);
     c.entity(kb).add_child(kt);
     c.entity(sw).add_children(&[st, sp, kb]);
-    let list = c.spawn(Node { flex_direction: FlexDirection::Column, row_gap: px(9), padding: UiRect { left: px(14), right: px(12), top: px(4), ..default() }, ..default() }).id();
+    let list = c.spawn(Node { flex_direction: FlexDirection::Column, row_gap: px(5), padding: UiRect { left: px(8), right: px(12), top: px(4), ..default() }, ..default() }).id();
     c.entity(b).add_children(&[h, sw, list]);
-    for br in r.branches.iter().take(6) {
-        let row = c.spawn((Node { flex_direction: FlexDirection::Row, column_gap: px(10), padding: UiRect::left(px(4)), border: UiRect::left(px(if br.current { 2.0 } else { 0.0 })), ..default() }, BorderColor::all(ui.hot))).id();
+    if n == 0 {
+        let t = ui.text(c, "No branches", &ui.f.ui500, 12.5, 0.4, ui.dim);
+        c.entity(list).add_child(t);
+    }
+    for (i, br) in r.branches.iter().enumerate().skip(first).take(BRANCH_ROWS) {
+        let sel = active && i == cursor;
+        let row = c
+            .spawn((
+                Node { flex_direction: FlexDirection::Row, column_gap: px(10), padding: UiRect { left: px(4), top: px(2), bottom: px(2), ..default() }, border: UiRect::left(px(if br.current || sel { 2.0 } else { 0.0 })), flex_shrink: 0.0, ..default() },
+                BorderColor::all(if sel { role_color(Role::Acc) } else { ui.hot }),
+                BackgroundColor(if sel { with_alpha(ui.line, 0.10) } else { Color::NONE }),
+                Click::Pick(BRANCH_PICK + i),
+            ))
+            .id();
         let mk = c
             .spawn((
                 Node { width: px(7), height: px(7), margin: UiRect::top(px(4)), border: UiRect::all(px(1)), flex_shrink: 0.0, ..default() },
@@ -586,9 +853,9 @@ fn draw_branches(c: &mut Commands, ui: &Ui, root: Entity, r: &Repo) {
                 UiTransform { rotation: Rot2::degrees(if br.agent { 45.0 } else { 0.0 }), ..default() },
             ))
             .id();
-        let col = c.spawn(Node { flex_direction: FlexDirection::Column, row_gap: px(1), flex_grow: 1.0, overflow: Overflow::clip(), ..default() }).id();
-        let nm = ui.text(c, clip(&br.name, 26), &ui.f.mono, 12.0, 0.0, if br.current { ui.hot } else { ui.line });
-        let sub = ui.text(c, format!("{}{}", if br.agent { "AGENT · " } else { "" }, br.age.to_uppercase()), &ui.f.ui600, 9.5, 1.6, ui.dim);
+        let col = c.spawn(Node { flex_direction: FlexDirection::Column, row_gap: px(1), flex_grow: 1.0, flex_shrink: 1.0, overflow: Overflow::clip(), ..default() }).id();
+        let nm = ui.text(c, clip_start(&br.name, 22), &ui.f.mono, 12.0, 0.0, if br.current { ui.hot } else { ui.line });
+        let sub = ui.text(c, clip(&format!("{}{}", if br.agent { "AGENT · " } else { "" }, br.age.to_uppercase()), 26), &ui.f.ui600, 9.5, 1.6, ui.dim);
         c.entity(col).add_children(&[nm, sub]);
         let tr = ui.text(c, if br.ahead + br.behind > 0 { format!("↑{} ↓{}", br.ahead, br.behind) } else { String::new() }, &ui.f.mono, 10.5, 0.0, role_color(Role::Ok));
         c.entity(row).add_children(&[mk, col, tr]);
@@ -596,15 +863,29 @@ fn draw_branches(c: &mut Commands, ui: &Ui, root: Entity, r: &Repo) {
     }
 }
 
-fn draw_graph(c: &mut Commands, ui: &Ui, root: Entity, r: &Repo) {
+fn draw_graph(c: &mut Commands, ui: &Ui, root: Entity, r: &Repo, cursor: usize, active: bool) {
     let b = ui.body(c, root);
-    let h = ui.header(c, "Graph", "all branches · newest first", ui.dim);
+    let n = r.graph.len();
+    let first = first_row(cursor, n, GRAPH_ROWS);
+    let right = if n > GRAPH_ROWS { format!("{}–{} of {n}", first + 1, (first + GRAPH_ROWS).min(n)) } else { "all branches".to_string() };
+    let h = ui.header(c, "Graph", &right, ui.dim);
     let list = c.spawn(Node { flex_direction: FlexDirection::Column, padding: UiRect { left: px(16), right: px(16), top: px(8), ..default() }, ..default() }).id();
     c.entity(b).add_children(&[h, list]);
+    // back to the tilted graph
+    let chip = c.spawn((Node { position_type: PositionType::Absolute, right: px(150), top: px(10), padding: UiRect { left: px(6), right: px(6), top: px(2), bottom: px(1) }, border: UiRect::all(px(1)), ..default() }, BorderColor::all(with_alpha(ui.line, 0.45)), Click::Key(KeyCode::KeyV))).id();
+    let ct = ui.text(c, "V GRAPH", &ui.f.ui700, 9.5, 1.4, ui.line);
+    c.entity(chip).add_child(ct);
+    c.entity(b).add_child(chip);
+    if n == 0 {
+        let t = ui.text(c, "No commits yet", &ui.f.ui500, 13.0, 0.4, ui.dim);
+        c.entity(list).add_child(t);
+        return;
+    }
     let lanes_col = [role_color(Role::Hot), role_color(Role::Fill), role_color(Role::Acc), role_color(Role::Ok), ui.line];
-    let lanes_w = r.graph.iter().take(GRAPH_ROWS).map(|g| g.lanes.trim_end().chars().count()).max().unwrap_or(1).min(12) as f32 * 7.4 + 4.0;
-    for g in r.graph.iter().take(GRAPH_ROWS) {
-        let row = c.spawn(Node { flex_direction: FlexDirection::Row, align_items: AlignItems::Center, width: percent(100), height: px(20), column_gap: px(8), overflow: Overflow::clip(), ..default() }).id();
+    let lanes_w = r.graph.iter().skip(first).take(GRAPH_ROWS).map(|g| g.lanes.trim_end().chars().count()).max().unwrap_or(1).min(12) as f32 * 7.4 + 4.0;
+    for (i, g) in r.graph.iter().enumerate().skip(first).take(GRAPH_ROWS) {
+        let sel = active && i == cursor && !g.hash.is_empty();
+        let row = c.spawn((Node { flex_direction: FlexDirection::Row, align_items: AlignItems::Center, width: percent(100), height: px(20), column_gap: px(8), overflow: Overflow::clip(), flex_shrink: 0.0, ..default() }, BackgroundColor(if sel { with_alpha(ui.line, 0.10) } else { Color::NONE }), Click::Pick(GRAPH_PICK + i))).id();
         // the lanes, each column in its own colour
         let lanes = c.spawn(Node { flex_direction: FlexDirection::Row, width: px(lanes_w), flex_shrink: 0.0, overflow: Overflow::clip(), ..default() }).id();
         for (i, ch) in g.lanes.chars().enumerate() {
@@ -624,7 +905,7 @@ fn draw_graph(c: &mut Commands, ui: &Ui, root: Entity, r: &Repo) {
                 c.entity(chip).add_child(t);
                 c.entity(row).add_child(chip);
             }
-            let sj = c.spawn((Text::new(clip(&g.subject, 60)), font(&ui.f.ui500, 13.0, 0.3), TextColor(ui.line), TextLayout { linebreak: LineBreak::NoWrap, ..default() }, Node { flex_grow: 1.0, flex_shrink: 1.0, overflow: Overflow::clip(), ..default() })).id();
+            let sj = c.spawn((Text::new(clip(&g.subject, 60)), font(&ui.f.ui500, 13.0, 0.3), TextColor(if sel { ui.hot } else { ui.line }), TextLayout { linebreak: LineBreak::NoWrap, ..default() }, Node { flex_grow: 1.0, flex_shrink: 1.0, overflow: Overflow::clip(), ..default() })).id();
             let ag = ui.text(c, g.age.replace(" ago", ""), &ui.f.ui500, 11.0, 0.6, ui.dim);
             c.entity(row).add_children(&[sj, ag]);
         }
@@ -716,24 +997,36 @@ fn draw_graph3d(c: &mut Commands, ui: &Ui, root: Entity, r: &Repo, yaw_deg: f32)
         }
         c.entity(area).add_child(chip);
     }
-    let foot = c.spawn((Node { position_type: PositionType::Absolute, left: px(16), bottom: px(10), ..default() }, Click::Key(KeyCode::KeyV))).id();
-    let ft = ui.text(c, "< > TURN (, .)   ·   V LIST", &ui.f.ui600, 9.5, 2.0, ui.dim);
-    c.entity(foot).add_child(ft);
+    let foot = c.spawn(Node { position_type: PositionType::Absolute, left: px(16), bottom: px(10), column_gap: px(14), ..default() }).id();
+    for (label, key) in [("< TURN ,", KeyCode::Comma), ("TURN . >", KeyCode::Period), ("V LIST", KeyCode::KeyV)] {
+        let part = c.spawn((Node { padding: UiRect::axes(px(4), px(2)), ..default() }, Click::Key(key))).id();
+        let ft = ui.text(c, label, &ui.f.ui600, 9.5, 2.0, ui.dim);
+        c.entity(part).add_child(ft);
+        c.entity(foot).add_child(part);
+    }
     c.entity(area).add_child(foot);
 }
 
 fn draw_commit(c: &mut Commands, ui: &Ui, root: Entity, r: &Repo, amend: bool, busy: bool) {
     let b = ui.body(c, root);
     let repo = &r.card.name;
-    let h = ui.header(c, "Commit", &format!("{repo} · {}", r.card.branch), ui.dim);
+    let state = r.in_progress.map(|p| format!(" · {}", p.to_uppercase())).unwrap_or_default();
+    let h = ui.header(c, "Commit", &format!("{} · {}{state}", clip(repo, 20), clip_start(&r.card.branch, 28)), if r.in_progress.is_some() { role_color(Role::Acc) } else { ui.dim });
     let inner = c.spawn(Node { flex_direction: FlexDirection::Column, row_gap: px(10), padding: UiRect { left: px(16), right: px(16), top: px(12), bottom: px(10) }, flex_grow: 1.0, ..default() }).id();
     c.entity(b).add_children(&[h, inner]);
     let box_ = c.spawn((Node { height: px(84), padding: UiRect::all(px(12)), border: UiRect::all(px(1)), ..default() }, BorderColor::all(with_alpha(ui.line, 0.4)), BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.3)), Click::Key(KeyCode::KeyC))).id();
-    let ph = ui.text(c, "C writes the commit message (in the bar below)", &ui.f.ui500, 14.0, 0.6, ui.dim);
+    let hint = if r.card.detached {
+        "Detached HEAD: a commit here belongs to no branch. B switches to one first"
+    } else if r.staged.is_empty() && !amend {
+        "Nothing staged. S stages the selected file, A everything"
+    } else {
+        "C writes the commit message (in the bar below)"
+    };
+    let ph = c.spawn((Text::new(hint), font(&ui.f.ui500, 14.0, 0.6), TextColor(ui.dim), LineHeight::Px(19.0))).id();
     c.entity(box_).add_child(ph);
     let row = ui.row(c, 14.0);
     let n = r.staged.len();
-    let what = ui.text(c, format!("{n} FILE{} TO {}", if n == 1 { "" } else { "S" }, r.card.branch.to_uppercase()), &ui.f.ui600, 11.0, 1.8, ui.hot);
+    let what = ui.text(c, format!("{n} FILE{} TO {}", if n == 1 { "" } else { "S" }, clip_start(&r.card.branch.to_uppercase(), 28)), &ui.f.ui600, 11.0, 1.8, ui.hot);
     let sp = c.spawn(Node { flex_grow: 1.0, ..default() }).id();
     let am_box = c.spawn((Node { width: px(10), height: px(10), border: UiRect::all(px(1)), ..default() }, BorderColor::all(ui.line), BackgroundColor(if amend { ui.hot } else { Color::NONE }), Click::Key(KeyCode::KeyM))).id();
     let am = c.spawn((Text::new("AMEND  M"), font(&ui.f.ui600, 10.5, 1.8), TextColor(if amend { ui.hot } else { ui.dim }), Click::Key(KeyCode::KeyM))).id();
@@ -743,29 +1036,30 @@ fn draw_commit(c: &mut Commands, ui: &Ui, root: Entity, r: &Repo, amend: bool, b
     c.entity(btn).add_children(&[bt, bk]);
     c.entity(row).add_children(&[what, sp, am_box, am, btn]);
     let last = match &r.last {
-        Some((hsh, s, a, t)) => format!("{hsh}  {}  ·  {a}  ·  {t}", clip(s, 50)),
+        Some((hsh, s, a, t)) => format!("{hsh}  {}  ·  {}  ·  {t}", clip(s, 46), clip(a, 16)),
         None => "no commits yet".into(),
     };
     let lt = ui.text(c, last, &ui.f.mono, 11.0, 0.0, ui.dim);
     c.entity(inner).add_children(&[box_, row, lt]);
 }
 
-fn draw_status(c: &mut Commands, ui: &Ui, root: Entity, r: &Repo, cursor: usize, preview: &[(char, String)], _for: &str) {
+fn draw_status(c: &mut Commands, ui: &Ui, root: Entity, r: &Repo, cursor: usize, active: bool, preview: &[(char, String)]) {
     let b = ui.body(c, root);
     let h = ui.header(c, "Working tree", &format!("{} staged", r.staged.len()), ui.dim);
     let inner = c.spawn(Node { flex_direction: FlexDirection::Column, row_gap: px(2), padding: UiRect { left: px(12), right: px(12), top: px(8), ..default() }, flex_grow: 1.0, ..default() }).id();
     c.entity(b).add_children(&[h, inner]);
     let mut idx = 0usize;
     for (title, list, staged, act) in [("STAGED", &r.staged, true, "X UNSTAGE ALL"), ("UNSTAGED", &r.unstaged, false, "A STAGE ALL")] {
-        let hr = c.spawn(Node { flex_direction: FlexDirection::Row, align_items: AlignItems::Center, height: px(24), margin: UiRect::top(px(4)), ..default() }).id();
-        let t = ui.text(c, format!("{title}  {}", list.len()), &ui.f.ui600, 10.5, 2.6, ui.hot);
+        let hr = c.spawn(Node { flex_direction: FlexDirection::Row, align_items: AlignItems::Center, height: px(24), margin: UiRect::top(px(4)), flex_shrink: 0.0, ..default() }).id();
+        let start = if cursor >= idx && cursor < idx + list.len() { first_row(cursor - idx, list.len(), FILE_ROWS) } else { 0 };
+        let range = if list.len() > FILE_ROWS { format!("  {}–{}/{}", start + 1, (start + FILE_ROWS).min(list.len()), list.len()) } else { format!("  {}", list.len()) };
+        let t = ui.text(c, format!("{title}{range}"), &ui.f.ui600, 10.5, 2.0, ui.hot);
         let sp = c.spawn(Node { flex_grow: 1.0, ..default() }).id();
         let a = c.spawn((Node { padding: UiRect { left: px(5), right: px(5), top: px(2), bottom: px(1) }, border: UiRect::all(px(1)), ..default() }, BorderColor::all(with_alpha(ui.line, 0.5)), Click::Key(if staged { KeyCode::KeyX } else { KeyCode::KeyA }))).id();
         let at = ui.text(c, act, &ui.f.ui700, 9.5, 1.2, ui.line);
         c.entity(a).add_child(at);
         c.entity(hr).add_children(&[t, sp, a]);
         c.entity(inner).add_child(hr);
-        let start = if cursor >= idx && cursor < idx + list.len() { (cursor - idx).saturating_sub(FILE_ROWS - 1) } else { 0 };
         for (k, ch) in list.iter().enumerate() {
             let i = idx + k;
             if k < start || k >= start + FILE_ROWS {
@@ -774,29 +1068,29 @@ fn draw_status(c: &mut Commands, ui: &Ui, root: Entity, r: &Repo, cursor: usize,
             let sel = i == cursor;
             let row = c
                 .spawn((
-                    Node { flex_direction: FlexDirection::Row, align_items: AlignItems::Center, height: px(22), column_gap: px(8), padding: UiRect::left(px(6)), border: UiRect::left(px(if sel { 2.0 } else { 0.0 })), ..default() },
-                    BorderColor::all(ui.hot),
-                    BackgroundColor(if sel { with_alpha(ui.line, 0.10) } else { Color::NONE }),
+                    Node { flex_direction: FlexDirection::Row, align_items: AlignItems::Center, height: px(22), column_gap: px(8), padding: UiRect::left(px(6)), border: UiRect::left(px(if sel { 2.0 } else { 0.0 })), flex_shrink: 0.0, ..default() },
+                    BorderColor::all(if active { ui.hot } else { with_alpha(ui.hot, 0.4) }),
+                    BackgroundColor(if sel { with_alpha(ui.line, if active { 0.10 } else { 0.05 }) } else { Color::NONE }),
                     Click::Pick(i),
                 ))
                 .id();
             let cc = match ch.code {
                 'A' | '?' => role_color(Role::Ok),
-                'D' => role_color(Role::Bad),
+                'D' | 'U' => role_color(Role::Bad),
                 _ => role_color(Role::Acc),
             };
             let code = ui.text(c, ch.code.to_string(), &ui.f.mono, 12.0, 0.0, cc);
             // long paths keep their end (the file name)
-            let n = ch.path.chars().count();
-            let shown = if n > 26 { format!("…{}", ch.path.chars().skip(n - 25).collect::<String>()) } else { ch.path.clone() };
-            let p = c.spawn((Text::new(shown), font(&ui.f.mono, 12.0, 0.0), TextColor(if sel { ui.hot } else { ui.line }), TextLayout { linebreak: LineBreak::NoWrap, ..default() }, Node { flex_grow: 1.0, overflow: Overflow::clip(), ..default() })).id();
+            let shown = clip_start(&ch.path, 24);
+            let p = c.spawn((Text::new(shown), font(&ui.f.mono, 12.0, 0.0), TextColor(if sel { ui.hot } else { ui.line }), TextLayout { linebreak: LineBreak::NoWrap, ..default() }, Node { flex_grow: 1.0, flex_shrink: 1.0, overflow: Overflow::clip(), ..default() })).id();
             let n = match (ch.added, ch.removed) {
                 (Some(a), Some(d)) => format!("+{a} −{d}"),
-                _ if ch.code == '?' => "new".into(),
+                _ if ch.code == '?' => if ch.path.ends_with('/') { "folder".into() } else { "new".into() },
+                _ if ch.code == 'U' => "conflict".into(),
                 _ => "bin".into(),
             };
             let nt = ui.text(c, n, &ui.f.mono, 11.0, 0.0, ui.dim);
-            let bx = c.spawn((Node { width: px(9), height: px(9), border: UiRect::all(px(1)), ..default() }, BorderColor::all(ui.line), BackgroundColor(if staged { ui.hot } else { Color::NONE }))).id();
+            let bx = c.spawn((Node { width: px(11), height: px(11), border: UiRect::all(px(1)), flex_shrink: 0.0, ..default() }, BorderColor::all(ui.line), BackgroundColor(if staged { ui.hot } else { Color::NONE }), Click::Alt(STAGE_ALT + i))).id();
             c.entity(row).add_children(&[code, p, nt, bx]);
             c.entity(inner).add_child(row);
         }
@@ -809,7 +1103,7 @@ fn draw_status(c: &mut Commands, ui: &Ui, root: Entity, r: &Repo, cursor: usize,
     let sp = c.spawn(Node { flex_grow: 1.0, ..default() }).id();
     c.entity(inner).add_child(sp);
     if !preview.is_empty() {
-        let pv = c.spawn((Node { flex_direction: FlexDirection::Column, padding: UiRect { top: px(6), bottom: px(8), ..default() }, border: UiRect::top(px(1)), ..default() }, BorderColor::all(with_alpha(ui.line, 0.2)))).id();
+        let pv = c.spawn((Node { flex_direction: FlexDirection::Column, padding: UiRect { top: px(6), bottom: px(8), ..default() }, border: UiRect::top(px(1)), overflow: Overflow::clip(), flex_shrink: 0.0, ..default() }, BorderColor::all(with_alpha(ui.line, 0.2)))).id();
         for (k, l) in preview.iter().take(7) {
             let col = match k {
                 '+' => role_color(Role::Ok),
@@ -829,23 +1123,41 @@ fn draw_status(c: &mut Commands, ui: &Ui, root: Entity, r: &Repo, cursor: usize,
     }
 }
 
-fn draw_remote(c: &mut Commands, ui: &Ui, root: Entity, r: &Repo) {
+fn draw_remote(c: &mut Commands, ui: &Ui, root: Entity, r: &Repo, busy: bool) {
     let b = ui.body(c, root);
-    let h = ui.header(c, "Remote", r.upstream.as_deref().map(|u| u.split('/').next().unwrap_or(u)).unwrap_or("no upstream"), ui.dim);
+    let h = ui.header(c, "Remote", &clip(r.upstream.as_deref().map(|u| u.split('/').next().unwrap_or(u)).unwrap_or(if r.has_remote { "no upstream" } else { "no remote" }), 20), ui.dim);
     let inner = c.spawn(Node { flex_direction: FlexDirection::Column, row_gap: px(10), padding: UiRect { left: px(14), right: px(14), top: px(12), ..default() }, ..default() }).id();
     c.entity(b).add_children(&[h, inner]);
-    let row = ui.row(c, 10.0);
-    for (label, n, key, col) in [("PULL", r.card.behind, "L", role_color(Role::Acc)), ("PUSH", r.card.ahead, "P", role_color(Role::Ok))] {
-        let btn = c.spawn((Node { flex_grow: 1.0, height: px(32), padding: UiRect::horizontal(px(12)), align_items: AlignItems::Center, column_gap: px(8), border: UiRect::all(px(1)), ..default() }, BorderColor::all(with_alpha(ui.line, 0.55)), BackgroundColor(with_alpha(ui.line, 0.05)), Click::Key(if label == "PULL" { KeyCode::KeyL } else { KeyCode::KeyP }))).id();
-        let t = ui.text(c, label, &ui.f.ui600, 11.5, 2.3, ui.hot);
-        let nt = ui.text(c, if n > 0 { format!("{}{n}", if label == "PULL" { "↓" } else { "↑" }) } else { String::new() }, &ui.f.mono, 11.5, 0.0, col);
+    let row = ui.row(c, 6.0);
+    for (label, n, key, col) in [("PULL", r.card.behind, "L", role_color(Role::Acc)), ("PUSH", r.card.ahead, "P", role_color(Role::Ok)), ("FETCH", 0, "F", ui.dim)] {
+        let btn = c
+            .spawn((
+                Node { flex_grow: 1.0, height: px(32), padding: UiRect::horizontal(px(8)), align_items: AlignItems::Center, column_gap: px(5), border: UiRect::all(px(1)), ..default() },
+                BorderColor::all(with_alpha(ui.line, if busy { 0.25 } else { 0.55 })),
+                BackgroundColor(with_alpha(ui.line, 0.05)),
+                Click::Key(match label {
+                    "PULL" => KeyCode::KeyL,
+                    "PUSH" => KeyCode::KeyP,
+                    _ => KeyCode::KeyF,
+                }),
+            ))
+            .id();
+        let t = ui.text(c, label, &ui.f.ui600, 10.5, 1.6, if busy { ui.dim } else { ui.hot });
+        let nt = ui.text(c, if n > 0 { format!("{}{n}", if label == "PULL" { "↓" } else { "↑" }) } else { String::new() }, &ui.f.mono, 11.0, 0.0, col);
         let sp = c.spawn(Node { flex_grow: 1.0, ..default() }).id();
         let kt = ui.text(c, key, &ui.f.ui700, 9.5, 0.5, ui.dim);
         c.entity(btn).add_children(&[t, nt, sp, kt]);
         c.entity(row).add_child(btn);
     }
     let url = r.remote_url.trim_start_matches("https://").trim_start_matches("git@").replace(':', "/");
-    let info = ui.text(c, clip(&format!("{} to push · {} to pull · {}", r.card.ahead, r.card.behind, if url.is_empty() { "no remote".into() } else { url }), 44), &ui.f.ui500, 11.0, 0.4, ui.dim);
+    let line = if busy {
+        "Working…".to_string()
+    } else if !r.has_remote {
+        "No remote: add one with git remote add".to_string()
+    } else {
+        clip(&format!("{} to push · {} to pull · {}", r.card.ahead, r.card.behind, if url.is_empty() { "no origin".into() } else { url }), 44)
+    };
+    let info = ui.text(c, line, &ui.f.ui500, 11.0, 0.4, ui.dim);
     c.entity(inner).add_children(&[row, info]);
 }
 
@@ -873,8 +1185,74 @@ fn draw_strip(c: &mut Commands, ui: &Ui, root: Entity, agents: &[TaskView]) {
     }
     let sp = c.spawn(Node { flex_grow: 1.0, ..default() }).id();
     let legend = c.spawn(Node { flex_direction: FlexDirection::Column, row_gap: px(4), align_items: AlignItems::FlexEnd, ..default() }).id();
-    let l1 = ui.text(c, "J K FILE   S STAGE   U UNSTAGE   A ALL   C COMMIT   M AMEND", &ui.f.ui600, 10.0, 1.6, ui.dim);
-    let l2 = ui.text(c, "B BRANCH   L PULL   P PUSH   [ ] REPO   ESC CLOSE", &ui.f.ui600, 10.0, 1.6, ui.dim);
+    let l1 = ui.text(c, "J K MOVE   TAB LIST   ENTER STAGE / SWITCH   S U STAGE   A X ALL   C COMMIT   M AMEND", &ui.f.ui600, 10.0, 1.6, ui.dim);
+    let l2 = ui.text(c, "B BRANCH   F FETCH   L PULL   P PUSH   V GRAPH   [ ] REPO   ESC CLOSE", &ui.f.ui600, 10.0, 1.6, ui.dim);
     c.entity(legend).add_children(&[l1, l2]);
     c.entity(r).add_children(&[sp, legend]);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::gitdata::{Branch, GraphRow};
+
+    fn app() -> GitApp {
+        let mut a = GitApp::default();
+        let ch = |p: &str| Change { path: p.into(), code: 'M', from: None, added: None, removed: None };
+        let graph = ["*", "|\\", "*", "|/", "*"].iter().enumerate().map(|(i, l)| GraphRow { lanes: l.to_string(), hash: if l.starts_with('*') { format!("h{i}") } else { String::new() }, ..Default::default() }).collect();
+        a.repo = Some(Repo { staged: vec![ch("a")], unstaged: vec![ch("b"), ch("c")], branches: (0..9).map(|i| Branch { name: format!("b{i}"), ..Default::default() }).collect(), graph, ..Default::default() });
+        a
+    }
+
+    #[test]
+    fn the_repo_window_follows_the_selection() {
+        assert_eq!(window_first(0, 12), 0);
+        assert_eq!(window_first(2, 12), 0);
+        assert_eq!(window_first(3, 12), 1);
+        assert_eq!(window_first(11, 12), 9);
+        assert_eq!(window_first(1, 2), 0);
+        assert_eq!((first_row(0, 20, 6), first_row(5, 20, 6), first_row(6, 20, 6), first_row(19, 20, 6), first_row(2, 3, 6)), (0, 0, 1, 14, 0));
+    }
+
+    #[test]
+    fn j_and_k_move_in_the_zone_tab_picked() {
+        let mut a = app();
+        a.step(1);
+        a.step(1);
+        a.step(1);
+        assert_eq!(a.cursor, 2, "files stop at the last one");
+        a.step(-5);
+        assert_eq!(a.cursor, 0);
+        a.next_zone();
+        assert_eq!(a.zone, Zone::Branches);
+        for _ in 0..20 {
+            a.step(1);
+        }
+        assert_eq!(a.bcur, 8);
+        // the graph zone is only on Tab in the list view
+        a.next_zone();
+        assert_eq!(a.zone, Zone::Files);
+        a.flat = true;
+        a.next_zone();
+        a.next_zone();
+        assert_eq!(a.zone, Zone::Graph);
+        a.step(1);
+        assert_eq!(a.gcur, 2, "connector rows are skipped");
+        a.step(1);
+        assert_eq!(a.gcur, 4);
+        a.step(1);
+        assert_eq!(a.gcur, 4);
+        a.step(-1);
+        assert_eq!(a.gcur, 2);
+    }
+
+    #[test]
+    fn stepping_with_nothing_loaded_does_nothing() {
+        let mut a = GitApp::default();
+        a.step(1);
+        a.next_zone();
+        a.step(-1);
+        assert_eq!((a.cursor, a.bcur, a.gcur), (0, 0, 0));
+        assert!(a.changes().is_empty());
+    }
 }

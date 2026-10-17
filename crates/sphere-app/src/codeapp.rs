@@ -2,14 +2,16 @@
 //! corner and a glass workspace unfolds with the task and its checkpoints, the changed files, a delta-style diff
 //! by hunk, the repo's tests and the review actions (merge, open a PR, ask for a change, open in Zed, discard),
 //! over a strip of the repo's agents. The changes are read with git from the agent's worktree; tests run with the
-//! repo's own test command. Keys: J K hunks, [ ] files, Tab next agent, R run tests, M P E Z D actions (M, P and
-//! D ask twice), Esc closes.
+//! repo's own test command. Keys: J K (or the arrows) move through the diff line by line, H L hunk by hunk,
+//! PgDn PgUp a page, [ ] files, Tab next agent, R run tests, M P E Z D actions (M, P and D ask twice), Esc
+//! disarms an action, then closes.
 use crate::core::CoreCtl;
 use crate::fonts::UiFonts;
 use crate::panel::*;
 use crate::review::{self, FileDiff, LineKind, Review, TestRun};
 use crate::service::{Cmd, Service};
 use crate::appframe::{clip, Click, Ui};
+use crate::gitdata::clip_start;
 use crate::util::*;
 use bevy::prelude::*;
 use bevy::text::LineHeight;
@@ -53,6 +55,8 @@ impl Pane {
 
 /// Diff rows that fit the diff pane.
 const DIFF_ROWS: usize = 15;
+/// Lines of the selected hunk that show under its header.
+const HUNK_ROWS: usize = DIFF_ROWS - 1;
 /// Files that fit the tree.
 const TREE_ROWS: usize = 6;
 
@@ -77,11 +81,15 @@ pub struct CodeApp {
     load_t: f32,
     file: usize,
     hunk: usize,
+    /// the first line of the selected hunk that shows
+    scroll: usize,
     tests: Option<TestRun>,
     tests_rx: Option<Mutex<mpsc::Receiver<TestRun>>>,
     /// an action that asks twice: armed until this sim time
     armed: Option<(Act, f32)>,
     notes: (mpsc::Sender<String>, Mutex<mpsc::Receiver<String>>),
+    /// a merge, PR or discard is running
+    busy: bool,
     /// bumps when anything on screen changes
     version: u64,
 }
@@ -100,10 +108,12 @@ impl Default for CodeApp {
             load_t: -9.0,
             file: 0,
             hunk: 0,
+            scroll: 0,
             tests: None,
             tests_rx: None,
             armed: None,
             notes: (tx, Mutex::new(rx)),
+            busy: false,
             version: 0,
         }
     }
@@ -130,6 +140,7 @@ impl CodeApp {
             return;
         }
         let n = r.files[self.file].hunks.len().max(1);
+        self.scroll = 0;
         if d > 0 {
             if self.hunk + 1 < n {
                 self.hunk += 1;
@@ -145,6 +156,34 @@ impl CodeApp {
         }
         self.version += 1;
     }
+    /// Lines in the selected hunk.
+    fn hunk_len(&self) -> usize {
+        self.file().and_then(|f| f.hunks.get(self.hunk)).map(|h| h.lines.len()).unwrap_or(0)
+    }
+    /// The furthest the selected hunk scrolls.
+    fn max_scroll(&self) -> usize {
+        self.hunk_len().saturating_sub(HUNK_ROWS)
+    }
+    /// Moves `d` lines through the diff: the selected hunk scrolls, and at its ends the next or previous hunk
+    /// (and file) takes over.
+    fn step_line(&mut self, d: i32) {
+        if self.review.is_none() {
+            return;
+        }
+        if d > 0 {
+            if self.scroll < self.max_scroll() {
+                self.scroll = (self.scroll + d as usize).min(self.max_scroll());
+            } else {
+                self.step_hunk(1);
+            }
+        } else if self.scroll > 0 {
+            self.scroll = self.scroll.saturating_sub((-d) as usize);
+        } else if self.hunk > 0 || self.file > 0 {
+            self.step_hunk(-1);
+            self.scroll = self.max_scroll();
+        }
+        self.version += 1;
+    }
     fn step_file(&mut self, d: i32) {
         let n = self.review.as_ref().map(|r| r.files.len()).unwrap_or(0);
         if n == 0 {
@@ -152,9 +191,23 @@ impl CodeApp {
         }
         self.file = (self.file as i32 + d).clamp(0, n as i32 - 1) as usize;
         self.hunk = 0;
+        self.scroll = 0;
+        self.version += 1;
+    }
+    fn select_task(&mut self, id: Option<String>) {
+        self.task = id;
+        self.review = None;
+        self.tests = None;
+        self.file = 0;
+        self.hunk = 0;
+        self.scroll = 0;
+        self.armed = None;
         self.version += 1;
     }
 }
+
+/// A click on an agent chip picks the nth agent of the repo (file rows are numbered below this).
+const AGENT_PICK: usize = 10_000;
 
 /// The task to review: the one chosen, else the latest with a worktree (finished work first).
 fn pick<'a>(app: &CodeApp, tasks: &'a [TaskView]) -> Option<&'a TaskView> {
@@ -256,16 +309,31 @@ pub fn keys(
     for c in clicks.take(0) {
         match c {
             Click::Key(k) => codes.push(k),
+            // a file row, or (10000 and up) an agent chip
+            Click::Pick(i) if i >= AGENT_PICK => {
+                let id = {
+                    let s = svc.shared.lock().unwrap();
+                    pick(&app, &s.tasks).and_then(|t| repo_tasks(&s.tasks, &t.repo).get(i - AGENT_PICK).map(|x| x.id.clone()))
+                };
+                if id.is_some() && id != pick(&app, &svc.shared.lock().unwrap().tasks).map(|t| t.id.clone()) {
+                    app.select_task(id);
+                    sound.play("toggle");
+                }
+            }
             Click::Pick(i) => {
                 if app.review.as_ref().is_some_and(|r| i < r.files.len()) {
                     app.file = i;
                     app.hunk = 0;
+                    app.scroll = 0;
                     app.version += 1;
                 }
             }
             Click::Alt(i) => {
-                app.hunk = i;
-                app.version += 1;
+                if app.file().is_some_and(|f| i < f.hunks.len()) {
+                    app.hunk = i;
+                    app.scroll = 0;
+                    app.version += 1;
+                }
             }
         }
     }
@@ -273,22 +341,43 @@ pub fn keys(
         let task = { pick(&app, &svc.shared.lock().unwrap().tasks).cloned() };
         match key {
             KeyCode::Escape => {
-                app.close();
-                sound.play_with("collapse", 0.7, 0.0);
+                if app.armed.is_some() {
+                    app.armed = None;
+                    app.version += 1;
+                } else {
+                    app.close();
+                    sound.play_with("collapse", 0.7, 0.0);
+                }
             }
-            KeyCode::KeyJ => {
+            KeyCode::KeyJ | KeyCode::ArrowDown => {
+                app.step_line(1);
+                sound.play_q("tick", 40);
+            }
+            KeyCode::KeyK | KeyCode::ArrowUp => {
+                app.step_line(-1);
+                sound.play_q("tick", 40);
+            }
+            KeyCode::PageDown => {
+                app.step_line(HUNK_ROWS as i32 - 2);
+                sound.play_q("tick", 40);
+            }
+            KeyCode::PageUp => {
+                app.step_line(-(HUNK_ROWS as i32 - 2));
+                sound.play_q("tick", 40);
+            }
+            KeyCode::KeyL => {
                 app.step_hunk(1);
                 sound.play_q("tick", 40);
             }
-            KeyCode::KeyK => {
+            KeyCode::KeyH => {
                 app.step_hunk(-1);
                 sound.play_q("tick", 40);
             }
-            KeyCode::BracketRight | KeyCode::ArrowDown => {
+            KeyCode::BracketRight => {
                 app.step_file(1);
                 sound.play_q("tick", 40);
             }
-            KeyCode::BracketLeft | KeyCode::ArrowUp => {
+            KeyCode::BracketLeft => {
                 app.step_file(-1);
                 sound.play_q("tick", 40);
             }
@@ -302,12 +391,7 @@ pub fn keys(
                     })
                 };
                 if next.is_some() && next != task.as_ref().map(|t| t.id.clone()) {
-                    app.task = next;
-                    app.review = None;
-                    app.tests = None;
-                    app.file = 0;
-                    app.hunk = 0;
-                    app.version += 1;
+                    app.select_task(next);
                     sound.play("toggle");
                 }
             }
@@ -329,9 +413,10 @@ pub fn keys(
                 }
             }
             KeyCode::KeyZ => {
-                let target = app.file().map(|f| (f.path.clone(), f.hunks.get(app.hunk).map(|h| h.new_start).unwrap_or(1)));
+                let target = app.file().map(|f| (f.path.clone(), f.hunks.get(app.hunk).map(|h| h.new_start + app.scroll as u32).unwrap_or(1), f.status == review::Status::Deleted));
                 match (task.as_ref().and_then(|t| t.workdir.clone()), target) {
-                    (Some(wd), Some((path, line))) => match open_in_zed(&wd, &path, line) {
+                    (Some(_), Some((path, _, true))) => toasts.push(format!("{path} was deleted: nothing to open")),
+                    (Some(wd), Some((path, line, _))) => match open_in_zed(&wd, &path, line) {
                         Ok(()) => {
                             toasts.push_quiet(format!("Opening {path}:{line} in Zed"));
                             sound.play("open");
@@ -341,7 +426,6 @@ pub fn keys(
                     _ => toasts.push("No file to open"),
                 }
             }
-            KeyCode::KeyU => toasts.push("Undo to a checkpoint comes with checkpoints in sphered"),
             k @ (KeyCode::KeyM | KeyCode::KeyP | KeyCode::KeyD) => {
                 let act = match k {
                     KeyCode::KeyM => Act::Merge,
@@ -352,8 +436,21 @@ pub fn keys(
                     toasts.push("No agent to review");
                     continue;
                 };
+                if app.busy {
+                    toasts.push_quiet("Still finishing the last action");
+                    continue;
+                }
+                if act != Act::Discard && matches!(t.state, TaskState::Working | TaskState::Queued) {
+                    toasts.push("The agent is still working: wait for it, or stop it first");
+                    continue;
+                }
+                if t.workdir.as_deref().is_none_or(|w| !std::path::Path::new(w).is_dir()) {
+                    toasts.push("The worktree is gone: nothing to act on");
+                    continue;
+                }
                 if app.armed.is_some_and(|(a, until)| a == act && sim.t < until) {
                     app.armed = None;
+                    app.busy = true;
                     app.version += 1;
                     act_now(act, &t, &app, &svc);
                     sound.play(if act == Act::Discard { "discard" } else { "confirm" });
@@ -386,46 +483,71 @@ fn act_now(act: Act, t: &TaskView, app: &CodeApp, svc: &Service) {
 }
 
 fn git(dir: &str, args: &[&str]) -> Result<String, String> {
-    let out = std::process::Command::new("git").arg("-C").arg(dir).args(args).output().map_err(|e| format!("git: {e}"))?;
-    if out.status.success() {
-        Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
-    } else {
-        Err(String::from_utf8_lossy(&out.stderr).lines().next().unwrap_or("git failed").to_string())
+    crate::gitdata::git_t(std::path::Path::new(dir), args)
+}
+
+/// Commits what's left in the worktree (a checkpoint of the agent's last edits).
+fn commit_rest(wd: &str, title: &str) -> Result<(), String> {
+    if !git(wd, &["status", "--porcelain"])?.is_empty() {
+        git(wd, &["add", "-A"])?;
+        git(wd, &["commit", "-q", "-m", title]).map_err(|e| format!("Could not commit the agent's changes: {e}"))?;
     }
+    Ok(())
 }
 
 /// Commits what's left in the worktree, then merges the branch into the base in the repo.
 fn merge(repo: &str, wd: &str, branch: Option<&str>, base: &str, title: &str, in_place: bool) -> Result<String, String> {
     let branch = branch.filter(|_| !in_place).ok_or("This agent worked in place: its changes are already in the repo")?;
-    if !git(wd, &["status", "--porcelain"])?.is_empty() {
-        git(wd, &["add", "-A"])?;
-        git(wd, &["commit", "-q", "-m", title])?;
+    if git(repo, &["rev-parse", "--verify", "-q", &format!("refs/heads/{base}")]).is_err() {
+        return Err(format!("{base} isn't a branch in the repo: merge {branch} by hand"));
     }
-    let cur = git(repo, &["rev-parse", "--abbrev-ref", "HEAD"])?;
+    let cur = git(repo, &["symbolic-ref", "--short", "-q", "HEAD"]).unwrap_or_default();
     if cur != base {
-        return Err(format!("The repo is on {cur}, not {base}: switch to {base} to merge"));
+        return Err(format!("The repo is on {}, not {base}: switch to {base} to merge", if cur.is_empty() { "a detached HEAD" } else { &cur }));
     }
     if !git(repo, &["status", "--porcelain", "--untracked-files=no"])?.is_empty() {
         return Err(format!("The repo has uncommitted changes on {base}: commit or stash them to merge"));
     }
-    git(repo, &["merge", "--no-ff", "--no-edit", branch]).map_err(|e| format!("Merge failed: {e}"))?;
-    Ok(format!("Merged {branch} into {base}"))
+    commit_rest(wd, title)?;
+    if git(repo, &["merge-base", "--is-ancestor", branch, base]).is_ok() {
+        return Ok(format!("{branch} is already part of {base}: nothing to merge"));
+    }
+    match git(repo, &["merge", "--no-ff", "--no-edit", branch]) {
+        Ok(_) => Ok(format!("Merged {branch} into {base}")),
+        Err(e) => {
+            // a merge that stops half way would leave the repo in a conflicted state
+            let files = git(repo, &["diff", "--name-only", "--diff-filter=U"]).unwrap_or_default();
+            let _ = git(repo, &["merge", "--abort"]);
+            let files: Vec<&str> = files.lines().take(3).collect();
+            if files.is_empty() {
+                Err(format!("Merge failed, nothing changed: {e}"))
+            } else {
+                Err(format!("Merge conflicts in {}: nothing changed. Ask the agent to merge {base} into its branch first", files.join(", ")))
+            }
+        }
+    }
 }
 
 /// Pushes the branch and opens a pull request with the GitHub CLI.
 fn open_pr(wd: &str, branch: Option<&str>, title: &str) -> Result<String, String> {
     let branch = branch.ok_or("This agent has no branch to open a PR from")?;
-    if !git(wd, &["status", "--porcelain"])?.is_empty() {
-        git(wd, &["add", "-A"])?;
-        git(wd, &["commit", "-q", "-m", title])?;
+    if git(wd, &["remote"])?.is_empty() {
+        return Err("This repo has no remote to push to".into());
     }
-    git(wd, &["push", "-u", "origin", branch]).map_err(|e| format!("Push failed: {e}"))?;
-    let out = std::process::Command::new("gh").current_dir(wd).args(["pr", "create", "--fill", "--head", branch]).output().map_err(|_| "Pushed. Install the GitHub CLI (gh) to open the PR from here".to_string())?;
+    commit_rest(wd, title)?;
+    git(wd, &["push", "-q", "-u", "origin", branch]).map_err(|e| format!("Push failed: {e}"))?;
+    let out = std::process::Command::new("gh").current_dir(wd).env("GH_PROMPT_DISABLED", "1").args(["pr", "create", "--fill", "--head", branch]).stdin(std::process::Stdio::null()).output().map_err(|_| format!("Pushed {branch}. Install the GitHub CLI (gh) to open the PR from here"))?;
+    let text = |b: &[u8]| String::from_utf8_lossy(b).to_string();
     if out.status.success() {
-        let url = String::from_utf8_lossy(&out.stdout).lines().last().unwrap_or("").to_string();
+        let url = text(&out.stdout).lines().rev().find(|l| l.starts_with("http")).unwrap_or("").to_string();
         Ok(format!("Opened a PR · {url}"))
     } else {
-        Err(format!("gh: {}", String::from_utf8_lossy(&out.stderr).lines().next().unwrap_or("could not open the PR")))
+        let err = text(&out.stderr);
+        if err.contains("already exists") {
+            let url = err.lines().find(|l| l.trim().starts_with("http")).unwrap_or("").trim().to_string();
+            return Ok(format!("Pushed {branch} · a PR already exists · {url}"));
+        }
+        Err(format!("Pushed {branch}, but gh: {}", crate::gitdata::err_line(&err)))
     }
 }
 
@@ -471,7 +593,16 @@ fn run_tests(app: &mut CodeApp, wd: String, toasts: &mut crate::live::Toasts) {
             }
         };
         // build errors arrive on stderr, results on stdout
-        let err = child.stderr.take().map(|s| std::thread::spawn(move || std::io::BufReader::new(s).lines().map_while(Result::ok).find(|l| l.starts_with("error")).unwrap_or_default()));
+        let err = child.stderr.take().map(|s| std::thread::spawn(move || {
+        // read it all, or a chatty build fills the pipe and cargo waits for us
+        let mut first = String::new();
+        for l in std::io::BufReader::new(s).lines().map_while(Result::ok) {
+            if first.is_empty() && l.starts_with("error") {
+                first = l;
+            }
+        }
+        first
+    }));
         let mut last = std::time::Instant::now();
         if let Some(out) = child.stdout.take() {
             for line in std::io::BufReader::new(out).lines().map_while(Result::ok) {
@@ -509,6 +640,7 @@ pub fn update(sim: Res<crate::core::Sim>, mut atlases: ResMut<AppAtlases>, mut a
     let notes: Vec<String> = app.notes.1.lock().map(|r| r.try_iter().collect()).unwrap_or_default();
     for n in notes {
         toasts.push(n);
+        app.busy = false;
         app.loaded.1 = u64::MAX; // read the review again
         app.version += 1;
     }
@@ -520,8 +652,17 @@ pub fn update(sim: Res<crate::core::Sim>, mut atlases: ResMut<AppAtlases>, mut a
         app.tests = Some(t);
         app.version += 1;
     }
-    let got = app.load_rx.as_ref().and_then(|r| r.lock().ok()?.try_recv().ok());
-    if let Some((task, r)) = got {
+    let got = app.load_rx.as_ref().and_then(|r| match r.lock().ok()?.try_recv() {
+        Ok(v) => Some(Some(v)),
+        Err(mpsc::TryRecvError::Disconnected) => Some(None),
+        Err(_) => None,
+    });
+    if got == Some(None) {
+        // the reader died: try again later
+        app.loading = false;
+        app.load_rx = None;
+    }
+    if let Some(Some((task, r))) = got {
         app.loading = false;
         // look tests: SPHERE_CODE_KEYS plays keys once the first review is in (j k ] [ move, r runs the tests)
         if app.review.is_none() {
@@ -530,8 +671,11 @@ pub fn update(sim: Res<crate::core::Sim>, mut atlases: ResMut<AppAtlases>, mut a
                 app.review = Some(r.clone());
                 for k in keys.chars() {
                     match k {
-                        'j' => app.step_hunk(1),
-                        'k' => app.step_hunk(-1),
+                        'j' => app.step_line(1),
+                        'k' => app.step_line(-1),
+                        'l' => app.step_hunk(1),
+                        'h' => app.step_hunk(-1),
+                        'v' => app.step_line(HUNK_ROWS as i32 - 2),
                         ']' => app.step_file(1),
                         '[' => app.step_file(-1),
                         'r' => run_tests(&mut app, wd.clone(), &mut toasts),
@@ -542,11 +686,22 @@ pub fn update(sim: Res<crate::core::Sim>, mut atlases: ResMut<AppAtlases>, mut a
             }
         }
         if Some(&task) == app.task.as_ref() || app.task.is_none() {
-            let n = r.files.len();
-            app.review = Some(r);
-            if app.file >= n {
-                app.file = 0;
-                app.hunk = 0;
+            if app.review.as_ref() != Some(&r) {
+                // keep the same file selected when the list changes under it
+                let keep = app.file().map(|f| f.path.clone());
+                let n = r.files.len();
+                let at = keep.and_then(|p| r.files.iter().position(|f| f.path == p));
+                app.review = Some(r);
+                match at {
+                    Some(i) => app.file = i,
+                    None if app.file >= n => {
+                        app.file = 0;
+                        app.hunk = 0;
+                    }
+                    None => {}
+                }
+                app.hunk = app.hunk.min(app.file().map(|f| f.hunks.len().saturating_sub(1)).unwrap_or(0));
+                app.scroll = app.scroll.min(app.max_scroll());
             }
             app.version += 1;
         }
@@ -563,7 +718,7 @@ pub fn update(sim: Res<crate::core::Sim>, mut atlases: ResMut<AppAtlases>, mut a
     };
     let Some(t) = task else { return };
     let (Some(wd), base) = (t.workdir.clone(), t.base.clone().unwrap_or_else(|| "main".into())) else { return };
-    let stale = app.loaded.0 != t.id || (app.loaded.1 != ver && sim.t - app.load_t > 1.5);
+    let stale = app.loaded.0 != t.id || (app.loaded.1 != ver && sim.t - app.load_t > 1.5) || sim.t - app.load_t > 10.0;
     if !stale {
         return;
     }
@@ -571,6 +726,7 @@ pub fn update(sim: Res<crate::core::Sim>, mut atlases: ResMut<AppAtlases>, mut a
         app.review = None;
         app.file = 0;
         app.hunk = 0;
+        app.scroll = 0;
         app.tests = None;
     }
     app.loaded = (t.id.clone(), ver);
@@ -632,12 +788,12 @@ pub fn draw(mut commands: Commands, app: Res<CodeApp>, svc: Res<Service>, roots:
     if app.amt.x < 0.001 && !app.open {
         return;
     }
-    let (task, run, agents, sver) = {
+    let (task, run, agents, sver, link) = {
         let s = svc.shared.lock().unwrap();
         let t = pick(&app, &s.tasks).cloned();
         let run = t.as_ref().and_then(|t| s.runs.get(&t.id).cloned()).unwrap_or_default();
         let agents: Vec<TaskView> = t.as_ref().map(|t| repo_tasks(&s.tasks, &t.repo).into_iter().take(3).cloned().collect()).unwrap_or_default();
-        (t, run, agents, s.version)
+        (t, run, agents, s.version, s.link.clone())
     };
     let key = (app.version, sver, theme.version, time.elapsed_secs() as i64 / 30);
     if *seen == key {
@@ -664,7 +820,12 @@ pub fn draw(mut commands: Commands, app: Res<CodeApp>, svc: Res<Service>, roots:
     let Some(t) = task else {
         let b = ui.body(c, root(Pane::Diff));
         let h = ui.header(c, "Diff", "", ui.dim);
-        let m = c.spawn((Text::new("No agent has worked on a repo yet. Start one with /  (repo: what to do)."), font(&f.ui500, 13.0, 0.5), TextColor(ui.line), Node { margin: UiRect::all(px(18)), ..default() })).id();
+        let msg = match &link {
+            Some(crate::service::Link::Down(e)) => format!("sphered isn't running ({}): agents and their changes come from it", clip(e, 70)),
+            Some(crate::service::Link::Connecting) | Some(crate::service::Link::Starting) => "Connecting to sphered…".to_string(),
+            _ => "No agent has worked on a repo yet. Start one with /  (repo: what to do).".to_string(),
+        };
+        let m = c.spawn((Text::new(msg), font(&f.ui500, 13.0, 0.5), TextColor(ui.line), Node { margin: UiRect::all(px(18)), ..default() })).id();
         c.entity(b).add_children(&[h, m]);
         for p in [Pane::Task, Pane::Tree, Pane::Tests, Pane::Acts] {
             let b = ui.body(c, root(p));
@@ -685,7 +846,7 @@ fn draw_top(c: &mut Commands, ui: &Ui, root: Entity, t: Option<&TaskView>) {
     c.entity(root).add_child(r);
     let ic = ui.text(c, "</>", &ui.f.mono, 12.0, 0.0, ui.hot);
     let name = ui.text(c, "CODE", &ui.f.ui600, 11.0, 3.5, ui.hot);
-    let repo = t.map(|t| std::path::Path::new(&t.repo).file_name().map(|s| s.to_string_lossy().to_uppercase()).unwrap_or_default()).unwrap_or_default();
+    let repo = t.map(|t| clip(&std::path::Path::new(&t.repo).file_name().map(|s| s.to_string_lossy().to_uppercase()).unwrap_or_default(), 40)).unwrap_or_default();
     let sub = ui.text(c, format!("{repo} · REVIEW"), &ui.f.ui500, 11.0, 2.6, ui.dim);
     let sp = c.spawn(Node { flex_grow: 1.0, ..default() }).id();
     let credit = ui.text(c, "diff after delta (MIT) · git · editor: Zed (GPL-3.0)", &ui.f.ui500, 10.5, 1.0, ui.dim);
@@ -728,7 +889,7 @@ fn draw_task(c: &mut Commands, ui: &Ui, root: Entity, t: &TaskView, run: &crate:
     // checkpoints: the branch's commits, then what's still uncommitted (the agent's edits)
     let ch = c.spawn((Node { flex_direction: FlexDirection::Row, justify_content: JustifyContent::SpaceBetween, margin: UiRect { top: px(14), bottom: px(6), ..default() }, ..default() },)).id();
     let ct = ui.text(c, "CHECKPOINTS", &ui.f.ui600, 10.5, 3.0, ui.hot);
-    let cr = ui.text(c, "U undo", &ui.f.ui500, 10.5, 1.0, ui.dim);
+    let cr = ui.text(c, if r.is_some_and(|r| r.merged) { "MERGED" } else { "" }, &ui.f.ui600, 10.0, 1.6, role_color(Role::Ok));
     c.entity(ch).add_children(&[ct, cr]);
     c.entity(inner).add_child(ch);
     let mut items: Vec<(String, String, bool)> = Vec::new();
@@ -757,8 +918,8 @@ fn draw_task(c: &mut Commands, ui: &Ui, root: Entity, t: &TaskView, run: &crate:
                 UiTransform { rotation: Rot2::degrees(45.0), ..default() },
             ))
             .id();
-        let col = c.spawn(Node { flex_direction: FlexDirection::Column, row_gap: px(2), flex_shrink: 1.0, ..default() }).id();
-        let tt = c.spawn((Text::new(clip(title, 52)), font(&ui.f.ui600, 13.0, 0.3), TextColor(if last { ui.hot } else { ui.line }), LineHeight::Px(16.0))).id();
+        let col = c.spawn(Node { flex_direction: FlexDirection::Column, row_gap: px(2), flex_shrink: 1.0, overflow: Overflow::clip(), ..default() }).id();
+        let tt = c.spawn((Text::new(clip(title, 30)), font(&ui.f.ui600, 13.0, 0.3), TextColor(if last { ui.hot } else { ui.line }), LineHeight::Px(16.0), TextLayout { linebreak: LineBreak::NoWrap, ..default() })).id();
         let mt = ui.text(c, meta.clone(), &ui.f.mono, 10.5, 0.0, ui.dim);
         c.entity(col).add_children(&[tt, mt]);
         c.entity(row).add_children(&[d, col]);
@@ -787,7 +948,9 @@ fn draw_tree(c: &mut Commands, ui: &Ui, root: Entity, app: &CodeApp) {
     let b = ui.body(c, root);
     let r = app.review.as_ref();
     let sum = match r {
-        Some(r) => format!("{} files · +{} −{}", r.files.len(), r.added(), r.removed()),
+        Some(r) if r.error.is_some() => String::new(),
+        Some(r) if r.files.is_empty() => String::new(),
+        Some(r) => format!("{} of {} files · +{} −{}{}", app.file + 1, r.files.len(), r.added(), r.removed(), if r.more > 0 { format!(" · {} more not listed", r.more) } else { String::new() }),
         None if app.loading => "reading…".into(),
         None => String::new(),
     };
@@ -795,14 +958,17 @@ fn draw_tree(c: &mut Commands, ui: &Ui, root: Entity, app: &CodeApp) {
     let list = c.spawn(Node { flex_direction: FlexDirection::Column, padding: UiRect { left: px(10), right: px(14), top: px(8), ..default() }, ..default() }).id();
     c.entity(b).add_children(&[h, list]);
     let Some(r) = r else { return };
-    if let Some(e) = &r.error {
-        let t = ui.text(c, clip(e, 80), &ui.f.ui500, 13.0, 0.4, role_color(Role::Bad));
+    let note = |c: &mut Commands, s: String, col: Color| {
+        let t = c.spawn((Text::new(s), font(&ui.f.ui500, 13.0, 0.4), TextColor(col), LineHeight::Px(18.0), Node { margin: UiRect::left(px(10)), ..default() })).id();
         c.entity(list).add_child(t);
+    };
+    if let Some(e) = &r.error {
+        note(c, clip(e, 90), role_color(Role::Bad));
         return;
     }
     if r.files.is_empty() {
-        let t = ui.text(c, "No changes yet against the base branch", &ui.f.ui500, 13.0, 0.4, ui.dim);
-        c.entity(list).add_child(t);
+        let s = if r.merged { format!("Merged into {}: nothing left to review", r.base) } else { format!("No changes yet against {}", r.base) };
+        note(c, s, ui.dim);
         return;
     }
     let first = app.file.saturating_sub(TREE_ROWS - 1).min(r.files.len().saturating_sub(TREE_ROWS));
@@ -810,7 +976,7 @@ fn draw_tree(c: &mut Commands, ui: &Ui, root: Entity, app: &CodeApp) {
         let sel = i == app.file;
         let row = c
             .spawn((
-                Node { flex_direction: FlexDirection::Row, align_items: AlignItems::Center, height: px(22), padding: UiRect { left: px(10), right: px(4), ..default() }, border: UiRect::left(px(2)), column_gap: px(8), ..default() },
+                Node { flex_direction: FlexDirection::Row, align_items: AlignItems::Center, height: px(22), padding: UiRect { left: px(10), right: px(4), ..default() }, border: UiRect::left(px(2)), column_gap: px(8), flex_shrink: 0.0, ..default() },
                 BackgroundColor(if sel { with_alpha(ui.line, 0.10) } else { Color::NONE }),
                 BorderColor::all(if sel { ui.hot } else { Color::NONE }),
                 Click::Pick(i),
@@ -820,13 +986,22 @@ fn draw_tree(c: &mut Commands, ui: &Ui, root: Entity, app: &CodeApp) {
             Some((d, n)) => (format!("{d}/"), n.to_string()),
             None => (String::new(), fd.path.clone()),
         };
-        let p = c.spawn(Node { flex_direction: FlexDirection::Row, flex_grow: 1.0, overflow: Overflow::clip(), ..default() }).id();
-        let dt = ui.text(c, clip(&dir, 40), &ui.f.mono, 12.0, 0.0, ui.dim);
+        let p = c.spawn(Node { flex_direction: FlexDirection::Row, flex_grow: 1.0, flex_shrink: 1.0, overflow: Overflow::clip(), ..default() }).id();
+        let name = clip_start(&name, 42);
+        let dir = clip_start(&dir, 52usize.saturating_sub(name.chars().count()).max(8));
+        let dt = ui.text(c, dir, &ui.f.mono, 12.0, 0.0, ui.dim);
         let nt = ui.text(c, name, &ui.f.mono, 12.0, 0.0, if sel { ui.hot } else { ui.line });
         c.entity(p).add_children(&[dt, nt]);
-        let st = c.spawn((Text::new(fd.status.letter()), font(&ui.f.mono, 12.0, 0.0), TextColor(if fd.status == review::Status::Added { role_color(Role::Ok) } else { ui.line }), Node { width: px(40), ..default() })).id();
-        let a = c.spawn((Text::new(format!("+{}", fd.added)), font(&ui.f.mono, 12.0, 0.0), TextColor(role_color(Role::Ok)), Node { width: px(56), ..default() })).id();
-        let d = c.spawn((Text::new(if fd.removed > 0 { format!("−{}", fd.removed) } else { "·".into() }), font(&ui.f.mono, 12.0, 0.0), TextColor(if fd.removed > 0 { role_color(Role::Bad) } else { ui.dim }), Node { width: px(56), ..default() })).id();
+        let sc = match fd.status {
+            review::Status::Added => role_color(Role::Ok),
+            review::Status::Deleted => role_color(Role::Bad),
+            review::Status::Renamed => role_color(Role::Acc),
+            review::Status::Modified => ui.line,
+        };
+        let st = c.spawn((Text::new(fd.status.letter()), font(&ui.f.mono, 12.0, 0.0), TextColor(sc), Node { width: px(40), flex_shrink: 0.0, ..default() })).id();
+        let (at, dt) = if fd.note.is_some() && fd.added + fd.removed == 0 { ("bin".to_string(), String::new()) } else { (format!("+{}", fd.added), if fd.removed > 0 { format!("−{}", fd.removed) } else { "·".into() }) };
+        let a = c.spawn((Text::new(at), font(&ui.f.mono, 12.0, 0.0), TextColor(role_color(Role::Ok)), Node { width: px(56), flex_shrink: 0.0, ..default() })).id();
+        let d = c.spawn((Text::new(dt), font(&ui.f.mono, 12.0, 0.0), TextColor(if fd.removed > 0 { role_color(Role::Bad) } else { ui.dim }), Node { width: px(56), flex_shrink: 0.0, ..default() })).id();
         let bars = bar_blocks(c, ui, fd.added, fd.removed);
         c.entity(row).add_children(&[p, st, a, d, bars]);
         c.entity(list).add_child(row);
@@ -835,24 +1010,50 @@ fn draw_tree(c: &mut Commands, ui: &Ui, root: Entity, app: &CodeApp) {
 
 fn draw_diff(c: &mut Commands, ui: &Ui, root: Entity, app: &CodeApp, run: &crate::service::Run) {
     let b = ui.body(c, root);
-    let h = ui.header(c, "Diff", "J K hunks · [ ] files · Z open in Zed", ui.dim);
+    let h = ui.header(c, "Diff", "J K lines · H L hunks · [ ] files · Z open in Zed", ui.dim);
     c.entity(b).add_child(h);
     let Some(fd) = app.file() else {
-        let t = c.spawn((Text::new(if app.loading { "Reading the changes…" } else { "Nothing to show" }), font(&ui.f.ui500, 13.0, 0.4), TextColor(ui.dim), Node { margin: UiRect::all(px(18)), ..default() })).id();
+        let msg = match app.review.as_ref() {
+            Some(r) if r.error.is_some() => "Can't read the changes",
+            _ if app.loading => "Reading the changes…",
+            _ => "Nothing to show",
+        };
+        let t = c.spawn((Text::new(msg), font(&ui.f.ui500, 13.0, 0.4), TextColor(ui.dim), Node { margin: UiRect::all(px(18)), ..default() })).id();
         c.entity(b).add_child(t);
         return;
     };
-    let fh = c.spawn(Node { flex_direction: FlexDirection::Row, align_items: AlignItems::Center, column_gap: px(10), padding: UiRect { left: px(18), right: px(18), top: px(8), bottom: px(6) }, ..default() }).id();
+    let hunk = fd.hunks.get(app.hunk);
+    let fh = c.spawn(Node { flex_direction: FlexDirection::Row, align_items: AlignItems::Center, column_gap: px(10), padding: UiRect { left: px(18), right: px(18), top: px(8), bottom: px(6) }, flex_shrink: 0.0, ..default() }).id();
     let tri = ui.text(c, "Δ", &ui.f.mono, 13.0, 0.0, role_color(Role::Acc));
-    let pt = ui.text(c, clip(&fd.path, 60), &ui.f.mono, 13.0, 0.0, ui.hot);
+    let shown = match &fd.from {
+        Some(old) => format!("{} → {}", clip_start(old, 20), clip_start(&fd.path, 28)),
+        None => clip_start(&fd.path, 46),
+    };
+    let pt = ui.text(c, shown, &ui.f.mono, 13.0, 0.0, ui.hot);
     let sp = c.spawn(Node { flex_grow: 1.0, ..default() }).id();
+    c.entity(fh).add_children(&[tri, pt, sp]);
+    // where the view sits in the hunk, and the keys that move it (each clickable)
+    if let Some(hk) = hunk.filter(|h| h.lines.len() > HUNK_ROWS) {
+        let end = (app.scroll + HUNK_ROWS).min(hk.lines.len());
+        let pos = ui.text(c, format!("{}–{} of {}", app.scroll + 1, end, hk.lines.len()), &ui.f.mono, 11.0, 0.0, ui.dim);
+        c.entity(fh).add_child(pos);
+    }
+    for (label, key) in [("K ↑", KeyCode::KeyK), ("J ↓", KeyCode::KeyJ), ("H ‹", KeyCode::KeyH), ("L ›", KeyCode::KeyL)] {
+        let chip = c.spawn((Node { padding: UiRect { left: px(5), right: px(5), top: px(2), bottom: px(1) }, border: UiRect::all(px(1)), flex_shrink: 0.0, ..default() }, BorderColor::all(with_alpha(ui.line, 0.4)), Click::Key(key))).id();
+        let t = ui.text(c, label, &ui.f.mono, 11.0, 0.0, ui.line);
+        c.entity(chip).add_child(t);
+        c.entity(fh).add_child(chip);
+    }
     let st = ui.text(c, format!("+{} −{}", fd.added, fd.removed), &ui.f.mono, 12.0, 0.0, ui.line);
-    c.entity(fh).add_children(&[tri, pt, sp, st]);
+    c.entity(fh).add_child(st);
     let body = c.spawn(Node { flex_direction: FlexDirection::Column, margin: UiRect { left: px(14), right: px(14), ..default() }, ..default() }).id();
     c.entity(b).add_children(&[fh, body]);
-    if let Some(n) = &fd.note {
-        let t = ui.text(c, n.clone(), &ui.f.ui500, 13.0, 0.4, ui.dim);
+    let say = |c: &mut Commands, s: String| {
+        let t = ui.text(c, s, &ui.f.ui500, 13.0, 0.4, ui.dim);
         c.entity(body).add_child(t);
+    };
+    if let Some(n) = &fd.note {
+        say(c, n.clone());
         return;
     }
     let ok = role_color(Role::Ok);
@@ -865,7 +1066,7 @@ fn draw_diff(c: &mut Commands, ui: &Ui, root: Entity, app: &CodeApp, run: &crate
         let sel = hi == app.hunk;
         let hh = c
             .spawn((
-                Node { flex_direction: FlexDirection::Row, align_items: AlignItems::Center, height: px(24), padding: UiRect { left: px(10), right: px(10), ..default() }, column_gap: px(10), border: UiRect::all(px(1)), margin: UiRect { top: px(if hi == app.hunk { 0.0 } else { 6.0 }), ..default() }, ..default() },
+                Node { flex_direction: FlexDirection::Row, align_items: AlignItems::Center, height: px(24), padding: UiRect { left: px(10), right: px(10), ..default() }, column_gap: px(10), border: UiRect::all(px(1)), margin: UiRect { top: px(if hi == app.hunk { 0.0 } else { 6.0 }), ..default() }, flex_shrink: 0.0, ..default() },
                 BackgroundColor(with_alpha(ui.line, if sel { 0.08 } else { 0.03 })),
                 BorderColor::all(with_alpha(ui.line, if sel { 0.55 } else { 0.2 })),
                 Click::Alt(hi),
@@ -885,34 +1086,48 @@ fn draw_diff(c: &mut Commands, ui: &Ui, root: Entity, app: &CodeApp, run: &crate
         if !sel {
             continue;
         }
-        for l in &hk.lines {
-            if rows >= DIFF_ROWS {
-                break;
-            }
+        let start = app.scroll.min(hk.lines.len().saturating_sub(1));
+        let room = DIFF_ROWS.saturating_sub(rows);
+        let below = hk.lines.len().saturating_sub(start + room);
+        // the last row says how much is left below, when there is more
+        let take = if below > 0 { room.saturating_sub(1) } else { room };
+        for l in hk.lines.iter().skip(start).take(take) {
             let (bg, mk, mc) = match l.kind {
                 LineKind::Add => (with_alpha(ok, 0.075), "+", ok),
                 LineKind::Del => (with_alpha(bad, 0.09), "−", bad),
                 LineKind::Context => (Color::NONE, " ", ui.dim),
             };
-            let row = c.spawn((Node { flex_direction: FlexDirection::Row, align_items: AlignItems::Center, height: px(18), column_gap: px(8), padding: UiRect::left(px(6)), ..default() }, BackgroundColor(bg))).id();
+            let row = c.spawn((Node { flex_direction: FlexDirection::Row, align_items: AlignItems::Center, height: px(18), column_gap: px(8), padding: UiRect::left(px(6)), flex_shrink: 0.0, ..default() }, BackgroundColor(bg))).id();
             let num = |n: Option<u32>| n.map(|n| format!("{n:>4}")).unwrap_or_else(|| "    ".into());
             let nums = c.spawn((Text::new(format!("{} {}", num(l.old), num(l.new))), font(&ui.f.mono, 11.0, 0.0), TextColor(ui.dim), Node { width: px(78), flex_shrink: 0.0, ..default() })).id();
             let m = c.spawn((Text::new(mk), font(&ui.f.mono, 12.0, 0.0), TextColor(mc), Node { width: px(12), flex_shrink: 0.0, ..default() })).id();
             let code = c
-                .spawn((Text::new(clip(&l.text, 86)), font(&ui.f.mono, 12.0, 0.0), TextColor(if l.kind == LineKind::Context { ui.line } else { ui.hot }), TextLayout { linebreak: LineBreak::NoWrap, ..default() }, Node { overflow: Overflow::clip(), flex_shrink: 1.0, ..default() }))
+                .spawn((Text::new(clip(&l.text, 74)), font(&ui.f.mono, 12.0, 0.0), TextColor(if l.kind == LineKind::Context { ui.line } else { ui.hot }), TextLayout { linebreak: LineBreak::NoWrap, ..default() }, Node { overflow: Overflow::clip(), flex_shrink: 1.0, ..default() }))
                 .id();
             c.entity(row).add_children(&[nums, m, code]);
             c.entity(body).add_child(row);
             rows += 1;
         }
+        if below > 0 {
+            let more = c.spawn((Node { height: px(18), padding: UiRect::left(px(6)), flex_shrink: 0.0, align_items: AlignItems::Center, ..default() }, Click::Key(KeyCode::PageDown))).id();
+            let t = ui.text(c, format!("{below} more line{} in this hunk · J or PgDn", if below == 1 { "" } else { "s" }), &ui.f.ui600, 10.0, 1.4, ui.dim);
+            c.entity(more).add_child(t);
+            c.entity(body).add_child(more);
+            rows += 1;
+        }
     }
     if fd.hunks.is_empty() {
-        let t = ui.text(c, "Only the file mode changed", &ui.f.ui500, 13.0, 0.4, ui.dim);
-        c.entity(body).add_child(t);
+        let s = match fd.status {
+            review::Status::Added => "An empty file".to_string(),
+            review::Status::Deleted => "An empty file, deleted".to_string(),
+            review::Status::Renamed => format!("Renamed from {}, no other change", fd.from.as_deref().unwrap_or("?")),
+            review::Status::Modified => "Only the file mode changed".to_string(),
+        };
+        say(c, s);
     }
     // the agent's reason for this file: what it said just before editing it, pinned over the hunk
     if let Some((why, _)) = run.reason_for(&fd.path) {
-        let line = fd.hunks.get(app.hunk).map(|h| h.new_start).unwrap_or(1);
+        let line = hunk.map(|h| h.new_start).unwrap_or(1);
         let note = c
             .spawn((
                 Node { position_type: PositionType::Absolute, right: px(22), top: px(96), width: px(300), flex_direction: FlexDirection::Column, row_gap: px(6), padding: UiRect::all(px(12)), border: UiRect::all(px(1)), ..default() },
@@ -924,7 +1139,7 @@ fn draw_diff(c: &mut Commands, ui: &Ui, root: Entity, app: &CodeApp, run: &crate
         let d = c.spawn((Node { width: px(6), height: px(6), ..default() }, BackgroundColor(ui.hot), UiTransform { rotation: Rot2::degrees(45.0), ..default() })).id();
         let t = ui.text(c, "AGENT'S REASON", &ui.f.ui700, 9.5, 2.2, ui.hot);
         let sp = c.spawn(Node { flex_grow: 1.0, ..default() }).id();
-        let at = ui.text(c, clip(&format!("{}:{line}", fd.path), 24), &ui.f.mono, 10.0, 0.0, ui.dim);
+        let at = ui.text(c, clip_start(&format!("{}:{line}", fd.path), 24), &ui.f.mono, 10.0, 0.0, ui.dim);
         c.entity(hr).add_children(&[d, t, sp, at]);
         let tx = c.spawn((Text::new(clip(why.lines().find(|l| !l.trim().is_empty()).unwrap_or(why).trim(), 170)), font(&ui.f.ui500, 13.0, 0.3), TextColor(ui.hot), LineHeight::Px(17.0))).id();
         c.entity(note).add_children(&[hr, tx]);
@@ -979,7 +1194,11 @@ fn draw_tests(c: &mut Commands, ui: &Ui, root: Entity, t: &TaskView, run: Option
         let t = c.spawn((Text::new(clip(e, 120)), font(&ui.f.mono, 11.0, 0.0), TextColor(role_color(Role::Bad)), LineHeight::Px(15.0))).id();
         c.entity(inner).add_child(t);
     }
-    for (g, pass, tot, fail) in r.groups().into_iter().rev().take(5) {
+    let mut groups = r.groups();
+    groups.reverse();
+    // groups with a failure first
+    groups.sort_by_key(|g| !g.3);
+    for (g, pass, tot, fail) in groups.into_iter().take(5) {
         let row = c.spawn(Node { flex_direction: FlexDirection::Row, align_items: AlignItems::Center, column_gap: px(10), height: px(18), ..default() }).id();
         let mc = if fail { role_color(Role::Bad) } else if pass == tot { role_color(Role::Ok) } else { ui.dim };
         let m = c.spawn((Node { width: px(7), height: px(7), ..default() }, BackgroundColor(mc))).id();
@@ -1052,7 +1271,7 @@ fn draw_strip(c: &mut Commands, ui: &Ui, root: Entity, agents: &[TaskView], cur:
     c.entity(root).add_child(r);
     let lab = ui.text(c, "AGENTS", &ui.f.ui600, 10.5, 3.2, ui.dim);
     c.entity(r).add_child(lab);
-    for t in agents {
+    for (ai, t) in agents.iter().enumerate() {
         let sel = cur.is_some_and(|c| c.id == t.id);
         let (col, sub) = match t.state {
             TaskState::Done => (role_color(Role::Ok), "Finished".to_string()),
@@ -1066,6 +1285,7 @@ fn draw_strip(c: &mut Commands, ui: &Ui, root: Entity, agents: &[TaskView], cur:
                 Node { height: px(36), flex_direction: FlexDirection::Row, align_items: AlignItems::Center, column_gap: px(10), padding: UiRect { left: px(10), right: px(12), ..default() }, border: UiRect::all(px(1)), ..default() },
                 BackgroundColor(if t.state == TaskState::NeedsYou { with_alpha(col, 0.12) } else { Color::NONE }),
                 BorderColor::all(if sel { ui.hot } else { with_alpha(col, 0.5) }),
+                Click::Pick(AGENT_PICK + ai),
             ))
             .id();
         let dot = c.spawn((Node { width: px(8), height: px(8), ..default() }, BackgroundColor(col), UiTransform { rotation: Rot2::degrees(45.0), ..default() })).id();
@@ -1082,8 +1302,164 @@ fn draw_strip(c: &mut Commands, ui: &Ui, root: Entity, agents: &[TaskView], cur:
     }
     let sp = c.spawn(Node { flex_grow: 1.0, ..default() }).id();
     let legend = c.spawn(Node { flex_direction: FlexDirection::Column, row_gap: px(4), align_items: AlignItems::FlexEnd, ..default() }).id();
-    let l1 = ui.text(c, "J K HUNK   [ ] FILE   TAB AGENT   R TESTS   E ASK", &ui.f.ui600, 10.0, 1.6, ui.dim);
-    let l2 = ui.text(c, "M MERGE   P PR   Z ZED   D DISCARD   ESC CLOSE", &ui.f.ui600, 10.0, 1.6, ui.dim);
+    let l1 = ui.text(c, "J K LINE   H L HUNK   [ ] FILE   TAB AGENT   R TESTS   E ASK", &ui.f.ui600, 10.0, 1.6, ui.dim);
+    let l2 = ui.text(c, "M MERGE   P PR   Z ZED   D DISCARD   ESC DISARM / CLOSE", &ui.f.ui600, 10.0, 1.6, ui.dim);
     c.entity(legend).add_children(&[l1, l2]);
     c.entity(r).add_children(&[sp, legend]);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::review::{DiffLine, FileDiff, Hunk, Status};
+
+    fn hunk(n: usize) -> Hunk {
+        Hunk { header: "@@ -1 +1 @@".into(), context: String::new(), new_start: 10, lines: (0..n).map(|i| DiffLine { kind: LineKind::Add, old: None, new: Some(i as u32 + 10), text: format!("l{i}") }).collect() }
+    }
+
+    fn app(files: &[&[usize]]) -> CodeApp {
+        let mut a = CodeApp::default();
+        let files = files.iter().enumerate().map(|(i, hs)| FileDiff { path: format!("f{i}.rs"), from: None, status: Status::Modified, added: 0, removed: 0, hunks: hs.iter().map(|n| hunk(*n)).collect(), note: None }).collect();
+        a.review = Some(Review { files, ..Default::default() });
+        a
+    }
+
+    #[test]
+    fn lines_scroll_through_a_long_hunk_before_moving_on() {
+        let mut a = app(&[&[40, 3], &[2]]);
+        assert_eq!(a.max_scroll(), 40 - HUNK_ROWS);
+        for _ in 0..a.max_scroll() {
+            a.step_line(1);
+        }
+        assert_eq!((a.file, a.hunk, a.scroll), (0, 0, 40 - HUNK_ROWS));
+        // at the end of the hunk the next one takes over
+        a.step_line(1);
+        assert_eq!((a.file, a.hunk, a.scroll), (0, 1, 0));
+        a.step_line(1);
+        assert_eq!((a.file, a.hunk), (1, 0));
+        // and back, landing at the end of the long hunk
+        a.step_line(-1);
+        a.step_line(-1);
+        assert_eq!((a.file, a.hunk, a.scroll), (0, 0, 40 - HUNK_ROWS));
+        a.step_line(-1000);
+        assert_eq!(a.scroll, 0);
+        a.step_line(-1);
+        assert_eq!((a.file, a.hunk, a.scroll), (0, 0, 0));
+    }
+
+    #[test]
+    fn pages_move_by_many_lines_and_hunks_jump() {
+        let mut a = app(&[&[100, 5, 5]]);
+        a.step_line(HUNK_ROWS as i32 - 2);
+        assert_eq!(a.scroll, HUNK_ROWS - 2);
+        a.step_hunk(1);
+        assert_eq!((a.hunk, a.scroll), (1, 0));
+        a.step_hunk(1);
+        a.step_hunk(1);
+        assert_eq!(a.hunk, 2);
+        a.step_hunk(-1);
+        assert_eq!(a.hunk, 1);
+    }
+
+    #[test]
+    fn nothing_to_step_is_not_a_crash() {
+        let mut a = CodeApp::default();
+        a.step_line(1);
+        a.step_line(-1);
+        a.step_hunk(1);
+        a.step_file(1);
+        let mut a = app(&[]);
+        a.step_line(1);
+        a.step_hunk(-1);
+        assert_eq!((a.file, a.hunk, a.scroll), (0, 0, 0));
+        let mut a = app(&[&[]]);
+        a.step_line(1);
+        assert_eq!(a.hunk_len(), 0);
+    }
+
+    #[test]
+    fn choosing_another_task_resets_the_view() {
+        let mut a = app(&[&[40]]);
+        a.scroll = 5;
+        a.armed = Some((Act::Merge, 9.0));
+        a.select_task(Some("t2".into()));
+        assert!(a.review.is_none() && a.armed.is_none());
+        assert_eq!((a.file, a.hunk, a.scroll), (0, 0, 0));
+        assert_eq!(a.task.as_deref(), Some("t2"));
+    }
+
+    fn git_in(dir: &std::path::Path, args: &[&str]) {
+        let out = std::process::Command::new("git").arg("-C").arg(dir).args(args).output().unwrap();
+        assert!(out.status.success(), "{args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    }
+
+    fn repo_with_agent_branch(name: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+        let base = std::env::temp_dir().join(format!("sphere-codeapp-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let repo = base.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        for a in [&["init", "-q", "-b", "main"][..], &["config", "user.email", "t@t"], &["config", "user.name", "t"], &["config", "commit.gpgsign", "false"]] {
+            git_in(&repo, a);
+        }
+        std::fs::write(repo.join("a.txt"), "1\n").unwrap();
+        git_in(&repo, &["add", "."]);
+        git_in(&repo, &["commit", "-q", "-m", "base"]);
+        let wt = base.join("wt");
+        git_in(&repo, &["worktree", "add", "-q", "-b", "sphere/agent", wt.to_str().unwrap()]);
+        (repo, wt)
+    }
+
+    #[test]
+    fn merges_the_agents_branch_and_commits_what_is_left() {
+        let (repo, wt) = repo_with_agent_branch("merge");
+        std::fs::write(wt.join("b.txt"), "new\n").unwrap();
+        let note = merge(repo.to_str().unwrap(), wt.to_str().unwrap(), Some("sphere/agent"), "main", "Add b", false).unwrap();
+        assert_eq!(note, "Merged sphere/agent into main");
+        assert!(repo.join("b.txt").exists());
+        // merging again has nothing to do
+        let again = merge(repo.to_str().unwrap(), wt.to_str().unwrap(), Some("sphere/agent"), "main", "Add b", false).unwrap();
+        assert!(again.contains("already part of"), "{again}");
+        let _ = std::fs::remove_dir_all(repo.parent().unwrap());
+    }
+
+    #[test]
+    fn a_conflicting_merge_is_aborted_and_names_the_files() {
+        let (repo, wt) = repo_with_agent_branch("conflict");
+        std::fs::write(wt.join("a.txt"), "agent\n").unwrap();
+        std::fs::write(repo.join("a.txt"), "mine\n").unwrap();
+        git_in(&repo, &["commit", "-q", "-am", "mine"]);
+        let e = merge(repo.to_str().unwrap(), wt.to_str().unwrap(), Some("sphere/agent"), "main", "Edit a", false).unwrap_err();
+        assert!(e.contains("a.txt") && e.contains("nothing changed"), "{e}");
+        // the repo is clean again, not stuck mid-merge
+        assert!(!repo.join(".git/MERGE_HEAD").exists());
+        assert_eq!(crate::gitdata::git_t(&repo, &["status", "--porcelain"]).unwrap(), "");
+        let _ = std::fs::remove_dir_all(repo.parent().unwrap());
+    }
+
+    #[test]
+    fn merge_explains_why_it_cant() {
+        let (repo, wt) = repo_with_agent_branch("refuse");
+        let (r, w) = (repo.to_str().unwrap(), wt.to_str().unwrap());
+        assert!(merge(r, w, Some("sphere/agent"), "main", "t", true).unwrap_err().contains("in place"));
+        assert!(merge(r, w, Some("sphere/agent"), "abc1234", "t", false).unwrap_err().contains("isn't a branch"));
+        git_in(&repo, &["checkout", "-q", "-b", "other"]);
+        assert!(merge(r, w, Some("sphere/agent"), "main", "t", false).unwrap_err().contains("switch to main"));
+        git_in(&repo, &["checkout", "-q", "main"]);
+        std::fs::write(repo.join("a.txt"), "dirty\n").unwrap();
+        assert!(merge(r, w, Some("sphere/agent"), "main", "t", false).unwrap_err().contains("uncommitted"));
+        let _ = std::fs::remove_dir_all(repo.parent().unwrap());
+    }
+
+    #[test]
+    fn discarding_removes_the_worktree_but_keeps_the_branch() {
+        let (repo, wt) = repo_with_agent_branch("discard");
+        assert!(discard(repo.to_str().unwrap(), wt.to_str().unwrap(), true).is_err());
+        let note = discard(repo.to_str().unwrap(), wt.to_str().unwrap(), false).unwrap();
+        assert!(note.starts_with("Discarded"));
+        assert!(!wt.exists());
+        assert!(crate::gitdata::git_t(&repo, &["rev-parse", "--verify", "sphere/agent"]).is_ok());
+        let r = review::load(wt.to_str().unwrap(), "main");
+        assert!(r.error.unwrap().contains("gone"));
+        let _ = std::fs::remove_dir_all(repo.parent().unwrap());
+    }
 }
