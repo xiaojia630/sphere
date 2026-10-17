@@ -18,6 +18,19 @@ pub struct CmdBar {
     pub text: String,
     /// Bumps when `text` or `open` change, so the UI updates only then.
     pub version: u64,
+    /// The Code app's "ask for a change": what you type goes to this task (id, title) instead.
+    pub target: Option<(String, String)>,
+}
+
+impl CmdBar {
+    /// Opens the bar to send a message to one agent.
+    pub fn ask(&mut self, task: String, title: String, focus: &mut Focus) {
+        self.open = true;
+        self.text.clear();
+        self.target = Some((task, title));
+        focus.cmd = true;
+        self.version += 1;
+    }
 }
 
 #[derive(Component)]
@@ -150,12 +163,19 @@ pub fn keys(
             Key::Escape => {
                 bar.open = false;
                 bar.text.clear();
+                bar.target = None;
             }
             Key::Enter => {
                 let text = std::mem::take(&mut bar.text);
                 bar.open = false;
                 let t = text.trim();
-                if !home_command(t, &mut acts, &mut open, &mut toasts) {
+                if let Some((task, title)) = bar.target.take() {
+                    if !t.is_empty() {
+                        svc.send(Cmd::Send { task, text: t.to_string() });
+                        toasts.push(format!("Asked {title} for a change"));
+                        sound.play("confirm");
+                    }
+                } else if !home_command(t, &mut acts, &mut open, &mut toasts) {
                     run(t, &svc, &mut toasts, &mut terms, &mut focus, &mut say, &mut sound, &mut working);
                 }
             }
@@ -374,8 +394,11 @@ pub fn draw(
     if seen.0 != bar.version {
         seen.0 = bar.version;
         for (mut t, mut c) in &mut q.p0() {
-            if bar.text.is_empty() && !bar.open {
-                t.0 = PLACEHOLDER.into();
+            if bar.text.is_empty() && (!bar.open || bar.target.is_some()) {
+                t.0 = match &bar.target {
+                    Some((_, title)) if bar.open => format!("Ask “{title}” for a change  ·  Enter sends, Esc cancels"),
+                    _ => PLACEHOLDER.into(),
+                };
                 c.0 = with_alpha(line, 0.55);
             } else {
                 t.0 = bar.text.clone();

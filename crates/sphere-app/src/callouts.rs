@@ -61,7 +61,7 @@ pub fn update(
         Query<(&CalloutSub, &mut Text)>,
     )>,
 ) {
-    let amt = if ctl.mode == Mode::Depth && !moment.shown && ctl.orb < 0.05 && ctl.work < 0.05 { ctl.depth_amt } else { 0.0 };
+    let amt = if ctl.mode == Mode::Depth && !moment.shown && ctl.orb < 0.05 && ctl.work < 0.05 && ctl.app < 0.05 { ctl.depth_amt } else { 0.0 };
     let vis = if amt > 0.02 { Visibility::Inherited } else { Visibility::Hidden };
     let Ok((cam, cgt)) = cams.single() else { return };
     let w = win.single().map(|w| w.width()).unwrap_or(1600.0);

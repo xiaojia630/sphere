@@ -108,7 +108,7 @@ impl PanelId {
             PanelId::Apps => Some(Hue::Apps),
             PanelId::Tele => Some(Hue::Tele),
             PanelId::Rail => Some(Hue::Rail),
-            PanelId::Work | PanelId::Chip => Some(Hue::Code),
+            PanelId::Work | PanelId::Chip | PanelId::App | PanelId::AppBare | PanelId::AppFrame => Some(Hue::Code),
             PanelId::Terminal | PanelId::Brand | PanelId::Tile => None,
         }
     }
@@ -162,6 +162,12 @@ pub enum PanelId {
     Chip,
     /// an Agent moment satellite (a waiting request)
     Sat,
+    /// an app's pane (Code, ...)
+    App,
+    /// an app's bare text (its title bar, the label by the small core)
+    AppBare,
+    /// an app's workspace: the large glass the panes float over
+    AppFrame,
 }
 
 #[derive(Component)]
@@ -341,7 +347,7 @@ pub fn spawn_panel_quad(
             fill: if card { lin(Role::Acc) } else { lin(Role::Fill) },
             acc: lin(Role::Acc),
             // 1 framed glass, 2 the core readout (dark backdrop), 3 bare text (the clock)
-            p: Vec4::new(if matches!(s.id, PanelId::Clock | PanelId::Brand | PanelId::Apps | PanelId::Rail | PanelId::Say) { 3.0 } else if s.unframed { 2.0 } else { 1.0 }, if card { 0.86 } else { 0.36 }, 1.0, 1.0),
+            p: Vec4::new(if matches!(s.id, PanelId::Clock | PanelId::Brand | PanelId::Apps | PanelId::Rail | PanelId::Say | PanelId::AppBare) { 3.0 } else if s.unframed { 2.0 } else { 1.0 }, if card { 0.86 } else { 0.36 }, 1.0, 1.0),
             from_c,
             to_c,
             q: Vec4::new(0.0, 0.0, 0.0, 0.0),
@@ -451,13 +457,16 @@ pub fn update_panels(
                 trx *= 1.0 - big;
                 try_ *= 1.0 - big;
             }
-        } else if ctl.work > 0.0 && p.id != PanelId::Brand && p.id != PanelId::Moment {
+        } else if ctl.work.max(ctl.app) > 0.0 && p.id != PanelId::Brand && p.id != PanelId::Moment {
+            // the Working view or an app: the home draws back
+            let wk = ctl.work.max(ctl.app);
             if p.id == PanelId::Say {
-                tx -= 170.0 * ctl.work;
+                tx -= 170.0 * wk;
+                top *= 1.0 - ctl.app;
             } else {
-                tx -= p.side * 200.0 * ctl.work;
-                tz -= 300.0 * ctl.work;
-                top *= 1.0 - 0.93 * ctl.work;
+                tx -= p.side * 200.0 * wk;
+                tz -= 300.0 * wk;
+                top *= 1.0 - 0.93 * wk;
             }
         }
         // core open: the side panels step aside and back

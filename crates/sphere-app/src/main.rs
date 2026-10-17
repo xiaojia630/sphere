@@ -1,6 +1,7 @@
 //! Sphere OS look test (M0): proves the approved HUD look can be matched natively in Rust.
 mod apps;
 mod callouts;
+mod codeapp;
 mod cmdbar;
 mod core;
 mod fonts;
@@ -22,6 +23,7 @@ mod sound;
 mod summon;
 mod sysstats;
 mod theme;
+mod review;
 mod stats;
 mod term;
 mod util;
@@ -54,6 +56,8 @@ pub struct Args {
     pub apps: bool,
     /// open the Working view at start, for screenshots
     pub work: bool,
+    /// open the Code app at start, for screenshots
+    pub code: bool,
     /// only the core (the app icon render)
     pub icon: bool,
     /// anti-aliasing on the core: smaa (default; a post pass, so the three window cameras share one non-MSAA
@@ -89,7 +93,7 @@ impl Args {
 }
 
 fn parse_args() -> Args {
-    let mut a = Args { cmd: None, bench: None, shot: None, frames: 120, depth: false, orbit: false, apps: false, work: false, icon: false, aa: std::env::var("SPHERE_AA").unwrap_or_else(|_| "smaa".into()), offscreen: false, collapsed: false, focus_term: false, msaa: true, size: (1600, 1000), dt: 1.0 / 20.0, demo: false, live: false, moment: false, theme: None };
+    let mut a = Args { cmd: None, bench: None, shot: None, frames: 120, depth: false, orbit: false, apps: false, work: false, code: false, icon: false, aa: std::env::var("SPHERE_AA").unwrap_or_else(|_| "smaa".into()), offscreen: false, collapsed: false, focus_term: false, msaa: true, size: (1600, 1000), dt: 1.0 / 20.0, demo: false, live: false, moment: false, theme: None };
     let mut it = std::env::args().skip(1);
     while let Some(s) = it.next() {
         match s.as_str() {
@@ -101,6 +105,7 @@ fn parse_args() -> Args {
             "--orbit" => a.orbit = true,
             "--apps" => a.apps = true,
             "--work" => a.work = true,
+            "--code" => a.code = true,
             "--icon" => a.icon = true,
             "--offscreen" => a.offscreen = true,
             "--aa" => a.aa = it.next().unwrap_or_else(|| "smaa".into()),
@@ -165,10 +170,11 @@ fn main() {
         .init_resource::<fx::Fx>()
         .init_resource::<mouse::MouseState>()
         .init_resource::<apps::Open>()
+        .init_resource::<codeapp::CodeApp>()
         .init_resource::<working::Working>()
         .init_resource::<momentfx::MomentFx>()
         .init_resource::<hud::FrameStats>()
-        .add_systems(Startup, (sound::setup, setup_core, setup_cameras, hud::setup_panels, hud::setup_backdrop, hud::setup_overlay, cmdbar::setup, visor::setup, fx::setup, homepanels::setup, orbit::setup, working::setup, momentfx::setup, callouts::setup, mouse::setup, mouse::setup_reticle).chain())
+        .add_systems(Startup, (sound::setup, setup_core, setup_cameras, hud::setup_panels, hud::setup_backdrop, hud::setup_overlay, cmdbar::setup, visor::setup, fx::setup, homepanels::setup, orbit::setup, working::setup, codeapp::setup, momentfx::setup, callouts::setup, mouse::setup, mouse::setup_reticle).chain())
         .add_systems(First, (tick_sim, theme::animate))
         .add_systems(
             Update,
@@ -176,8 +182,8 @@ fn main() {
                 (keys, stage_view, camera_rig, update_core, spin_system, update_materials, panel::update_panels, hud::update_readout, hud::update_backdrop)
                     .chain(),
                 (live::sync, live::transitions, moment::update, summon::notify, live::tick_toasts, panel::rebuild_agents_ui, hud::update_readout_text, hud::update_clock, panel::blink_system, homepanels::update, homepanels::draw_rolodex, homepanels::draw_say).chain(),
-                (term::pump, cmdbar::keys, moment::keys, term::read_keys, home::keys, orbit::keys, working::keys, momentfx::keys, visor::buttons, mouse::update, home::apply, apps::apply).chain(),
-                (working::update, working::place_panels, working::draw, momentfx::flows, momentfx::draw, momentfx::draw_sats, callouts::update).chain(),
+                (term::pump, cmdbar::keys, moment::keys, term::read_keys, home::keys, orbit::keys, working::keys, codeapp::keys, momentfx::keys, visor::buttons, mouse::update, home::apply, apps::apply).chain(),
+                (working::update, working::place_panels, working::draw, codeapp::update, codeapp::place, codeapp::draw, momentfx::flows, momentfx::draw, momentfx::draw_sats, callouts::update).chain(),
                 (orbit::update, mouse::draw_reticle, visor::draw_buttons, visor::ticker, visor::toasts, home::landed_sound, home::step_view, fx::update, term::draw, cmdbar::draw, moment::draw).chain(),
                 (hud::frame_stats, hud::bench, hud::shot).chain(),
             )

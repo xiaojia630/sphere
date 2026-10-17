@@ -55,6 +55,8 @@ pub struct CoreCtl {
     pub orb: f32,
     /// the Working view: the core slides aside, 0..1
     pub work: f32,
+    /// how open an app is (Code, ...): the core shrinks into the top-left corner
+    pub app: f32,
     /// the core spins faster while an agent works
     pub work_spin: f32,
     /// the Agent moment: the core draws back, 0..1
@@ -85,6 +87,7 @@ impl CoreCtl {
             landed: false,
             orb: 0.0,
             work: 0.0,
+            app: 0.0,
             work_spin: 1.0,
             moment: 0.0,
             flare: 0.0,
@@ -850,6 +853,12 @@ pub fn update_core(
         let w = ctl.work;
         tr.translation = Vec3::new(-260.0 * w, CORE_Y - 26.0 * ctl.orb - 192.0 * w, -140.0 * ctl.moment);
         tr.scale = Vec3::splat(lerp(1.0, 0.52, w) * lerp(1.0, 0.82, ctl.moment));
+        // an app: a small live core in the top-left corner (stage 76, 70)
+        let a = ctl.app;
+        if a > 0.0 {
+            tr.translation = tr.translation.lerp(Vec3::new(-724.0, 430.0, 0.0), a);
+            tr.scale = tr.scale.lerp(Vec3::splat(0.105), a);
+        }
     }
     let k = 1.0 - (-3.2 * dt).exp();
     if ctl.auto_orient {

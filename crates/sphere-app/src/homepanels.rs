@@ -10,7 +10,7 @@ use bevy::text::LineHeight;
 pub const APPS: [(&str, bool); 8] = [
     ("Terminal", true),
     ("Agents", true),
-    ("Code", false),
+    ("Code", true),
     ("Git & PRs", false),
     ("Containers", false),
     ("Ports & logs", false),
