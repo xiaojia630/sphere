@@ -81,12 +81,6 @@ impl Handle {
             let _ = c.forget(&id).await;
         });
     }
-    pub fn resize(&self, cols: u16, rows: u16) {
-        let (c, id) = (self.client.clone(), self.id.clone());
-        rt().spawn(async move {
-            let _ = c.resize(&id, cols, rows).await;
-        });
-    }
 }
 
 /// Follows a host child's output into a channel (closed when it exits) and opens its ordered writer.
