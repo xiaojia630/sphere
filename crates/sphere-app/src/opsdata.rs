@@ -253,7 +253,13 @@ pub fn containers() -> Result<Vec<Container>, String> {
 }
 
 fn list(stats: bool) -> Result<Vec<Container>, String> {
-    let raw = run_t("docker", &["ps", "-a", "--format", "{{json .}}"], 10)?;
+    // SPHERE_DOCKER_FILTER (e.g. "name=demo-") limits what's listed: recordings show only demo containers
+    let filter = std::env::var("SPHERE_DOCKER_FILTER").ok();
+    let mut args = vec!["ps", "-a", "--format", "{{json .}}"];
+    if let Some(f) = filter.as_deref() {
+        args.extend(["--filter", f]);
+    }
+    let raw = run_t("docker", &args, 10)?;
     let mut v: Vec<Container> = raw.lines().filter_map(parse_ps_line).collect();
     if stats && v.iter().any(|c| c.running()) {
         if let Ok(stats) = run_t("docker", &["stats", "--no-stream", "--format", "{{json .}}"], 15) {

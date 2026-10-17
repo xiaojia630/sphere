@@ -58,6 +58,10 @@ pub struct Args {
     pub cmd: Option<String>,
     pub bench: Option<f32>,
     pub shot: Option<String>,
+    /// `--record <dir>`: write every frame (after `--frames` of warm-up) offscreen as PNGs, for GIFs
+    pub record: Option<String>,
+    /// how many frames `--record` writes
+    pub record_frames: u32,
     pub frames: u32,
     pub depth: bool,
     pub orbit: bool,
@@ -97,22 +101,24 @@ pub struct Args {
 impl Args {
     /// Screenshots, benches and `--demo` never touch the service.
     pub fn offline(&self) -> bool {
-        !self.live && (self.demo || self.shot.is_some() || self.bench.is_some())
+        !self.live && (self.demo || self.shot.is_some() || self.record.is_some() || self.bench.is_some())
     }
     /// Rendering into an image with no window: screenshots, and the offscreen bench.
     pub fn headless(&self) -> bool {
-        self.shot.is_some() || (self.offscreen && self.bench.is_some())
+        self.shot.is_some() || self.record.is_some() || (self.offscreen && self.bench.is_some())
     }
 }
 
 fn parse_args() -> Args {
-    let mut a = Args { cmd: None, bench: None, shot: None, frames: 120, depth: false, orbit: false, apps: false, work: false, code: false, git: false, open_app: None, icon: false, aa: std::env::var("SPHERE_AA").unwrap_or_else(|_| "smaa".into()), offscreen: false, collapsed: false, focus_term: false, msaa: true, size: (1600, 1000), dt: 1.0 / 20.0, demo: false, live: false, moment: false, theme: None };
+    let mut a = Args { cmd: None, bench: None, shot: None, record: None, record_frames: 180, frames: 120, depth: false, orbit: false, apps: false, work: false, code: false, git: false, open_app: None, icon: false, aa: std::env::var("SPHERE_AA").unwrap_or_else(|_| "smaa".into()), offscreen: false, collapsed: false, focus_term: false, msaa: true, size: (1600, 1000), dt: 1.0 / 20.0, demo: false, live: false, moment: false, theme: None };
     let mut it = std::env::args().skip(1);
     while let Some(s) = it.next() {
         match s.as_str() {
             "--cmd" => a.cmd = it.next(),
             "--bench" => a.bench = it.next().and_then(|v| v.parse().ok()),
             "--shot" => a.shot = it.next(),
+            "--record" => a.record = it.next(),
+            "--record-frames" => a.record_frames = it.next().and_then(|v| v.parse().ok()).unwrap_or(180),
             "--frames" => a.frames = it.next().and_then(|v| v.parse().ok()).unwrap_or(120),
             "--depth" => a.depth = true,
             "--orbit" => a.orbit = true,
@@ -169,7 +175,7 @@ fn main() {
         .add_plugins((glow::GlowPlugin, panel::PanelPlugin))
         .add_systems(PreStartup, (setup_offscreen, panel::setup_atlas, no_gpu_clustering))
         .add_systems(PostStartup, panel::finish_atlas)
-        .insert_resource(Sim { dt: 1.0 / 60.0, t: 0.0, boot_t: 0.0, fixed_dt: args.shot.as_ref().map(|_| args.dt), frozen: false })
+        .insert_resource(Sim { dt: 1.0 / 60.0, t: 0.0, boot_t: 0.0, fixed_dt: if args.shot.is_some() || args.record.is_some() { Some(args.dt) } else { None }, frozen: false })
         .insert_resource(CoreCtl::new(true))
         .insert_resource(StageView::compute(args.size.0 as f32, args.size.1 as f32))
         .insert_resource(if args.offline() { Agents::demo() } else { Agents::empty() })
@@ -199,6 +205,7 @@ fn main() {
         .init_resource::<hud::FrameStats>()
         .add_systems(Startup, (sound::setup, setup_core, setup_cameras, hud::setup_panels, hud::setup_backdrop, hud::setup_overlay, cmdbar::setup, visor::setup, fx::setup, homepanels::setup, orbit::setup, working::setup, (codeapp::setup, gitapp::setup, containers::setup, ports::setup, sysapp::setup, filesapp::setup).chain(), momentfx::setup, callouts::setup, mouse::setup, mouse::setup_reticle).chain())
         .add_systems(First, (tick_sim, theme::animate))
+        .add_systems(PreUpdate, hud::script)
         .add_systems(
             Update,
             (
@@ -208,7 +215,7 @@ fn main() {
                 (term::pump, cmdbar::keys, moment::keys, term::read_keys, home::keys, orbit::keys, working::keys, (codeapp::keys, gitapp::keys, containers::keys, ports::keys, sysapp::keys, filesapp::keys).chain(), momentfx::keys, visor::buttons, mouse::update, appframe::test_click, appframe::test_wheel, appframe::route_clicks, home::apply, apps::apply).chain(),
                 (working::update, working::place_panels, working::draw, (codeapp::update, codeapp::place, codeapp::draw, gitapp::update, gitapp::place, gitapp::draw, containers::update, containers::place, containers::draw, ports::update, ports::place, ports::draw, sysapp::update, sysapp::place, sysapp::draw, filesapp::update, filesapp::place, filesapp::draw).chain(), momentfx::flows, momentfx::draw, momentfx::draw_sats, callouts::update).chain(),
                 (orbit::update, mouse::draw_reticle, visor::draw_buttons, visor::ticker, visor::toasts, home::landed_sound, home::step_view, fx::update, term::draw, cmdbar::draw, moment::draw).chain(),
-                (glyphs::fallback, hud::frame_stats, hud::bench, hud::shot).chain(),
+                (glyphs::fallback, hud::frame_stats, hud::bench, hud::shot, hud::record).chain(),
             )
                 .chain(),
         )
@@ -298,23 +305,25 @@ fn render_thread_qos(_w: &mut World, mut done: Local<bool>) {
 
 /// Where cameras draw: the window, or the offscreen image in `--shot` mode.
 #[derive(Resource, Clone)]
-pub struct Offscreen(pub Option<Handle<Image>>);
+pub struct Offscreen(pub Option<Handle<Image>>, pub f32);
 
 pub fn target_for(off: &Offscreen) -> RenderTarget {
     match &off.0 {
-        Some(h) => RenderTarget::Image(ImageRenderTarget { handle: h.clone(), scale_factor: 1.0 }),
+        // UI scales with the image (a recording at 2400 px wide lays the overlay out as at 1600)
+        Some(h) => RenderTarget::Image(ImageRenderTarget { handle: h.clone(), scale_factor: off.1 }),
         None => RenderTarget::default(),
     }
 }
 
 fn setup_offscreen(mut commands: Commands, mut images: ResMut<Assets<Image>>, args: Res<Args>) {
     if !args.headless() {
-        commands.insert_resource(Offscreen(None));
+        commands.insert_resource(Offscreen(None, 1.0));
         return;
     }
     let mut img = Image::new_target_texture(args.size.0, args.size.1, TextureFormat::Rgba8UnormSrgb, None);
     img.texture_descriptor.usage |= TextureUsages::COPY_SRC;
-    commands.insert_resource(Offscreen(Some(images.add(img))));
+    let ui = if args.record.is_some() { (args.size.0 as f32 / 1600.0).max(1.0) } else { 1.0 };
+    commands.insert_resource(Offscreen(Some(images.add(img)), ui));
 }
 
 fn wait_for_gpu(device: Res<bevy::render::renderer::RenderDevice>) {

@@ -513,7 +513,10 @@ pub fn update_panels(
         let mut trx = 0.0;
         let mut try_ = 0.0;
         // gentle drift, and a slight base tilt toward the core
-        let drift = if sim.fixed_dt.is_some() { 0.6 } else { 1.0 };
+        // SPHERE_STILL=1 holds panels still (recordings for GIFs, where drift costs megabytes)
+        static STILL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let still = *STILL.get_or_init(|| std::env::var_os("SPHERE_STILL").is_some());
+        let drift = if still { 0.0 } else if sim.fixed_dt.is_some() { 0.6 } else { 1.0 };
         tx += (t * 0.31 + p.phase).sin() * 6.0 * drift;
         ty += (t * 0.43 + p.phase * 1.7).sin() * 5.0 * drift;
         tz += (t * 0.27 + p.phase * 0.6).sin() * 8.0 * drift;

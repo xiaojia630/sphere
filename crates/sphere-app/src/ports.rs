@@ -353,6 +353,10 @@ const NOT_WEB: [&str; 5] = ["postgres", "mysql", "redis", "mongo", "adb"];
 fn host() -> &'static str {
     static H: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     H.get_or_init(|| {
+        // SPHERE_HOSTNAME overrides it (recordings shouldn't show the machine's name)
+        if let Ok(h) = std::env::var("SPHERE_HOSTNAME") {
+            return h.to_uppercase();
+        }
         let mut buf = [0u8; 256];
         let ok = unsafe { libc::gethostname(buf.as_mut_ptr() as *mut libc::c_char, buf.len() - 1) } == 0;
         let name = if ok { String::from_utf8_lossy(&buf[..buf.iter().position(|b| *b == 0).unwrap_or(0)]).to_string() } else { String::new() };

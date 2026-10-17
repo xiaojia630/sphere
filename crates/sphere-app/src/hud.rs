@@ -389,6 +389,8 @@ pub fn setup_overlay(mut commands: Commands, f: Res<UiFonts>, off: Res<Offscreen
     let stats = commands
         .spawn((
             StatsText,
+            // not in recordings (or shots with SPHERE_CLEAN)
+            if args.record.is_some() || std::env::var_os("SPHERE_CLEAN").is_some() { Visibility::Hidden } else { Visibility::Inherited },
             Text::new("FPS --"),
             font(&f.mono, 11.0, 0.8),
             TextColor(with_alpha(role_color(Role::Line), 0.8)),
@@ -508,7 +510,7 @@ pub fn shot(args: Res<Args>, off: Res<Offscreen>, mut sim: ResMut<Sim>, time: Re
         let image = Image::new(
             Extent3d { width: w, height: h, depth_or_array_layers: 1 },
             TextureDimension::D2,
-            ev.data.clone(),
+            unpad(&ev.data, w, h),
             TextureFormat::Rgba8UnormSrgb,
             RenderAssetUsages::default(),
         );
@@ -523,4 +525,92 @@ pub fn shot(args: Res<Args>, off: Res<Offscreen>, mut sim: ResMut<Sim>, time: Re
             Err(e) => eprintln!("could not convert screenshot: {e}"),
         }
     });
+}
+
+#[derive(Default)]
+pub struct RecordState {
+    frame: u32,
+    asked: u32,
+    saved: std::sync::Arc<std::sync::atomic::AtomicU32>,
+}
+
+/// `--record <dir>`: after `--frames` of warm-up, reads back every frame of the offscreen image and writes it as
+/// `<dir>/frame-00000.png` (the simulation steps a fixed `--dt` per frame, so it plays back at 1 / dt fps).
+/// Quits once `--record-frames` are on disk.
+pub fn record(args: Res<Args>, off: Res<Offscreen>, mut commands: Commands, mut s: Local<RecordState>, mut exit: MessageWriter<AppExit>) {
+    let Some(dir) = args.record.clone() else { return };
+    s.frame += 1;
+    if s.frame == 1 {
+        let _ = std::fs::create_dir_all(&dir);
+    }
+    let saved = s.saved.load(std::sync::atomic::Ordering::SeqCst);
+    if saved >= args.record_frames {
+        println!("recorded {saved} frames to {dir}");
+        exit.write(AppExit::Success);
+        return;
+    }
+    if s.frame <= args.frames || s.asked >= args.record_frames {
+        return;
+    }
+    let Some(img) = &off.0 else { return };
+    let i = s.asked;
+    s.asked += 1;
+    let (w, h) = args.size;
+    let counter = s.saved.clone();
+    let path = format!("{dir}/frame-{i:05}.png");
+    commands.spawn(ReadbackOnce::texture(img.clone())).observe(move |ev: On<ReadbackComplete>| {
+        let image = Image::new(Extent3d { width: w, height: h, depth_or_array_layers: 1 }, TextureDimension::D2, unpad(&ev.data, w, h), TextureFormat::Rgba8UnormSrgb, RenderAssetUsages::default());
+        if let Ok(d) = image.try_into_dynamic() {
+            if d.to_rgb8().save(&path).is_ok() {
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+    });
+}
+
+/// `SPHERE_SCRIPT="1.5:a 3:right 4.2:enter"`: presses keys at those simulation times (seconds), for recordings.
+/// Names: a letter or digit, or left right up down enter esc space tab slash.
+pub fn script(sim: Res<Sim>, mut out: MessageWriter<bevy::input::keyboard::KeyboardInput>, mut plan: Local<Option<Vec<(f32, String)>>>) {
+    use bevy::input::keyboard::{Key, KeyboardInput};
+    use bevy::input::ButtonState;
+    let plan = plan.get_or_insert_with(|| {
+        std::env::var("SPHERE_SCRIPT").unwrap_or_default().split_whitespace().filter_map(|p| p.split_once(':')).filter_map(|(t, k)| Some((t.parse().ok()?, k.to_lowercase()))).collect()
+    });
+    while let Some(pos) = plan.iter().position(|(t, _)| sim.t >= *t) {
+        let (_, k) = plan.remove(pos);
+        let (code, logical) = match k.as_str() {
+            "left" => (KeyCode::ArrowLeft, Key::ArrowLeft),
+            "right" => (KeyCode::ArrowRight, Key::ArrowRight),
+            "up" => (KeyCode::ArrowUp, Key::ArrowUp),
+            "down" => (KeyCode::ArrowDown, Key::ArrowDown),
+            "enter" => (KeyCode::Enter, Key::Enter),
+            "esc" => (KeyCode::Escape, Key::Escape),
+            "space" => (KeyCode::Space, Key::Space),
+            "tab" => (KeyCode::Tab, Key::Tab),
+            "slash" => (KeyCode::Slash, Key::Character("/".into())),
+            s if s.len() == 1 => {
+                let c = s.chars().next().unwrap();
+                let code = match c {
+                    'a'..='z' => [KeyCode::KeyA, KeyCode::KeyB, KeyCode::KeyC, KeyCode::KeyD, KeyCode::KeyE, KeyCode::KeyF, KeyCode::KeyG, KeyCode::KeyH, KeyCode::KeyI, KeyCode::KeyJ, KeyCode::KeyK, KeyCode::KeyL, KeyCode::KeyM, KeyCode::KeyN, KeyCode::KeyO, KeyCode::KeyP, KeyCode::KeyQ, KeyCode::KeyR, KeyCode::KeyS, KeyCode::KeyT, KeyCode::KeyU, KeyCode::KeyV, KeyCode::KeyW, KeyCode::KeyX, KeyCode::KeyY, KeyCode::KeyZ][(c as u8 - b'a') as usize],
+                    '0'..='9' => [KeyCode::Digit0, KeyCode::Digit1, KeyCode::Digit2, KeyCode::Digit3, KeyCode::Digit4, KeyCode::Digit5, KeyCode::Digit6, KeyCode::Digit7, KeyCode::Digit8, KeyCode::Digit9][(c as u8 - b'0') as usize],
+                    _ => continue,
+                };
+                (code, Key::Character(s.into()))
+            }
+            _ => continue,
+        };
+        for state in [ButtonState::Pressed, ButtonState::Released] {
+            out.write(KeyboardInput { key_code: code, logical_key: logical.clone(), state, text: None, repeat: false, window: Entity::PLACEHOLDER });
+        }
+    }
+}
+
+/// GPU readbacks pad each row to 256 bytes; drops the padding (sizes whose rows aren't a multiple of 64 px).
+fn unpad(data: &[u8], w: u32, h: u32) -> Vec<u8> {
+    let row = w as usize * 4;
+    let padded = row.div_ceil(256) * 256;
+    if padded == row || data.len() < padded * h as usize {
+        return data.to_vec();
+    }
+    (0..h as usize).flat_map(|y| data[y * padded..y * padded + row].iter().copied()).collect()
 }

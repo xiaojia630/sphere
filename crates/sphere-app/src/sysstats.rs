@@ -106,7 +106,12 @@ pub fn start(offline: bool) -> SysStats {
 /// Counts containers with `docker ps -a`, giving up after a few seconds (an engine that is starting can hang).
 fn docker() -> Docker {
     let bin = ["/usr/local/bin/docker", "/opt/homebrew/bin/docker", "/Applications/Docker.app/Contents/Resources/bin/docker"].into_iter().find(|p| std::path::Path::new(p).exists()).unwrap_or("docker");
-    let Ok(mut child) = Command::new(bin).args(["ps", "-a", "--format", "{{.State}}"]).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null()).stdin(std::process::Stdio::null()).spawn() else { return Docker::Off };
+    let filter = std::env::var("SPHERE_DOCKER_FILTER").ok();
+    let mut args = vec!["ps", "-a", "--format", "{{.State}}"];
+    if let Some(f) = filter.as_deref() {
+        args.extend(["--filter", f]);
+    }
+    let Ok(mut child) = Command::new(bin).args(&args).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null()).stdin(std::process::Stdio::null()).spawn() else { return Docker::Off };
     let start = Instant::now();
     loop {
         match child.try_wait() {
