@@ -182,7 +182,37 @@ pub fn update_readout_text(
     live: Res<crate::live::Live>,
     args: Res<Args>,
     mut q: ParamSet<(Query<(&mut Text, &mut TextColor), With<ReadoutMain>>, Query<&mut Text, With<ReadoutSub>>)>,
+    sim: Res<crate::core::Sim>,
+    mut booted: Local<bool>,
 ) {
+    // boot: "Starting" with a progress line, then "Standby" at 2.1 s
+    if !*booted {
+        let t = sim.boot_t / 1.75;
+        if t < 1.2 {
+            let p = 1.0 - (1.0 - t.min(1.0)).powf(1.7);
+            for (mut x, _) in &mut q.p0() {
+                if x.0 != "STARTING" {
+                    x.0 = "STARTING".into();
+                }
+            }
+            let segs = (p * 10.0).round() as usize;
+            let bar: String = (0..10).map(|i| if i < segs { '■' } else { '·' }).collect();
+            let s = format!("BOOT  {bar}  {:>3.0}%", p * 100.0);
+            for mut x in &mut q.p1() {
+                if x.0 != s {
+                    x.0 = s.clone();
+                }
+            }
+            return;
+        }
+        *booted = true;
+        for (mut x, _) in &mut q.p0() {
+            x.0 = "STANDBY".into();
+        }
+        for mut x in &mut q.p1() {
+            x.0 = agents.summary().to_uppercase();
+        }
+    }
     if args.offline() || !(agents.is_changed() || live.is_changed()) {
         return;
     }

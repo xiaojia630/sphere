@@ -31,6 +31,8 @@ pub struct PanelUniform {
     /// theme swap (see `theme::panel_map`)
     pub from_c: [Vec4; 8],
     pub to_c: [Vec4; 8],
+    /// x: how much of the outline is drawn (0..1)
+    pub q: Vec4,
 }
 
 #[derive(Asset, TypePath, AsBindGroup, Clone, Debug)]
@@ -158,6 +160,8 @@ pub struct Panel {
     pub dragging: bool,
     /// tilt from drag velocity, rad
     pub tilt: Vec2,
+    /// seconds since the frame started drawing in (boot, or the card rising)
+    pub draw_t: f32,
     /// home position in world units (stage px mapped to world, z = 0 plane)
     pub home: Vec3,
     pub home_scale: f32,
@@ -275,6 +279,7 @@ pub fn spawn_panel_quad(
             p: Vec4::new(if matches!(s.id, PanelId::Clock | PanelId::Brand | PanelId::Apps | PanelId::Rail | PanelId::Say) { 3.0 } else if s.unframed { 2.0 } else { 1.0 }, if card { 0.86 } else { 0.36 }, 1.0, 1.0),
             from_c,
             to_c,
+            q: Vec4::new(0.0, 0.0, 0.0, 0.0),
         },
         content: Some(ui.image.clone()),
     });
@@ -305,6 +310,7 @@ pub fn spawn_panel_quad(
                 user: Vec3::ZERO,
                 dragging: false,
                 tilt: Vec2::ZERO,
+                draw_t: 0.0,
             },
         ))
         .id()
@@ -425,9 +431,17 @@ pub fn update_panels(
         tr.scale = Vec3::splat(p.sc.x.max(0.001));
         let op = clamp(p.op.x, 0.0, 1.0);
         *vis = if op > 0.004 { Visibility::Inherited } else { Visibility::Hidden };
-        if mats.get(&p.material).is_some_and(|m| m.u.size.w != op) {
+        // the frame draws in over 1.15 s, cubic-bezier(.65,.05,.25,1), once the panel shows (and each time the card rises)
+        if p.id == PanelId::Moment && !moment.shown {
+            p.draw_t = 0.0;
+        } else if shown {
+            p.draw_t += dt;
+        }
+        let draw = if sim.frozen { 1.0 } else { bezier(0.65, 0.05, 0.25, 1.0, p.draw_t / 1.15) };
+        if mats.get(&p.material).is_some_and(|m| m.u.size.w != op || m.u.q.x != draw) {
             if let Some(mut m) = mats.get_mut(&p.material) {
                 m.u.size.w = op;
+                m.u.q.x = draw;
             }
         }
     }

@@ -13,6 +13,7 @@ struct Panel {
     // theme swap: the Balanced role colours the UI is drawn in, and what each becomes now (linear)
     from_c: array<vec4<f32>, 8>,
     to_c: array<vec4<f32>, 8>,
+    q: vec4<f32>,      // x: how much of the outline is drawn (the boot draw-in), 0..1
 };
 @group(constants::MATERIAL_BIND_GROUP) @binding(0) var<uniform> u: Panel;
 @group(constants::MATERIAL_BIND_GROUP) @binding(1) var content: texture_2d<f32>;
@@ -131,15 +132,25 @@ fn fs_panel(i: VOut) -> @location(0) vec4<f32> {
     let P3 = vec2<f32>(w - c, h - 0.5);
     let P4 = vec2<f32>(0.5, h - 0.5);
     let P5 = vec2<f32>(0.5, c);
-    var d = seg_d(q, P0, P1);
-    d = min(d, seg_d(q, P1, P2));
-    d = min(d, seg_d(q, P2, P3));
-    d = min(d, seg_d(q, P3, P4));
-    d = min(d, seg_d(q, P4, P5));
-    d = min(d, seg_d(q, P5, P0));
-    let glow_a = (0.72 * exp(-d * d / 2.0) * 0.45 + 0.13 * exp(-d * d / 32.0)) * u.p.w;
+    // the outline, and where along it (in path length) this pixel is: it draws in from the top-left chamfer
+    let pts = array<vec2<f32>, 7>(P0, P1, P2, P3, P4, P5, P0);
+    var d = 1e9;
+    var s = 0.0;
+    var acc = 0.0;
+    for (var k = 0; k < 6; k = k + 1) {
+        let a = pts[k];
+        let b = pts[k + 1];
+        let ba = b - a;
+        let len = length(ba);
+        let h = clamp(dot(q - a, ba) / dot(ba, ba), 0.0, 1.0);
+        let dk = length(q - a - ba * h);
+        if (dk < d) { d = dk; s = acc + h * len; }
+        acc = acc + len;
+    }
+    let drawn = clamp((u.q.x * acc - s) / 2.0 + 0.5, 0.0, 1.0);
+    let glow_a = (0.72 * exp(-d * d / 2.0) * 0.45 + 0.13 * exp(-d * d / 32.0)) * u.p.w * drawn;
     col = over(col, vec4<f32>(u.line.rgb * glow_a, glow_a));
-    let la = cover(d, hw, aa) * 0.92;
+    let la = cover(d, hw, aa) * 0.92 * drawn;
     col = over(col, vec4<f32>(u.hot.rgb * la, la));
 
     // ticks: six along the top right, five down the left edge
@@ -152,7 +163,7 @@ fn fs_panel(i: VOut) -> @location(0) vec4<f32> {
         let y = c + 16.0 + 6.0 * f32(k);
         td = min(td, seg_d(q, vec2<f32>(0.5, y), vec2<f32>(4.5, y)));
     }
-    let ta = cover(td, hw, aa) * 0.7;
+    let ta = cover(td, hw, aa) * 0.7 * u.q.x;
     col = over(col, vec4<f32>(u.line.rgb * ta, ta));
 
     // LED triangle (bottom right) and bar (bottom left)
@@ -166,10 +177,10 @@ fn fs_panel(i: VOut) -> @location(0) vec4<f32> {
     let sC = (C.x - A.x) * (B.y - A.y) - (C.y - A.y) * (B.x - A.x);
     let on_c = select(0.0, 1.0, side * sC >= 0.0);
     let led = clamp(min(min(C.x - q.x, C.y - q.y) / fw + 0.5, 1.0), 0.0, 1.0) * on_c;
-    col = over(col, vec4<f32>(u.fill.rgb * led, led));
+    col = over(col, vec4<f32>(u.fill.rgb * led * u.q.x, led * u.q.x));
     let bx = clamp(min(q.x - 18.0, 48.0 - q.x) / fw + 0.5, 0.0, 1.0);
     let by = clamp(min(q.y - (h - 3.0), (h - 0.5) - q.y) / fw + 0.5, 0.0, 1.0);
-    let bar = bx * by;
+    let bar = bx * by * u.q.x;
     col = over(col, vec4<f32>(u.fill.rgb * bar, bar));
 
     return col * u.size.w;

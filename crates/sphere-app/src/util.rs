@@ -10,6 +10,27 @@ pub fn clamp(x: f32, a: f32, b: f32) -> f32 {
 pub fn lerp(a: f32, b: f32, t: f32) -> f32 {
     a + (b - a) * t
 }
+/// CSS `cubic-bezier(x1, y1, x2, y2)` at time `t` (0..1).
+pub fn bezier(x1: f32, y1: f32, x2: f32, y2: f32, t: f32) -> f32 {
+    let t = clamp(t, 0.0, 1.0);
+    if t <= 0.0 || t >= 1.0 {
+        return t;
+    }
+    let cx = |u: f32| 3.0 * x1 * u * (1.0 - u) * (1.0 - u) + 3.0 * x2 * u * u * (1.0 - u) + u * u * u;
+    let cy = |u: f32| 3.0 * y1 * u * (1.0 - u) * (1.0 - u) + 3.0 * y2 * u * u * (1.0 - u) + u * u * u;
+    // solve cx(u) = t by bisection (monotonic for valid curves)
+    let (mut lo, mut hi) = (0.0f32, 1.0f32);
+    for _ in 0..24 {
+        let mid = 0.5 * (lo + hi);
+        if cx(mid) < t {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    cy(0.5 * (lo + hi))
+}
+
 pub fn out_cubic(t: f32) -> f32 {
     1.0 - (1.0 - clamp(t, 0.0, 1.0)).powi(3)
 }
