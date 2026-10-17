@@ -240,6 +240,10 @@ fn home_command(t: &str, acts: &mut crate::home::Acts, open: &mut crate::apps::O
     use crate::theme::ThemeId;
     let l = t.to_ascii_lowercase();
     let starts = |ws: &[&str]| ws.iter().any(|w| l == *w || l.starts_with(&format!("{w} ")));
+    if starts(&["system", "top", "activity", "processes"]) {
+        open.system();
+        return true;
+    }
     let a = if starts(&["collapse", "fold", "close rings", "close ring"]) {
         Act::Collapse(Some(true))
     } else if starts(&["unfold", "open rings", "open ring"]) {

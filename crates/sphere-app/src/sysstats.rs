@@ -94,7 +94,7 @@ fn mem(memsize: f64) -> f32 {
 }
 
 /// The GPU's own utilisation figure from its performance statistics.
-fn gpu() -> f32 {
+pub fn gpu() -> f32 {
     let out = sh("ioreg", &["-r", "-d", "1", "-w", "0", "-c", "IOAccelerator"]);
     out.split("\"Device Utilization %\"=")
         .nth(1)

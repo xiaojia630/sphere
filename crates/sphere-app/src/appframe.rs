@@ -53,3 +53,175 @@ pub fn clip(s: &str, n: usize) -> String {
     }
 }
 
+
+// ------------------------------------------------------------------ the workspace every app opens into
+
+use crate::util::{role_color, Role, Spring};
+
+/// The workspace on the stage (its centre) and how much larger than stage px its panes draw.
+pub const WS_W: f32 = 1280.0;
+pub const WS_H: f32 = 700.0;
+const WS_CX: f32 = 803.0;
+const WS_CY: f32 = 552.0;
+const K: f32 = 1.1;
+
+/// Part of an app's workspace: `pane` is its index in the app's pane list (`None` for the glass and the label).
+#[derive(Component)]
+pub struct AppPart {
+    pub app: u8,
+    pub pane: Option<u8>,
+}
+
+pub struct Workspace {
+    pub panes: Vec<Entity>,
+    pub corelab: Entity,
+}
+
+/// Spawns an app's glass, its panes (x, y, w, h, z in workspace px; `bare` ones get no frame) and the label beside
+/// the small core.
+pub fn spawn_workspace(c: &mut Commands, meshes: &mut Assets<Mesh>, atlas: &mut PanelAtlas, pmats: &mut Assets<PanelMaterial>, app: u8, rects: &[([f32; 5], bool)]) -> Workspace {
+    let at = |x: f32, y: f32, w: f32, h: f32, z: f32| {
+        let mut p = stage_to_world(WS_CX + K * (x + w / 2.0 - WS_W / 2.0), WS_CY + K * (y + h / 2.0 - WS_H / 2.0));
+        p.z = z;
+        p
+    };
+    let ui = spawn_ui_panel(c, atlas, 4.0, 4.0);
+    let e = spawn_panel_quad(c, meshes, pmats, &ui, &PanelSpec { id: PanelId::AppFrame, w: WS_W, h: WS_H, home: at(0.0, 0.0, WS_W, WS_H, -10.0), home_scale: K, side: 0.0, phase: 0.5 + app as f32, show_at: 0.0, unframed: false });
+    c.entity(e).insert(AppPart { app, pane: None });
+    let mut panes = Vec::new();
+    for (i, ([x, y, w, h, z], bare)) in rects.iter().enumerate() {
+        let ui = spawn_ui_panel(c, atlas, *w, *h);
+        let id = if *bare { PanelId::AppBare } else { PanelId::App };
+        let e = spawn_panel_quad(c, meshes, pmats, &ui, &PanelSpec { id, w: *w, h: *h, home: at(*x, *y, *w, *h, *z), home_scale: K, side: 0.0, phase: 0.4 + i as f32 * 1.1 + app as f32, show_at: 0.0, unframed: false });
+        c.entity(e).insert(AppPart { app, pane: Some(i as u8) });
+        panes.push(ui.root);
+    }
+    let (lw, lh) = (300.0, 40.0);
+    let ui = spawn_ui_panel(c, atlas, lw, lh);
+    let mut home = stage_to_world(132.0 + lw / 2.0, 52.0 + lh / 2.0);
+    home.z = 20.0;
+    let e = spawn_panel_quad(c, meshes, pmats, &ui, &PanelSpec { id: PanelId::AppBare, w: lw, h: lh, home, home_scale: 1.0, side: 0.0, phase: 2.6, show_at: 0.0, unframed: false });
+    c.entity(e).insert(AppPart { app, pane: None });
+    Workspace { panes, corelab: ui.root }
+}
+
+/// The parts follow how open their app is (a pane `hide` says no to stays away).
+pub fn place_app(app: u8, amt: f32, hide: impl Fn(u8) -> bool, q: &mut Query<(&mut Panel, &AppPart)>) {
+    let amt = amt.clamp(0.0, 1.0);
+    for (mut p, part) in q.iter_mut() {
+        if part.app != app {
+            continue;
+        }
+        let a = if part.pane.is_some_and(&hide) { 0.0 } else { amt };
+        if p.work.map(|w| w.0) != Some(a) {
+            p.work = Some((a, 0.0));
+        }
+    }
+}
+
+/// Opening and closing: the spring and the core's corner.
+pub fn step_open(open: bool, amt: &mut Spring, dt: f32, ctl: &mut crate::core::CoreCtl) {
+    amt.t = if open { 1.0 } else { 0.0 };
+    amt.step(dt);
+    ctl.app = ctl.app.max(amt.x.clamp(0.0, 1.0));
+}
+
+impl Ui<'_> {
+    /// "NAME / line two" beside the small core.
+    pub fn corelab(&self, c: &mut Commands, root: Entity, name: &str, line2: String, col: Color) {
+        let lab = c.spawn(Node { flex_direction: FlexDirection::Column, row_gap: px(5), padding: UiRect::top(px(4)), ..default() }).id();
+        let l1 = self.text(c, name.to_uppercase(), &self.f.ui600, 11.0, 3.1, self.hot);
+        let l2 = self.text(c, line2, &self.f.ui500, 11.5, 1.2, col);
+        c.entity(lab).add_children(&[l1, l2]);
+        c.entity(root).add_child(lab);
+    }
+    /// The workspace's title bar: name, a sub line, the credit and ESC.
+    pub fn top(&self, c: &mut Commands, root: Entity, name: &str, sub: String, credit: &str) {
+        let r = c.spawn(Node { width: percent(100), height: percent(100), flex_direction: FlexDirection::Row, align_items: AlignItems::Center, column_gap: px(12), ..default() }).id();
+        c.entity(root).add_child(r);
+        let n = self.text(c, name.to_uppercase(), &self.f.ui600, 11.0, 3.5, self.hot);
+        let s = self.text(c, sub, &self.f.ui500, 11.0, 2.0, self.dim);
+        let sp = c.spawn(Node { flex_grow: 1.0, ..default() }).id();
+        let cr = self.text(c, credit, &self.f.ui500, 10.5, 1.0, self.dim);
+        let esc = c.spawn((Node { padding: UiRect { left: px(6), right: px(6), top: px(3), bottom: px(2) }, border: UiRect::all(px(1)), ..default() }, BorderColor::all(with_alpha(self.line, 0.55)))).id();
+        let et = self.text(c, "ESC", &self.f.ui700, 10.0, 1.6, self.hot);
+        c.entity(esc).add_child(et);
+        c.entity(r).add_children(&[n, s, sp, cr, esc]);
+    }
+    /// The agents strip with the key legend on the right.
+    pub fn strip(&self, c: &mut Commands, root: Entity, agents: &[sphere_proto::TaskView], legend: [&str; 2]) {
+        use sphere_proto::TaskState;
+        let r = c.spawn(Node { width: percent(100), height: percent(100), flex_direction: FlexDirection::Row, align_items: AlignItems::Center, column_gap: px(12), padding: UiRect { left: px(16), right: px(14), ..default() }, ..default() }).id();
+        c.entity(root).add_child(r);
+        let lab = self.text(c, "AGENTS", &self.f.ui600, 10.5, 3.2, self.dim);
+        c.entity(r).add_child(lab);
+        for t in agents.iter().take(3) {
+            let (col, sub) = match t.state {
+                TaskState::Done => (role_color(Role::Ok), "Finished".to_string()),
+                TaskState::NeedsYou => (role_color(Role::Acc), format!("Needs you · {}", clip(&t.status, 24))),
+                TaskState::Failed => (role_color(Role::Bad), "Failed".to_string()),
+                TaskState::Stopped => (self.dim, "Stopped".to_string()),
+                _ => (self.line, clip(&t.status, 30)),
+            };
+            let chip = c.spawn((Node { height: px(36), flex_direction: FlexDirection::Row, align_items: AlignItems::Center, column_gap: px(10), padding: UiRect { left: px(10), right: px(12), ..default() }, border: UiRect::all(px(1)), ..default() }, BorderColor::all(with_alpha(col, 0.5)))).id();
+            let dot = c.spawn((Node { width: px(8), height: px(8), ..default() }, BackgroundColor(col), UiTransform { rotation: Rot2::degrees(45.0), ..default() })).id();
+            let col2 = c.spawn(Node { flex_direction: FlexDirection::Column, row_gap: px(1), ..default() }).id();
+            let tt = self.text(c, clip(&t.title, 26), &self.f.ui600, 12.5, 0.4, self.hot);
+            let st = self.text(c, sub, &self.f.ui500, 11.0, 0.4, col);
+            c.entity(col2).add_children(&[tt, st]);
+            c.entity(chip).add_children(&[dot, col2]);
+            c.entity(r).add_child(chip);
+        }
+        if agents.is_empty() {
+            let t = self.text(c, "No agents running", &self.f.ui500, 12.0, 0.4, self.dim);
+            c.entity(r).add_child(t);
+        }
+        let sp = c.spawn(Node { flex_grow: 1.0, ..default() }).id();
+        let lg = c.spawn(Node { flex_direction: FlexDirection::Column, row_gap: px(4), align_items: AlignItems::FlexEnd, ..default() }).id();
+        let l1 = self.text(c, legend[0], &self.f.ui600, 10.0, 1.6, self.dim);
+        let l2 = self.text(c, legend[1], &self.f.ui600, 10.0, 1.6, self.dim);
+        c.entity(lg).add_children(&[l1, l2]);
+        c.entity(r).add_children(&[sp, lg]);
+    }
+    /// A key-value row: dim label left, value right.
+    pub fn kv(&self, c: &mut Commands, k: &str, v: String, vcol: Color) -> Entity {
+        let row = c.spawn(Node { flex_direction: FlexDirection::Row, justify_content: JustifyContent::SpaceBetween, align_items: AlignItems::Center, height: px(20), ..default() }).id();
+        let kt = self.text(c, k.to_uppercase(), &self.f.ui600, 10.0, 2.2, self.dim);
+        let vt = self.text(c, v, &self.f.mono, 12.0, 0.0, vcol);
+        c.entity(row).add_children(&[kt, vt]);
+        row
+    }
+    /// A thin bar 0..1.
+    pub fn bar(&self, c: &mut Commands, v: f32, col: Color, w: f32) -> Entity {
+        let track = c.spawn((Node { width: px(w), height: px(4), ..default() }, BackgroundColor(with_alpha(self.line, 0.14)))).id();
+        let fill = c.spawn((Node { width: percent(v.clamp(0.0, 1.0) * 100.0), height: px(4), ..default() }, BackgroundColor(col))).id();
+        c.entity(track).add_child(fill);
+        track
+    }
+    /// A sparkline of bars from the newest 40 samples (0..1).
+    pub fn spark(&self, c: &mut Commands, vals: &[f32], h: f32, col: Color) -> Entity {
+        let row = c.spawn(Node { flex_direction: FlexDirection::Row, align_items: AlignItems::FlexEnd, height: px(h), column_gap: px(2), width: percent(100), ..default() }).id();
+        // always 40 slots, newest on the right, so a short history doesn't draw fat bars
+        let pad = 40usize.saturating_sub(vals.len());
+        for v in std::iter::repeat_n(&0.0f32, pad).chain(vals.iter().rev().take(40).collect::<Vec<_>>().into_iter().rev()) {
+            let b = c.spawn((Node { flex_grow: 1.0, height: px((v.clamp(0.0, 1.0) * h).max(1.0)), ..default() }, BackgroundColor(with_alpha(col, 0.75)))).id();
+            c.entity(row).add_child(b);
+        }
+        row
+    }
+    /// A small framed key-labelled button.
+    pub fn button(&self, c: &mut Commands, label: &str, key: &str, col: Color, filled: bool) -> Entity {
+        let btn = c
+            .spawn((
+                Node { height: px(28), padding: UiRect::horizontal(px(10)), align_items: AlignItems::Center, column_gap: px(8), border: UiRect::all(px(1)), ..default() },
+                BorderColor::all(with_alpha(col, if filled { 1.0 } else { 0.6 })),
+                BackgroundColor(if filled { col } else { with_alpha(self.line, 0.05) }),
+            ))
+            .id();
+        let fg = if filled { Color::BLACK } else { col };
+        let t = self.text(c, label.to_uppercase(), &self.f.ui600, 10.5, 2.0, fg);
+        let k = self.text(c, key, &self.f.ui700, 9.5, 0.5, with_alpha(fg, 0.7));
+        c.entity(btn).add_children(&[t, k]);
+        btn
+    }
+}
