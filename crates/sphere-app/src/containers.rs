@@ -198,6 +198,16 @@ pub fn setup(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut image
 }
 
 #[allow(clippy::too_many_arguments)]
+/// The key the wheel presses over a pane: the map and the summary step containers, the logs scroll.
+fn scroll_key(pane: Option<u8>, down: bool) -> Option<KeyCode> {
+    match pane? as usize {
+        MAP | SUM => Some(if down { KeyCode::KeyJ } else { KeyCode::KeyK }),
+        LOGS => Some(if down { KeyCode::BracketRight } else { KeyCode::BracketLeft }),
+        _ => None,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 pub fn keys(
     mut ev: MessageReader<bevy::input::keyboard::KeyboardInput>,
     keys: Res<ButtonInput<KeyCode>>,
@@ -206,7 +216,7 @@ pub fn keys(
     sim: Res<crate::core::Sim>,
     mut sound: ResMut<crate::sound::Sound>,
     mut toasts: ResMut<crate::live::Toasts>,
-    mut clicks: ResMut<crate::appframe::AppClicks>,
+    (mut clicks, mut scrolls): (ResMut<crate::appframe::AppClicks>, ResMut<crate::appframe::AppScrolls>),
     mut cmd_was: Local<bool>,
 ) {
     let mods = keys.any_pressed([KeyCode::SuperLeft, KeyCode::SuperRight, KeyCode::ControlLeft, KeyCode::ControlRight, KeyCode::AltLeft, KeyCode::AltRight]);
@@ -223,6 +233,7 @@ pub fn keys(
         }
         codes.push(e.key_code);
     }
+    codes.extend(crate::appframe::scroll_keys(scrolls.take(APP), scroll_key));
     // clicks on the panes: a button presses its key, a pill picks its container
     for c in clicks.take(2) {
         match c {
@@ -503,7 +514,7 @@ pub fn draw(mut commands: Commands, app: Res<ContainersApp>, svc: Res<Service>, 
     };
     ui.corelab(c, ws.corelab, "Containers", clip(&l2, 34), l2c);
     ui.top(c, ws.panes[TOP], "Containers", format!("{} CONTAINERS · {up} UP", all.len()), "container model and actions after oxker (MIT) · docker");
-    ui.strip(c, ws.panes[STRIP], &agents, ["J K SELECT   , . PAGE   S START / STOP   R RESTART   P PULL", "D REMOVE   F FOLLOW   [ ] SCROLL LOGS   ESC CLOSE"]);
+    ui.strip(c, ws.panes[STRIP], &agents, ["J K / ↑ ↓ SELECT   , . PAGE   S START / STOP   R RESTART   P PULL", "D REMOVE   F FOLLOW   [ ] SCROLL LOGS   ESC CLOSE"]);
     // summary
     let r = c.spawn(Node { width: percent(100), height: percent(100), flex_direction: FlexDirection::Row, align_items: AlignItems::Center, column_gap: px(22), padding: UiRect::horizontal(px(16)), ..default() }).id();
     c.entity(ws.panes[SUM]).add_child(r);
@@ -644,9 +655,9 @@ fn draw_map(c: &mut Commands, ui: &Ui, map: Entity, app: &ContainersApp) {
         let bar = c.spawn(Node { position_type: PositionType::Absolute, left: px(14), top: px(12), flex_direction: FlexDirection::Row, align_items: AlignItems::Center, column_gap: px(8), ..default() }).id();
         let lo = shown.first().map(|s| s.0 + 1).unwrap_or(0);
         let hi = shown.last().map(|s| s.0 + 1).unwrap_or(0);
-        let prev = chip(c, ui, "< ,", KeyCode::Comma);
+        let prev = chip(c, ui, "‹ ,", KeyCode::Comma);
         let t = ui.text(c, format!("{lo}–{hi} OF {} · PAGE {} / {pages}", app.all().len(), page + 1), &ui.f.ui600, 9.5, 1.4, ui.dim);
-        let next = chip(c, ui, ". >", KeyCode::Period);
+        let next = chip(c, ui, ". ›", KeyCode::Period);
         c.entity(bar).add_children(&[prev, t, next]);
         c.entity(map).add_child(bar);
     }
@@ -740,7 +751,7 @@ fn draw_logs(c: &mut Commands, ui: &Ui, root: Entity, ct: &Container, app: &Cont
     let start = end.saturating_sub(LOG_ROWS);
     let state = if app.log_off > 0 { format!("lines {}–{} of {} · F to follow", start + 1, end, logs.len()) } else if app.follow { "following".to_string() } else { "paused (F)".to_string() };
     let h = ui.header(c, "Logs", &format!("{} · {state}", clip(&ct.name, 30)), ui.dim);
-    let (up, down) = (chip(c, ui, "OLDER [", KeyCode::BracketLeft), chip(c, ui, "NEWER ]", KeyCode::BracketRight));
+    let (up, down) = (chip(c, ui, "▲ OLDER [", KeyCode::BracketLeft), chip(c, ui, "▼ NEWER ]", KeyCode::BracketRight));
     c.entity(h).insert(Click::Key(KeyCode::KeyF)).add_children(&[up, down]);
     let list = c.spawn(Node { flex_direction: FlexDirection::Column, padding: UiRect { left: px(16), right: px(16), top: px(6), ..default() }, ..default() }).id();
     c.entity(b).add_children(&[h, list]);
@@ -778,6 +789,15 @@ fn draw_logs(c: &mut Commands, ui: &Ui, root: Entity, ct: &Container, app: &Cont
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wheel_keys_per_pane() {
+        assert_eq!(scroll_key(Some(MAP as u8), true), Some(KeyCode::KeyJ));
+        assert_eq!(scroll_key(Some(SUM as u8), false), Some(KeyCode::KeyK));
+        assert_eq!(scroll_key(Some(LOGS as u8), true), Some(KeyCode::BracketRight));
+        assert_eq!(scroll_key(Some(LOGS as u8), false), Some(KeyCode::BracketLeft));
+        assert_eq!(scroll_key(Some(DETAIL as u8), true), None);
+    }
 
     fn mk(id: &str, running: bool) -> Container {
         Container { id: id.into(), name: format!("n-{id}"), state: if running { "running".into() } else { "exited".into() }, ..Default::default() }

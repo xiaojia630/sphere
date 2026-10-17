@@ -123,6 +123,15 @@ pub fn setup(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut image
 }
 
 #[allow(clippy::too_many_arguments)]
+/// The key the wheel presses over a pane: the map and the list step through the ports.
+fn scroll_key(pane: Option<u8>, down: bool) -> Option<KeyCode> {
+    match pane? as usize {
+        MAP | LIST => Some(if down { KeyCode::KeyJ } else { KeyCode::ArrowUp }),
+        _ => None,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 pub fn keys(
     mut ev: MessageReader<bevy::input::keyboard::KeyboardInput>,
     keys: Res<ButtonInput<KeyCode>>,
@@ -132,7 +141,7 @@ pub fn keys(
     sim: Res<crate::core::Sim>,
     mut sound: ResMut<crate::sound::Sound>,
     mut toasts: ResMut<crate::live::Toasts>,
-    mut clicks: ResMut<crate::appframe::AppClicks>,
+    (mut clicks, mut scrolls): (ResMut<crate::appframe::AppClicks>, ResMut<crate::appframe::AppScrolls>),
     mut cmd_was: Local<bool>,
 ) {
     let mods = keys.any_pressed([KeyCode::SuperLeft, KeyCode::SuperRight, KeyCode::ControlLeft, KeyCode::ControlRight, KeyCode::AltLeft, KeyCode::AltRight]);
@@ -149,6 +158,7 @@ pub fn keys(
         }
         codes.push(e.key_code);
     }
+    codes.extend(crate::appframe::scroll_keys(scrolls.take(APP), scroll_key));
     // clicks on the panes: a button presses its key, a tile or row picks its port, a tab its filter
     for c in clicks.take(3) {
         match c {
@@ -445,7 +455,7 @@ pub fn draw(mut commands: Commands, app: Res<PortsApp>, svc: Res<Service>, roots
     let first = sel.saturating_sub(ROWS / 2).min(shown.len().saturating_sub(ROWS));
     let range = if shown.is_empty() { "0 shown".to_string() } else { format!("{}–{} of {}", first + 1, (first + ROWS).min(shown.len()), shown.len()) };
     let h = ui.header(c, "Listeners", &range, ui.dim);
-    let (up, down) = (crate::containers::chip(c, &ui, "UP", KeyCode::ArrowUp), crate::containers::chip(c, &ui, "DOWN", KeyCode::ArrowDown));
+    let (up, down) = (crate::containers::chip(c, &ui, "▲", KeyCode::ArrowUp), crate::containers::chip(c, &ui, "▼", KeyCode::ArrowDown));
     c.entity(h).add_children(&[up, down]);
     let list = c.spawn(Node { flex_direction: FlexDirection::Column, padding: UiRect { left: px(14), right: px(14), top: px(6), ..default() }, ..default() }).id();
     c.entity(b).add_children(&[h, list]);
@@ -540,9 +550,9 @@ fn draw_map(c: &mut Commands, ui: &Ui, map: Entity, app: &PortsApp) {
     let pages = app.pages();
     if pages > 1 {
         let bar = c.spawn(Node { position_type: PositionType::Absolute, left: px(14), top: px(12), flex_direction: FlexDirection::Row, align_items: AlignItems::Center, column_gap: px(8), ..default() }).id();
-        let prev = crate::containers::chip(c, ui, "< ,", KeyCode::Comma);
+        let prev = crate::containers::chip(c, ui, "‹ ,", KeyCode::Comma);
         let t = ui.text(c, format!("{}–{} OF {} · PAGE {} / {pages}", page_first + 1, page_first + page.len(), shown.len(), page_first / PAGE + 1), &ui.f.ui600, 9.5, 1.4, ui.dim);
-        let next = crate::containers::chip(c, ui, ". >", KeyCode::Period);
+        let next = crate::containers::chip(c, ui, ". ›", KeyCode::Period);
         c.entity(bar).add_children(&[prev, t, next]);
         c.entity(map).add_child(bar);
     }
@@ -589,6 +599,13 @@ fn draw_detail(c: &mut Commands, ui: &Ui, root: Entity, l: &Listener, conns: Opt
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wheel_keys_per_pane() {
+        assert_eq!(scroll_key(Some(LIST as u8), true), Some(KeyCode::KeyJ));
+        assert_eq!(scroll_key(Some(MAP as u8), false), Some(KeyCode::ArrowUp));
+        assert_eq!(scroll_key(Some(DETAIL as u8), true), None);
+    }
 
     fn l(port: u16, container: bool) -> Listener {
         Listener { port, pid: 100 + port as u32, command: format!("proc{port}"), addr: "*".into(), container: container.then(|| format!("c{port}")), ..Default::default() }

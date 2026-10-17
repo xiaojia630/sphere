@@ -140,6 +140,12 @@ pub fn setup(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut image
 }
 
 #[allow(clippy::too_many_arguments)]
+/// The key the wheel presses over a pane: the process table steps its rows.
+fn scroll_key(pane: Option<u8>, down: bool) -> Option<KeyCode> {
+    (pane? as usize == PROCS).then_some(if down { KeyCode::ArrowDown } else { KeyCode::ArrowUp })
+}
+
+#[allow(clippy::too_many_arguments)]
 pub fn keys(
     mut ev: MessageReader<bevy::input::keyboard::KeyboardInput>,
     keys: Res<ButtonInput<KeyCode>>,
@@ -148,7 +154,7 @@ pub fn keys(
     sim: Res<crate::core::Sim>,
     mut sound: ResMut<crate::sound::Sound>,
     mut toasts: ResMut<crate::live::Toasts>,
-    mut clicks: ResMut<crate::appframe::AppClicks>,
+    (mut clicks, mut scrolls): (ResMut<crate::appframe::AppClicks>, ResMut<crate::appframe::AppScrolls>),
     mut cmd_was: Local<bool>,
 ) {
     let mods = keys.any_pressed([KeyCode::SuperLeft, KeyCode::SuperRight, KeyCode::ControlLeft, KeyCode::ControlRight, KeyCode::AltLeft, KeyCode::AltRight]);
@@ -165,6 +171,7 @@ pub fn keys(
         }
         codes.push(e.key_code);
     }
+    codes.extend(crate::appframe::scroll_keys(scrolls.take(4), scroll_key));
     // clicks on the panes: a button presses its key, a row picks its process
     for c in clicks.take(4) {
         match c {
@@ -368,7 +375,7 @@ pub fn draw(mut commands: Commands, app: Res<SysApp>, svc: Res<Service>, roots: 
     let used = s.mem[0] + s.mem[1] + s.mem[2];
     ui.corelab(c, ws.corelab, "System", format!("cpu {} · memory {:.0}%", pct_or_dash(app.cpu), 100.0 * used / s.mem_total.max(1.0)), ui.line);
     ui.top(c, ws.panes[TOP], "System", s.chip.to_uppercase(), "sampled from ps, vm_stat, sysctl, netstat, ioreg, pmset");
-    ui.strip(c, ws.panes[STRIP], &agents, ["UP DOWN SELECT   S SORT CPU / MEMORY", "K STOP PROCESS   ESC CLOSE"]);
+    ui.strip(c, ws.panes[STRIP], &agents, ["↑ ↓ SELECT   S SORT CPU / MEMORY", "K STOP PROCESS   ESC CLOSE"]);
     // processor
     let b = ui.body(c, ws.panes[CPU]);
     let ncores = app.ticks_prev.len();
@@ -457,8 +464,8 @@ pub fn draw(mut commands: Commands, app: Res<SysApp>, svc: Res<Service>, roots: 
     let a = ui.spark(c, &din, 56.0, role_color(Role::Fill));
     let bb = ui.spark(c, &dout, 30.0, role_color(Role::Acc));
     let row = ui.row(c, 18.0);
-    let d = ui.text(c, format!("DOWN {}", rate_or_dash(app.net_rate.map(|r| r.0))), &f.mono, 12.0, 0.0, ui.hot);
-    let up = ui.text(c, format!("UP {}", rate_or_dash(app.net_rate.map(|r| r.1))), &f.mono, 12.0, 0.0, ui.line);
+    let d = ui.text(c, format!("↓ {}", rate_or_dash(app.net_rate.map(|r| r.0))), &f.mono, 12.0, 0.0, ui.hot);
+    let up = ui.text(c, format!("↑ {}", rate_or_dash(app.net_rate.map(|r| r.1))), &f.mono, 12.0, 0.0, ui.line);
     c.entity(row).add_children(&[d, up]);
     c.entity(inner).add_children(&[a, bb, row]);
     // disk and battery
@@ -492,7 +499,7 @@ pub fn draw(mut commands: Commands, app: Res<SysApp>, svc: Res<Service>, roots: 
     let first = sel.saturating_sub(ROWS / 2).min(procs.len().saturating_sub(ROWS));
     let range = if procs.is_empty() { String::new() } else { format!(" · {}–{} of {}", first + 1, (first + ROWS).min(procs.len()), procs.len()) };
     let h = ui.header(c, "Processes", &format!("{}{range}", if app.by_mem { "by memory · S" } else { "by CPU · S" }), ui.dim);
-    let (up, down) = (crate::containers::chip(c, &ui, "UP", KeyCode::ArrowUp), crate::containers::chip(c, &ui, "DOWN", KeyCode::ArrowDown));
+    let (up, down) = (crate::containers::chip(c, &ui, "▲", KeyCode::ArrowUp), crate::containers::chip(c, &ui, "▼", KeyCode::ArrowDown));
     c.entity(h).insert(Click::Key(KeyCode::KeyS)).add_children(&[up, down]);
     let list = c.spawn(Node { flex_direction: FlexDirection::Column, padding: UiRect { left: px(14), right: px(14), top: px(4), ..default() }, ..default() }).id();
     c.entity(b).add_children(&[h, list]);
@@ -522,6 +529,13 @@ pub fn draw(mut commands: Commands, app: Res<SysApp>, svc: Res<Service>, roots: 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wheel_keys_per_pane() {
+        assert_eq!(scroll_key(Some(PROCS as u8), true), Some(KeyCode::ArrowDown));
+        assert_eq!(scroll_key(Some(PROCS as u8), false), Some(KeyCode::ArrowUp));
+        assert_eq!(scroll_key(Some(CPU as u8), true), None);
+    }
     use crate::opsdata::Proc;
 
     fn sys(procs: Vec<Proc>, ticks: Vec<(u64, u64)>, bytes: (u64, u64), at: Instant) -> Sys {
