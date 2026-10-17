@@ -46,6 +46,65 @@ pub struct GraphRow {
     pub age: String,
 }
 
+/// A commit in the graph, placed: its lane (0 = the first branch's line) and row (0 = newest).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Node {
+    pub hash: String,
+    pub parents: Vec<String>,
+    pub refs: Vec<String>,
+    pub subject: String,
+    pub lane: usize,
+    pub row: usize,
+}
+
+/// Lays commits (newest first, each with its parents) out in lanes: a commit takes the lane that was waiting
+/// for it (or a new one), hands that lane to its first parent and opens lanes for the others.
+pub fn lay_out(commits: Vec<(String, Vec<String>, Vec<String>, String)>) -> Vec<Node> {
+    let mut lanes: Vec<Option<String>> = Vec::new();
+    let mut out = Vec::with_capacity(commits.len());
+    for (row, (hash, parents, refs, subject)) in commits.into_iter().enumerate() {
+        let lane = match lanes.iter().position(|l| l.as_deref() == Some(hash.as_str())) {
+            Some(i) => i,
+            None => match lanes.iter().position(|l| l.is_none()) {
+                Some(i) => i,
+                None => {
+                    lanes.push(None);
+                    lanes.len() - 1
+                }
+            },
+        };
+        // any other lane waiting for this commit merges here
+        for l in lanes.iter_mut() {
+            if l.as_deref() == Some(hash.as_str()) {
+                *l = None;
+            }
+        }
+        lanes[lane] = parents.first().cloned();
+        for p in parents.iter().skip(1) {
+            if !lanes.iter().any(|l| l.as_deref() == Some(p.as_str())) {
+                match lanes.iter().position(|l| l.is_none()) {
+                    Some(i) => lanes[i] = Some(p.clone()),
+                    None => lanes.push(Some(p.clone())),
+                }
+            }
+        }
+        out.push(Node { hash, parents, refs, subject, lane, row });
+    }
+    out
+}
+
+pub fn dag(dir: &Path, n: usize) -> Vec<Node> {
+    let raw = git(dir, &["log", "--all", "--date-order", "-n", &n.to_string(), "--format=%h%x02%p%x02%D%x02%s"]).unwrap_or_default();
+    let commits = raw
+        .lines()
+        .filter_map(|l| {
+            let f: Vec<&str> = l.split('\u{2}').collect();
+            (f.len() >= 4).then(|| (f[0].to_string(), f[1].split_whitespace().map(|s| s.to_string()).collect(), f[2].split(", ").filter(|s| !s.is_empty() && *s != "HEAD").map(|s| s.trim_start_matches("HEAD -> ").to_string()).collect(), f[3].to_string()))
+        })
+        .collect();
+    lay_out(commits)
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Change {
     pub path: String,
@@ -60,6 +119,7 @@ pub struct Repo {
     pub card: RepoCard,
     pub branches: Vec<Branch>,
     pub graph: Vec<GraphRow>,
+    pub dag: Vec<Node>,
     pub staged: Vec<Change>,
     pub unstaged: Vec<Change>,
     pub upstream: Option<String>,
@@ -156,6 +216,7 @@ pub fn load(dir: &Path) -> Repo {
             Some(Branch { current: name == cur, agent: name.starts_with("sphere/") || name.starts_with("claude/"), ahead: num("ahead "), behind: num("behind "), name, age })
         })
         .collect();
+    r.dag = dag(dir, 26);
     r.graph = parse_graph(&git(dir, &["log", "--graph", "--all", "--date-order", "-n", "40", "--format=%x01%h%x02%D%x02%s%x02%ar"]).unwrap_or_default());
     let (staged, unstaged) = parse_status(&git(dir, &["status", "--porcelain=v1", "-z"]).unwrap_or_default());
     r.staged = with_counts(staged, &git(dir, &["diff", "--cached", "--numstat", "-z"]).unwrap_or_default());
@@ -290,6 +351,16 @@ mod tests {
         assert_eq!(g[0].refs, vec!["main", "origin/main"]);
         assert_eq!(g[1].lanes, "|\\");
         assert!(g[1].hash.is_empty());
+    }
+
+    #[test]
+    fn lays_branches_out_in_lanes() {
+        let c = |h: &str, p: &[&str]| (h.to_string(), p.iter().map(|s| s.to_string()).collect(), Vec::new(), String::new());
+        // m merges a (on main) and f (a feature off b): f gets its own lane, and both meet at b
+        let n = lay_out(vec![c("m", &["a", "f"]), c("f", &["b"]), c("a", &["b"]), c("b", &[])]);
+        let lane = |h: &str| n.iter().find(|x| x.hash == h).unwrap().lane;
+        assert_eq!((lane("m"), lane("a"), lane("b")), (0, 0, 0));
+        assert_eq!(lane("f"), 1);
     }
 
     #[test]

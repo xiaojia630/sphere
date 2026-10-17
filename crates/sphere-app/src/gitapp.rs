@@ -79,6 +79,9 @@ pub struct GitApp {
     preview_rx: Option<Mutex<mpsc::Receiver<Preview>>>,
     preview_for: String,
     amend: bool,
+    /// the graph: a list instead of the tilted view, and how far the view is turned (degrees)
+    flat: bool,
+    yaw: f32,
     busy: bool,
     notes: (mpsc::Sender<Note>, Mutex<mpsc::Receiver<Note>>),
     version: u64,
@@ -102,6 +105,8 @@ impl Default for GitApp {
             preview_rx: None,
             preview_for: String::new(),
             amend: false,
+            flat: false,
+            yaw: 22.0,
             busy: false,
             notes: (tx, Mutex::new(rx)),
             version: 0,
@@ -298,6 +303,16 @@ pub fn keys(
                     sound.play("open");
                 }
             }
+            KeyCode::KeyV => {
+                app.flat = !app.flat;
+                app.version += 1;
+                sound.play("toggle");
+            }
+            k @ (KeyCode::Comma | KeyCode::Period) => {
+                app.yaw = (app.yaw + if k == KeyCode::Comma { -10.0 } else { 10.0 }).clamp(-60.0, 40.0);
+                app.version += 1;
+                sound.play_q("tick", 40);
+            }
             KeyCode::KeyL => {
                 app.act(Op::Pull);
                 sound.play("progress");
@@ -493,7 +508,11 @@ pub fn draw(mut commands: Commands, app: Res<GitApp>, svc: Res<Service>, roots: 
         return;
     }
     draw_branches(c, &ui, root(Pane::Branches), r);
-    draw_graph(c, &ui, root(Pane::Graph), r);
+    if app.flat {
+        draw_graph(c, &ui, root(Pane::Graph), r);
+    } else {
+        draw_graph3d(c, &ui, root(Pane::Graph), r, app.yaw);
+    }
     draw_commit(c, &ui, root(Pane::Commit), r, app.amend, app.busy);
     draw_status(c, &ui, root(Pane::Status), r, app.cursor, &app.preview, &app.preview_for);
     draw_remote(c, &ui, root(Pane::Remote), r);
@@ -607,6 +626,96 @@ fn draw_graph(c: &mut Commands, ui: &Ui, root: Entity, r: &Repo) {
         }
         c.entity(list).add_child(row);
     }
+}
+
+/// The commit graph as the prototype draws it: a plane of lanes seen from above at an angle, newest commits to
+/// the right, diamonds for commits, branch labels on their heads (agents' marked).
+fn draw_graph3d(c: &mut Commands, ui: &Ui, root: Entity, r: &Repo, yaw_deg: f32) {
+    let b = ui.body(c, root);
+    let h = ui.header(c, "Graph", "", ui.dim);
+    let area = c.spawn(Node { width: percent(100), flex_grow: 1.0, ..default() }).id();
+    c.entity(b).add_children(&[h, area]);
+    let nodes = &r.dag;
+    if nodes.is_empty() {
+        let t = ui.text(c, "No commits yet", &ui.f.ui500, 13.0, 0.4, ui.dim);
+        c.entity(area).add_child(t);
+        return;
+    }
+    let rows = nodes.len() as f32;
+    let lanes = nodes.iter().map(|n| n.lane).max().unwrap_or(0) as f32 + 1.0;
+    let (sx, sz) = (520.0 / rows.max(8.0), 46.0);
+    let (yaw, pitch) = (yaw_deg.to_radians(), 62f32.to_radians());
+    let (cx, cy, k, f) = (350.0, 150.0, 1.0, 900.0);
+    // newest to the right, lanes going back into the plane
+    let project = |row: f32, lane: f32| -> Vec2 {
+        let x = (rows - 1.0 - row) * sx - (rows - 1.0) * sx / 2.0;
+        let z = lane * sz - (lanes - 1.0) * sz / 2.0;
+        let (x1, z1) = (x * yaw.cos() - z * yaw.sin(), x * yaw.sin() + z * yaw.cos());
+        let (y2, z2) = (z1 * pitch.sin(), z1 * pitch.cos());
+        let p = f / (f + z2);
+        Vec2::new(cx + x1 * k * p, cy - y2 * k * p)
+    };
+    // the plane: a faint line along each lane
+    for l in 0..lanes as usize {
+        ui.line(c, area, project(0.0, l as f32), project(rows - 1.0, l as f32), 1.0, with_alpha(ui.line, 0.07));
+    }
+    let lane_col = [ui.line, role_color(Role::Fill), role_color(Role::Acc), role_color(Role::Ok), role_color(Role::Hot)];
+    let pos: std::collections::HashMap<&str, (Vec2, usize)> = nodes.iter().map(|n| (n.hash.as_str(), (project(n.row as f32, n.lane as f32), n.lane))).collect();
+    // edges, child to each parent on screen
+    for n in nodes {
+        let a = pos[n.hash.as_str()].0;
+        for p in &n.parents {
+            if let Some((bpos, bl)) = pos.get(p.as_str()) {
+                let col = lane_col[n.lane.max(*bl) % lane_col.len()];
+                ui.line(c, area, a, *bpos, 1.5, with_alpha(col, 0.55));
+            }
+        }
+    }
+    // commits
+    for n in nodes {
+        let p = pos[n.hash.as_str()].0;
+        // branch heads are filled
+        let head = !n.refs.is_empty();
+        let col = lane_col[n.lane % lane_col.len()];
+        let d = c
+            .spawn((
+                Node { position_type: PositionType::Absolute, left: px(p.x - 4.5), top: px(p.y - 4.5), width: px(9), height: px(9), border: UiRect::all(px(1.5)), ..default() },
+                BorderColor::all(col),
+                BackgroundColor(if head { col } else { Color::srgba(0.0, 0.0, 0.0, 0.8) }),
+                UiTransform { rotation: Rot2::degrees(45.0), ..default() },
+            ))
+            .id();
+        c.entity(area).add_child(d);
+    }
+    // labels on branch heads, up and out of the way
+    let mut placed: Vec<Vec2> = Vec::new();
+    for n in nodes.iter().filter(|n| !n.refs.is_empty()).take(7) {
+        let p = pos[n.hash.as_str()].0;
+        let local: Vec<&String> = n.refs.iter().filter(|r| !r.starts_with("origin/")).collect();
+        let name = local.first().copied().or(n.refs.first()).map(|s| s.as_str()).unwrap_or("");
+        let agent = name.starts_with("sphere/") || name.starts_with("claude/");
+        let mut at = p + Vec2::new(-20.0, -30.0);
+        at.x = at.x.clamp(8.0, 700.0 - 200.0);
+        at.y = at.y.max(6.0);
+        while placed.iter().any(|q| (q.y - at.y).abs() < 20.0 && (q.x - at.x).abs() < 170.0) {
+            at.y -= 22.0;
+        }
+        placed.push(at);
+        ui.line(c, area, p, at + Vec2::new(14.0, 18.0), 1.0, with_alpha(ui.line, 0.35));
+        let chip = c.spawn((Node { position_type: PositionType::Absolute, left: px(at.x), top: px(at.y), padding: UiRect { left: px(6), right: px(6), top: px(2), bottom: px(1) }, border: UiRect::all(px(1)), column_gap: px(6), ..default() }, BorderColor::all(with_alpha(if agent { role_color(Role::Fill) } else { ui.line }, 0.7)), BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.75)))).id();
+        let t = ui.text(c, clip(&name.to_uppercase(), 26), &ui.f.ui700, 10.0, 1.6, ui.hot);
+        c.entity(chip).add_child(t);
+        if agent {
+            let d = c.spawn((Node { width: px(5), height: px(5), align_self: AlignSelf::Center, ..default() }, BackgroundColor(role_color(Role::Fill)), UiTransform { rotation: Rot2::degrees(45.0), ..default() })).id();
+            let a = ui.text(c, "AGENT", &ui.f.ui700, 8.5, 1.2, role_color(Role::Fill));
+            c.entity(chip).add_children(&[d, a]);
+        }
+        c.entity(area).add_child(chip);
+    }
+    let foot = c.spawn((Node { position_type: PositionType::Absolute, left: px(16), bottom: px(10), ..default() }, Click::Key(KeyCode::KeyV))).id();
+    let ft = ui.text(c, "< > TURN (, .)   ·   V LIST", &ui.f.ui600, 9.5, 2.0, ui.dim);
+    c.entity(foot).add_child(ft);
+    c.entity(area).add_child(foot);
 }
 
 fn draw_commit(c: &mut Commands, ui: &Ui, root: Entity, r: &Repo, amend: bool, busy: bool) {
