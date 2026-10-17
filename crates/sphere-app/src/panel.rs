@@ -151,10 +151,13 @@ pub enum PanelId {
 #[derive(Component)]
 pub struct Panel {
     pub id: PanelId,
-    #[allow(dead_code)]
     pub w: f32,
-    #[allow(dead_code)]
     pub h: f32,
+    /// where you dragged it (x, y) and pushed it (z, scroll), on top of home
+    pub user: Vec3,
+    pub dragging: bool,
+    /// tilt from drag velocity, rad
+    pub tilt: Vec2,
     /// home position in world units (stage px mapped to world, z = 0 plane)
     pub home: Vec3,
     pub home_scale: f32,
@@ -299,6 +302,9 @@ pub fn spawn_panel_quad(
                 phase: s.phase,
                 show_at: s.show_at,
                 material: mat,
+                user: Vec3::ZERO,
+                dragging: false,
+                tilt: Vec2::ZERO,
             },
         ))
         .id()
@@ -386,6 +392,20 @@ pub fn update_panels(
             top *= 0.26;
             tz -= 70.0;
         }
+        if !focused_me && p.id != PanelId::Moment {
+            tx += p.user.x;
+            ty += p.user.y;
+            tz += p.user.z;
+            trx += p.tilt.y;
+            try_ += p.tilt.x;
+        }
+        p.tilt *= 0.9;
+        // while dragging the panel follows the pointer tightly
+        let (k, c) = if p.dragging { (420.0, 40.0) } else { (120.0, 20.0) };
+        p.px.k = k;
+        p.px.c = c;
+        p.py.k = k;
+        p.py.c = c;
         p.px.t = tx;
         p.py.t = ty;
         p.pz.t = tz;

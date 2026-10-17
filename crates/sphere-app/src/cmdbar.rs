@@ -132,6 +132,7 @@ pub fn keys(
     mut toasts: ResMut<Toasts>,
     mut terms: ResMut<crate::term::Terms>,
     moment: Res<crate::moment::Moment>,
+    (mut acts, mut open, mut say, mut sound): (ResMut<crate::home::Acts>, ResMut<crate::apps::Open>, ResMut<crate::homepanels::Say>, ResMut<crate::sound::Sound>),
 ) {
     let cmd = super_down(&keys);
     for e in ev.read() {
@@ -155,7 +156,10 @@ pub fn keys(
             Key::Enter => {
                 let text = std::mem::take(&mut bar.text);
                 bar.open = false;
-                run(text.trim(), &svc, &mut toasts, &mut terms, &mut focus);
+                let t = text.trim();
+                if !home_command(t, &mut acts, &mut open, &mut toasts) {
+                    run(t, &svc, &mut toasts, &mut terms, &mut focus, &mut say, &mut sound);
+                }
             }
             Key::Backspace => {
                 if cmd {
@@ -190,7 +194,54 @@ fn paste() -> Option<String> {
     Some(s)
 }
 
-fn run(text: &str, svc: &Service, toasts: &mut Toasts, terms: &mut crate::term::Terms, focus: &mut Focus) {
+/// The prototype's typed commands: views, collapse, themes, fit, reset, opening apps. True when handled.
+fn home_command(t: &str, acts: &mut crate::home::Acts, open: &mut crate::apps::Open, toasts: &mut Toasts) -> bool {
+    use crate::core::Mode;
+    use crate::home::Act;
+    use crate::theme::ThemeId;
+    let l = t.to_ascii_lowercase();
+    let starts = |ws: &[&str]| ws.iter().any(|w| l == *w || l.starts_with(&format!("{w} ")));
+    let a = if starts(&["collapse", "fold", "close rings", "close ring"]) {
+        Act::Collapse(Some(true))
+    } else if starts(&["unfold", "open rings", "open ring"]) {
+        Act::Collapse(Some(false))
+    } else if starts(&["expand", "depth", "explode", "pull"]) {
+        Act::Mode(Mode::Depth)
+    } else if starts(&["flat", "assemble", "flatten"]) {
+        Act::Mode(Mode::Flat)
+    } else if starts(&["orbit", "gyro"]) {
+        Act::Mode(Mode::Orbit)
+    } else if starts(&["balanced", "default", "calm"]) {
+        Act::Theme(Some(ThemeId::Balanced))
+    } else if starts(&["full color", "full colour", "color", "colour", "rainbow"]) {
+        Act::Theme(Some(ThemeId::Full))
+    } else if starts(&["cyan", "blue"]) {
+        Act::Theme(Some(ThemeId::Cyan))
+    } else if starts(&["black", "mono", "dark"]) {
+        Act::Theme(Some(ThemeId::Black))
+    } else if starts(&["red"]) {
+        Act::Theme(Some(ThemeId::Red))
+    } else if starts(&["fit", "frame"]) {
+        Act::Fit
+    } else if starts(&["reset", "home", "center", "centre"]) {
+        Act::Reset
+    } else if let Some(rest) = ["open ", "launch ", "show "].iter().find_map(|p| l.strip_prefix(p)) {
+        let i = crate::homepanels::APPS.iter().position(|(n, _)| n.to_ascii_lowercase().starts_with(rest.trim()) || rest.trim().starts_with(&n.to_ascii_lowercase()));
+        match i {
+            Some(i) => {
+                open.app(i, toasts);
+                return true;
+            }
+            None => return false,
+        }
+    } else {
+        return false;
+    };
+    acts.0.push(a);
+    true
+}
+
+fn run(text: &str, svc: &Service, toasts: &mut Toasts, terms: &mut crate::term::Terms, focus: &mut Focus, say: &mut crate::homepanels::Say, sound: &mut crate::sound::Sound) {
     if text.is_empty() {
         return;
     }
@@ -220,7 +271,12 @@ fn run(text: &str, svc: &Service, toasts: &mut Toasts, terms: &mut crate::term::
     match resolve(text) {
         Ok((repo, prompt)) => {
             let name = Path::new(&repo).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-            toasts.push(format!("Starting in {name}"));
+            toasts.push_quiet("Agent started");
+            sound.play("done");
+            let short: String = if prompt.chars().count() > 29 { prompt.chars().take(28).collect::<String>() + "…" } else { prompt.clone() };
+            let words = format!("On it. I started an agent for “{short}” in {name}.");
+            sound.speak(&words);
+            say.say(words);
             remember(&repo);
             svc.send(Cmd::Start { repo, prompt });
         }
