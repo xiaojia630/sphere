@@ -322,6 +322,9 @@ pub fn ticker(
             if s.ready {
                 items.push(format!("SYSTEM cpu {:.0}% · memory {:.0}% · gpu {:.0}%", s.cpu * 100.0, s.mem * 100.0, s.gpu * 100.0));
             }
+            if s.docker != crate::sysstats::Docker::Unknown {
+                items.push(format!("CONTAINERS {}", s.docker.label().to_lowercase()));
+            }
             items.push(format!("THEME {}", theme.id.label().to_lowercase()));
             items.push("KEYS 1 2 3 views · C theme · X collapse · F fit · R reset · M sound".into());
             let line = items.join("        ");

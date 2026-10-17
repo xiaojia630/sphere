@@ -147,6 +147,11 @@ pub fn keys(mut ev: MessageReader<KeyboardInput>, focus: Res<Focus>, mut m: ResM
                     m.editing = true;
                     sound.play("click");
                 }
+                // Y is Enter's twin for a yes; a question needs its answer (a number, or E to type one)
+                "y" if req.info.kind != RequestKind::Question => {
+                    answer(&mut m, &svc, &id, AnswerKind::Yes, None);
+                    sound.play_with("confirm", 0.7, 0.0);
+                }
                 "l" => {
                     answer(&mut m, &svc, &id, AnswerKind::Later, None);
                     sound.play_with("whoosh", 0.6, 0.0);
@@ -266,11 +271,7 @@ fn yes_label(r: &RequestView) -> &'static str {
 
 fn waited(opened_at: &str) -> String {
     // RFC 3339 from the service; minutes since then, from the system clock.
-    let secs = std::process::Command::new("date")
-        .args(["-j", "-u", "-f", "%Y-%m-%dT%H:%M:%S", &opened_at.chars().take(19).collect::<String>(), "+%s"])
-        .output()
-        .ok()
-        .and_then(|o| String::from_utf8_lossy(&o.stdout).trim().parse::<i64>().ok());
+    let secs = crate::working::parse_rfc3339(opened_at);
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
     match secs {
         Some(t) if now - t >= 60 => format!("waiting {} min", (now - t) / 60),

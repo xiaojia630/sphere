@@ -110,6 +110,9 @@ pub struct OrbMarker;
 pub struct Tile(pub usize);
 #[derive(Component)]
 pub struct TileFoot(pub usize);
+/// A tile's right label (0), headline (1) or sub line (2), written from live state each frame.
+#[derive(Component)]
+pub struct TileText(pub usize, pub u8);
 #[derive(Component)]
 pub struct Beam(pub usize);
 
@@ -142,7 +145,6 @@ pub fn setup(
     mut pmats: ResMut<Assets<PanelMaterial>>,
     f: Res<UiFonts>,
     tilt: Query<Entity, With<CoreTilt>>,
-    agents: Res<crate::core::Agents>,
     args: Res<crate::Args>,
 ) {
     let Ok(tilt) = tilt.single() else { return };
@@ -198,7 +200,7 @@ pub fn setup(
     let bm = meshes.add(beam_mesh());
     for (i, (name, live)) in APPS.iter().enumerate() {
         let ui = spawn_ui_panel(c, &mut atlas, TILE_W, TILE_H);
-        build_tile(c, ui.root, &f, i, name, *live, &agents);
+        build_tile(c, ui.root, &f, i, name, *live);
         let e = spawn_panel_quad(c, &mut meshes, &mut pmats, &ui, &PanelSpec { id: PanelId::Tile, w: TILE_W, h: TILE_H, home: Vec3::ZERO, home_scale: 1.0, side: 0.0, phase: 0.0, show_at: 0.0, unframed: false });
         c.entity(e).remove::<Panel>().insert((Tile(i), Visibility::Hidden));
         let mut m = GlowMaterial::new(Kind::Ring, crate::theme::now_lin(Role::Fill), 0.0);
@@ -208,7 +210,41 @@ pub fn setup(
     c.insert_resource(Orb { open: args.apps, since: 0.0, ..default() });
 }
 
-fn build_tile(c: &mut Commands, root: Entity, f: &UiFonts, i: usize, name: &str, live: bool, agents: &crate::core::Agents) {
+/// What a tile says (right label, headline, sub line), from what the machine and sphered report right now.
+/// `None` is the moment before the first look: nothing claimed yet.
+fn tile_text(i: usize, now: Option<&TileState>) -> (&'static str, String, String) {
+    let tasks = now.map(|n| n.tasks);
+    match i {
+        0 => ("live", now.map(|n| format!("{} tab{}", n.tabs, if n.tabs == 1 { "" } else { "s" })).unwrap_or_else(|| "Your shell".into()), "Cmd T new · Cmd 1-9 switch".into()),
+        1 => match now {
+            Some(n) if n.agents == 0 => ("live", "No agents yet".into(), "Start one with /".into()),
+            Some(n) => ("live", format!("{} working", n.working), if n.needs > 0 { format!("{} need{} you · Enter to answer", n.needs, if n.needs == 1 { "s" } else { "" }) } else { "Start one with / · answer with Enter".into() }),
+            None => ("live", "Agents".into(), "Start one with /".into()),
+        },
+        2 => ("live", "Zed and diffs".into(), match tasks {
+            Some(0) => "No tasks yet · review, merge, PR".into(),
+            Some(n) => format!("{n} task{} · review, merge, PR", if n == 1 { "" } else { "s" }),
+            None => "Review, checkpoints, merge, PR".into(),
+        }),
+        3 => ("live", "Branches and PRs".into(), "gitui and your gh login".into()),
+        4 => ("live", now.map(|n| n.docker.clone()).unwrap_or_else(|| "Docker".into()), now.map(|n| n.docker_detail.clone()).unwrap_or_else(|| "Start, stop, restart, logs".into())),
+        5 => ("live", "Ports and logs".into(), "What's listening, and its output".into()),
+        6 => ("live", "Files".into(), "Browse, preview, quick edit".into()),
+        _ => ("soon", "Music".into(), "Not built yet".into()),
+    }
+}
+
+struct TileState {
+    tabs: usize,
+    agents: usize,
+    working: usize,
+    needs: usize,
+    tasks: usize,
+    docker: String,
+    docker_detail: String,
+}
+
+fn build_tile(c: &mut Commands, root: Entity, f: &UiFonts, i: usize, name: &str, live: bool) {
     let line = role_color(Role::Line);
     let hot = role_color(Role::Hot);
     let dim = role_color(Role::Dim);
@@ -224,20 +260,11 @@ fn build_tile(c: &mut Commands, root: Entity, f: &UiFonts, i: usize, name: &str,
         .id();
     let sq = c.spawn((Node { width: px(6), height: px(6), ..default() }, BackgroundColor(role_color(Role::Fill)))).id();
     let t = c.spawn((Text::new(name.to_uppercase()), font(&f.ui600, 11.5, 2.76), TextColor(hot), LineHeight::Px(13.8))).id();
-    let (right, main, sub) = match i {
-        0 => ("live", "Your shell".to_string(), "Tabs · Cmd T new · Cmd 1-9 switch".to_string()),
-        1 => ("live", format!("{} working", agents.working()), "Start one with / · answer with Enter".to_string()),
-        2 => ("M3", "Zed and diffs".to_string(), "Review, checkpoints, merge, PR".to_string()),
-        3 => ("M3", "Branches and PRs".to_string(), "gitui and your gh login".to_string()),
-        4 => ("M4", "Docker".to_string(), "oxker on bollard".to_string()),
-        5 => ("M4", "Ports and logs".to_string(), "What's listening, and its output".to_string()),
-        6 => ("later", "Files".to_string(), "yazi in a panel".to_string()),
-        _ => ("M6", "Music".to_string(), "spotify-player on librespot".to_string()),
-    };
-    let r = c.spawn((Text::new(right.to_uppercase()), font(&f.ui500, 10.5, 1.47), TextColor(dim), LineHeight::Px(13.0), Node { margin: UiRect { left: auto(), ..default() }, ..default() })).id();
+    let (right, main, sub) = tile_text(i, None);
+    let r = c.spawn((TileText(i, 0), Text::new(right.to_uppercase()), font(&f.ui500, 10.5, 1.47), TextColor(dim), LineHeight::Px(13.0), Node { margin: UiRect { left: auto(), ..default() }, ..default() })).id();
     c.entity(hdr).add_children(&[sq, t, r]);
-    let m = c.spawn((Text::new(main.to_uppercase()), font(&f.ui600, 14.0, 1.4), TextColor(hot), LineHeight::Px(18.0))).id();
-    let s = c.spawn((Text::new(sub), font(&f.ui500, 12.5, 0.5), TextColor(line), LineHeight::Px(16.0))).id();
+    let m = c.spawn((TileText(i, 1), Text::new(main.to_uppercase()), font(&f.ui600, 14.0, 1.4), TextColor(hot), LineHeight::Px(18.0))).id();
+    let s = c.spawn((TileText(i, 2), Text::new(sub), font(&f.ui500, 12.5, 0.5), TextColor(line), LineHeight::Px(16.0))).id();
     let sp = c.spawn(Node { flex_grow: 1.0, ..default() }).id();
     let foot = c
         .spawn((Node { height: px(25), flex_direction: FlexDirection::Row, align_items: AlignItems::Center, border: UiRect { top: px(1), ..default() }, ..default() }, BorderColor::all(with_alpha(line, 0.13))))
@@ -273,8 +300,23 @@ pub fn update(
     mut pmats: ResMut<Assets<PanelMaterial>>,
     mut gmats: ResMut<Assets<GlowMaterial>>,
     mut feet: Query<(&TileFoot, &mut Text, &mut TextColor)>,
+    (mut words, agents, live, stats, terms): (Query<(&TileText, &mut Text), Without<TileFoot>>, Res<crate::core::Agents>, Res<crate::live::Live>, Res<crate::sysstats::SysStats>, Res<crate::term::Terms>),
 ) {
     let dt = sim.dt;
+    if orb.amount() > 0.01 {
+        let st = TileState { tabs: terms.tabs.len(), agents: agents.list.len(), working: agents.working(), needs: live.requests.len().max(agents.waiting()), tasks: live.titles.len(), docker: stats.get().docker.label(), docker_detail: stats.get().docker.detail() };
+        for (t, mut tx) in &mut words {
+            let (r, m, s) = tile_text(t.0, Some(&st));
+            let want = match t.1 {
+                0 => r.to_uppercase(),
+                1 => m.to_uppercase(),
+                _ => s,
+            };
+            if tx.0 != want {
+                tx.0 = want;
+            }
+        }
+    }
     orb.since += dt;
     orb.amt.t = if orb.open { 1.0 } else { 0.0 };
     orb.amt.step(dt);

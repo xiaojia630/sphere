@@ -165,6 +165,9 @@ pub struct Agents {
     seed: u32,
     /// The look test's scripted progress; real agents only change through `set`.
     demo: bool,
+    /// When the tasks ran, as unix seconds (start, end; `i64::MAX` while it still runs): the Timeline's arcs.
+    pub runs: Vec<(i64, i64)>,
+    pub runs_ver: u32,
 }
 impl Agents {
     pub fn demo() -> Self {
@@ -180,11 +183,44 @@ impl Agents {
             acc: 0.0,
             seed: 12345,
             demo: true,
+            runs: Vec::new(),
+            runs_ver: 1,
         }
     }
     /// No agents yet: the panel and the ring deck start empty and fill from sphered.
     pub fn empty() -> Self {
-        Self { list: Vec::new(), version: 1, acc: 0.0, seed: 12345, demo: false }
+        Self { list: Vec::new(), version: 1, acc: 0.0, seed: 12345, demo: false, runs: Vec::new(), runs_ver: 1 }
+    }
+    pub fn set_runs(&mut self, runs: Vec<(i64, i64)>) {
+        if self.runs != runs {
+            self.runs = runs;
+            self.runs_ver += 1;
+        }
+    }
+    /// The Timeline's arcs for today, in minutes since local midnight: the span of every task that ran today
+    /// (at least ten minutes long, so a short one still shows). The look tests draw made-up ones.
+    pub fn time_spans(&self, now: f32) -> Vec<(f32, f32)> {
+        if self.demo {
+            let first = ((now + 20.0) / 30.0).ceil() * 30.0;
+            let su = if now < 600.0 { 600.0 } else { 2040.0 };
+            let mut evs = vec![(first, first + 30.0), (first + 60.0, first + 150.0), (first + 180.0, first + 240.0), (first + 330.0, first + 420.0), (su, su + 15.0)];
+            evs.retain(|e| e.0 - now < 1440.0);
+            return evs;
+        }
+        let epoch = unix_now();
+        let midnight = epoch - (epoch + local_offset(epoch)).rem_euclid(86400);
+        self.runs
+            .iter()
+            .filter_map(|&(s, e)| {
+                let e = e.min(epoch.max(s));
+                if e <= midnight || s >= midnight + 86400 {
+                    return None;
+                }
+                let a = (s.max(midnight) - midnight) as f32 / 60.0;
+                let b = (e.min(midnight + 86400) - midnight) as f32 / 60.0;
+                Some((a, b.max(a + 10.0)))
+            })
+            .collect()
     }
     /// Replaces the list (only when it differs, so the panel rebuilds only on real changes).
     pub fn set(&mut self, list: Vec<Agent>) {
@@ -443,21 +479,36 @@ fn attr_mesh(topology: PrimitiveTopology, pos: Vec<[f32; 3]>, attr: Vec<[f32; 4]
     m
 }
 
-pub fn now_minutes() -> f32 {
-    let s = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0);
-    ((s % 86400.0) / 60.0) as f32
+pub fn unix_now() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
 }
 
-pub fn build_time_dyn(now: f32) -> (Geo, Geo, Geo) {
+/// Seconds the local time zone is ahead of UTC at `epoch`.
+pub fn local_offset(epoch: i64) -> i64 {
+    // SAFETY: localtime_r only reads `t` and writes the zeroed `tm` we give it.
+    unsafe {
+        let t: libc::time_t = epoch as libc::time_t;
+        let mut tm: libc::tm = std::mem::zeroed();
+        if libc::localtime_r(&t, &mut tm).is_null() {
+            0
+        } else {
+            tm.tm_gmtoff as i64
+        }
+    }
+}
+
+/// Minutes since local midnight (the Timeline dial is today, in your time zone).
+pub fn now_minutes() -> f32 {
+    let e = unix_now();
+    (((e + local_offset(e)).rem_euclid(86400)) as f32) / 60.0
+}
+
+pub fn build_time_dyn(now: f32, spans: &[(f32, f32)]) -> (Geo, Geo, Geo) {
     let a = now / 1440.0 * TAU;
     let mut elapsed = Geo::new();
     ring_geo(&mut elapsed, 350.0, 1.3, RingOpt { a0: 0.0, a1: a.max(0.002), ..Default::default() });
-    let first = ((now + 20.0) / 30.0).ceil() * 30.0;
-    let su = if now < 600.0 { 600.0 } else { 2040.0 };
-    let mut evs = vec![(first, first + 30.0), (first + 60.0, first + 150.0), (first + 180.0, first + 240.0), (first + 330.0, first + 420.0), (su, su + 15.0)];
-    evs.retain(|e| e.0 - now < 1440.0);
     let mut events = Geo::new();
-    for (s, e) in evs {
+    for &(s, e) in spans {
         if s >= 1440.0 {
             continue;
         }
@@ -589,7 +640,7 @@ pub fn setup_core(
             393.0,
         );
     }
-    let (el, ev, nw) = build_time_dyn(now_minutes());
+    let (el, ev, nw) = build_time_dyn(now_minutes(), &agents.time_spans(now_minutes()));
     add_geo(&mut b, TIME, fold(TIME), ev, Role::Fill, 0.9, 0.5, 0.0, Tag::None, Some(Dyn::TimeEvents));
     add_geo(&mut b, TIME, fold(TIME), el, Role::Hot, 0.6, 0.3, 0.0, Tag::None, Some(Dyn::TimeElapsed));
     add_geo(&mut b, TIME, fold(TIME), nw, Role::Fill, 1.0, 0.55, 0.0, Tag::None, Some(Dyn::TimeNow));
@@ -1006,11 +1057,11 @@ pub fn update_core(
 
     // dynamic geometry
     let now = now_minutes();
-    let rebuild_time = (now - *last_min).abs() > 0.2;
+    let rebuild_time = (now - *last_min).abs() > 0.2 || agents.runs_ver != last_agents.0;
     let rebuild_agents = agents.version != *last_ver;
     agents.tick(dt);
     // (the spokes animate in their vertex shader; see `update_materials`)
-    let (g_time, g_ag) = (if rebuild_time { Some(build_time_dyn(now)) } else { None }, if rebuild_agents { Some(build_agents_dyn(&agents.list)) } else { None });
+    let (g_time, g_ag) = (if rebuild_time { Some(build_time_dyn(now, &agents.time_spans(now))) } else { None }, if rebuild_agents { Some(build_agents_dyn(&agents.list)) } else { None });
     let mut g_time = g_time;
     let mut g_ag = g_ag.map(|a| a.into_iter().map(Some).collect::<Vec<_>>());
     for (d, mh) in &dyns {
@@ -1036,7 +1087,7 @@ pub fn update_core(
     if rebuild_agents {
         *last_ver = agents.version;
     }
-    let _ = &mut *last_agents;
+    last_agents.0 = agents.runs_ver;
 
     // spinners and sphere parts
     let sp: Vec<(Entity, f32, f32)> = vec![];
@@ -1118,5 +1169,38 @@ pub fn update_materials(
                 m.u = u;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_timeline_shows_only_the_runs_of_today() {
+        let mut a = Agents::empty();
+        // nothing ran: nothing on the ring (no made-up events)
+        assert!(a.time_spans(600.0).is_empty());
+        let now = unix_now();
+        let midnight = now - (now + local_offset(now)).rem_euclid(86400);
+        a.set_runs(vec![(now - 3 * 86400, now - 3 * 86400 + 600), (midnight - 7200, midnight - 3600), (now - 60, i64::MAX)]);
+        let spans = a.time_spans(now_minutes());
+        // the two from earlier days are left out; the one still running is there, at least ten minutes wide
+        assert_eq!(spans.len(), 1);
+        assert!(spans[0].0 >= 0.0 && spans[0].1 <= 1450.0 && spans[0].1 - spans[0].0 >= 10.0, "{spans:?}");
+        // a run that began before midnight and goes on shows from midnight
+        a.set_runs(vec![(midnight - 3600, i64::MAX)]);
+        assert_eq!(a.time_spans(now_minutes())[0].0, 0.0);
+        // the demo's own events are only for the look tests
+        assert!(!Agents::demo().time_spans(600.0).is_empty());
+    }
+
+    #[test]
+    fn the_dial_follows_the_local_clock() {
+        let m = now_minutes();
+        assert!((0.0..1440.0).contains(&m));
+        let e = unix_now();
+        let off = local_offset(e);
+        assert!((-14 * 3600..=14 * 3600).contains(&off));
     }
 }

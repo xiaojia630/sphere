@@ -454,7 +454,7 @@ fn clip(s: &str, n: usize) -> String {
 
 /// Rebuilds the work panels' UI when the run changes (and once a second for the clock).
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
-pub fn draw(mut commands: Commands, w: Res<Working>, svc: Res<Service>, roots: Option<Res<WorkRoots>>, f: Res<UiFonts>, time: Res<Time<Real>>, mut seen: Local<(u64, Option<String>, u64, i64)>) {
+pub fn draw(mut commands: Commands, w: Res<Working>, svc: Res<Service>, roots: Option<Res<WorkRoots>>, f: Res<UiFonts>, time: Res<Time<Real>>, sim: Res<crate::core::Sim>, mut seen: Local<(u64, Option<String>, u64, i64)>) {
     let Some(roots) = roots else { return };
     if w.amt.x < 0.001 && !w.open {
         return;
@@ -465,7 +465,8 @@ pub fn draw(mut commands: Commands, w: Res<Working>, svc: Res<Service>, roots: O
         let r = t.as_ref().and_then(|t| s.runs.get(&t.id).cloned()).unwrap_or_default();
         (t, r)
     };
-    let clock = time.elapsed_secs() as i64;
+    // the clock ticks once a second (a frozen look test stops it, so its screenshot can settle)
+    let clock = if sim.frozen { seen.3 } else { time.elapsed_secs() as i64 };
     let key = (run.version, task.as_ref().map(|t| format!("{}{:?}{}", t.id, t.state, t.status)), w.version, clock);
     if *seen == key {
         return;
@@ -585,7 +586,9 @@ fn build_run(c: &mut Commands, root: Entity, f: &UiFonts, t: &TaskView, run: &Ru
     let fill_c = if t.state == TaskState::Done { role_color(Role::Ok) } else { role_color(Role::Fill) };
     let fill = c.spawn((Node { width: percent(p * 100.0), height: px(3), ..default() }, BackgroundColor(fill_c))).id();
     c.entity(track).add_child(fill);
-    let pct = c.spawn((Text::new(format!("{:.0}%", p * 100.0)), font(&f.mono, 11.5, 0.46), TextColor(hot), LineHeight::Px(12.0))).id();
+    // a plan gives a real share; without one, only the number of steps is true
+    let label = if !t.plan.is_empty() || t.state == TaskState::Done { format!("{:.0}%", p * 100.0) } else { format!("{} STEP{}", run.steps.len(), if run.steps.len() == 1 { "" } else { "S" }) };
+    let pct = c.spawn((Text::new(label), font(&f.mono, 11.5, 0.46), TextColor(hot), LineHeight::Px(12.0))).id();
     c.entity(pr).add_children(&[track, pct]);
     c.entity(b).add_children(&[hdr, m, pr]);
     // steps: the last eight

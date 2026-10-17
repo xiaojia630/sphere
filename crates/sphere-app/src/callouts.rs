@@ -49,6 +49,8 @@ pub fn update(
     ctl: Res<CoreCtl>,
     decks: Res<Decks>,
     agents: Res<crate::core::Agents>,
+    live: Res<crate::live::Live>,
+    args: Res<crate::Args>,
     stats: Res<crate::sysstats::SysStats>,
     moment: Res<crate::moment::Moment>,
     cams: Query<(&Camera, &GlobalTransform), With<CamCore>>,
@@ -131,10 +133,19 @@ pub fn update(
     let s = stats.get();
     for (cs, mut t) in &mut sets.p3() {
         let want = match cs.0 {
-            0 => "Today, 24 hours".to_string(),
+            0 => match agents.time_spans(crate::core::now_minutes()).len() {
+                0 => "Today · no agent runs yet".to_string(),
+                1 => "Today · 1 agent run".to_string(),
+                n => format!("Today · {n} agent runs"),
+            },
             1 => format!("CPU {:.0}% · memory {:.0}%", s.cpu * 100.0, s.mem * 100.0),
             2 => agents.summary(),
-            3 => "sphered · services".to_string(),
+            3 => match &live.link {
+                _ if args.offline() => "demo data".to_string(),
+                Some(crate::service::Link::Connected) => format!("sphered online · {} waiting", live.requests.len()),
+                Some(crate::service::Link::Down(_)) => "sphered offline".to_string(),
+                _ => "connecting to sphered".to_string(),
+            },
             4 => "/ to type".to_string(),
             _ => "Sphere".to_string(),
         };

@@ -16,6 +16,38 @@ pub struct Stats {
     pub net: f32,
     /// false until the first sample lands
     pub ready: bool,
+    pub docker: Docker,
+}
+
+/// What `docker ps -a` said, last time it was asked.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum Docker {
+    /// not asked yet
+    #[default]
+    Unknown,
+    /// no docker CLI, or its engine isn't running
+    Off,
+    Count { running: u32, total: u32 },
+}
+
+impl Docker {
+    /// For the System panel, the ticker and the Containers tile.
+    pub fn label(&self) -> String {
+        match self {
+            Docker::Unknown => "CHECKING".into(),
+            Docker::Off => "DOCKER OFF".into(),
+            Docker::Count { total: 0, .. } => "NO CONTAINERS".into(),
+            Docker::Count { running: 0, .. } => "NONE RUNNING".into(),
+            Docker::Count { running, .. } => format!("{running} RUNNING"),
+        }
+    }
+    /// The Containers tile's second line.
+    pub fn detail(&self) -> String {
+        match self {
+            Docker::Count { total, .. } if *total > 0 => format!("{total} container{} · start, stop, logs", if *total == 1 { "" } else { "s" }),
+            _ => "Start, stop, restart, logs".into(),
+        }
+    }
 }
 
 #[derive(Resource, Clone, Default)]
@@ -31,9 +63,18 @@ pub fn start(offline: bool) -> SysStats {
     let s = SysStats::default();
     if offline {
         // screenshots and benches: the prototype's example numbers, so the look is comparable
-        *s.0.lock().unwrap() = Stats { cpu: 0.23, mem: 0.61, gpu: 0.12, net: 84.0e6, ready: true };
+        *s.0.lock().unwrap() = Stats { cpu: 0.23, mem: 0.61, gpu: 0.12, net: 84.0e6, ready: true, docker: Docker::Count { running: 3, total: 5 } };
         return s;
     }
+    // containers: `docker ps` on its own thread every few seconds, so a stuck engine never holds the load figures
+    let dk = s.0.clone();
+    let _ = std::thread::Builder::new().name("sphere-docker".into()).spawn(move || loop {
+        let d = docker();
+        if let Ok(mut st) = dk.lock() {
+            st.docker = d;
+        }
+        std::thread::sleep(Duration::from_secs(6));
+    });
     let out = s.0.clone();
     let _ = std::thread::Builder::new().name("sphere-stats".into()).spawn(move || {
         let ncpu = sh("sysctl", &["-n", "hw.ncpu"]).trim().parse::<f32>().unwrap_or(1.0).max(1.0);
@@ -52,11 +93,43 @@ pub fn start(offline: bool) -> SysStats {
             if let Some(b) = bytes {
                 last_net = Some((b, now));
             }
-            *out.lock().unwrap() = Stats { cpu, mem, gpu, net, ready: true };
+            let mut st = out.lock().unwrap();
+            let docker = st.docker;
+            *st = Stats { cpu, mem, gpu, net, ready: true, docker };
+            drop(st);
             std::thread::sleep(Duration::from_secs(2));
         }
     });
     s
+}
+
+/// Counts containers with `docker ps -a`, giving up after a few seconds (an engine that is starting can hang).
+fn docker() -> Docker {
+    let bin = ["/usr/local/bin/docker", "/opt/homebrew/bin/docker", "/Applications/Docker.app/Contents/Resources/bin/docker"].into_iter().find(|p| std::path::Path::new(p).exists()).unwrap_or("docker");
+    let Ok(mut child) = Command::new(bin).args(["ps", "-a", "--format", "{{.State}}"]).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null()).stdin(std::process::Stdio::null()).spawn() else { return Docker::Off };
+    let start = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if start.elapsed() < Duration::from_secs(5) => std::thread::sleep(Duration::from_millis(40)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Docker::Off;
+            }
+        }
+    }
+    let Ok(out) = child.wait_with_output() else { return Docker::Off };
+    if !out.status.success() {
+        return Docker::Off;
+    }
+    count_containers(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// One state per line, as `docker ps -a --format {{.State}}` prints them.
+fn count_containers(out: &str) -> Docker {
+    let states: Vec<&str> = out.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    Docker::Count { running: states.iter().filter(|s| **s == "running").count() as u32, total: states.len() as u32 }
 }
 
 fn sh(cmd: &str, args: &[&str]) -> String {
@@ -138,6 +211,17 @@ pub fn rate(bps: f32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn containers_are_counted_from_their_states() {
+        assert_eq!(count_containers("running\nexited\nrunning\n"), Docker::Count { running: 2, total: 3 });
+        assert_eq!(count_containers(""), Docker::Count { running: 0, total: 0 });
+        assert_eq!(Docker::Count { running: 0, total: 0 }.label(), "NO CONTAINERS");
+        assert_eq!(Docker::Off.label(), "DOCKER OFF");
+        assert_eq!(Docker::Count { running: 2, total: 3 }.label(), "2 RUNNING");
+        assert_eq!(Docker::Count { running: 0, total: 3 }.label(), "NONE RUNNING");
+        assert_eq!(Docker::Count { running: 2, total: 3 }.detail(), "3 containers · start, stop, logs");
+    }
 
     #[test]
     fn rates_read_like_the_prototype() {
