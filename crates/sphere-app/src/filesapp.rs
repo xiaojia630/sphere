@@ -58,7 +58,7 @@ pub fn list(dir: &Path, hidden: bool) -> Vec<Entry> {
             .collect(),
         Err(_) => Vec::new(),
     };
-    v.sort_by(|a, b| (!a.dir, a.name.to_lowercase()).cmp(&(!b.dir, b.name.to_lowercase())));
+    v.sort_by_key(|e| (!e.dir, e.name.to_lowercase()));
     v
 }
 
