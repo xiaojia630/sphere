@@ -130,6 +130,9 @@ pub fn theme_panels(theme: Res<crate::theme::Theme>, mut seen: Local<u64>, mut m
             m.u.hot = to[2];
             m.u.acc = to[4];
             m.u.fill = if card { to[4] } else { to[3] };
+            // the swap only runs when some role differs from Balanced
+            let base = crate::theme::panel_map_base();
+            m.u.q.y = if to.iter().zip(base.iter()).any(|(a, b)| (*a - *b).abs().max_element() > 1e-4) { 1.0 } else { 0.0 };
             m.u.from_c = from;
             m.u.to_c = to;
         }

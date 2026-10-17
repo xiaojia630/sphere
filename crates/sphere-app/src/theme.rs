@@ -214,7 +214,9 @@ pub fn panel_map(hue: Option<Hue>) -> ([Vec4; 8], [Vec4; 8]) {
     let mut from = [Vec4::ZERO; 8];
     let mut to = [Vec4::ZERO; 8];
     for i in 0..8 {
-        from[i] = lin(base.roles[i]);
+        // the shader compares gamma-encoded colours: linear^(1/2.2)
+        let b = lin(base.roles[i]);
+        from[i] = Vec4::new(b.x.powf(1.0 / 2.2), b.y.powf(1.0 / 2.2), b.z.powf(1.0 / 2.2), 1.0);
         let mut c = l.roles[i];
         // Full color: line, dim, hot, fill blend toward the panel's hue
         if let (Some(h), true) = (hue, i < 4) {
@@ -223,6 +225,17 @@ pub fn panel_map(hue: Option<Hue>) -> ([Vec4; 8], [Vec4; 8]) {
         to[i] = lin(c);
     }
     (from, to)
+}
+
+/// The Balanced colours as the panel swap's `to` side would hold them (linear), to tell when a swap is a no-op.
+pub fn panel_map_base() -> [Vec4; 8] {
+    let base = Live::target(ThemeId::Balanced);
+    let mut out = [Vec4::ZERO; 8];
+    for (i, o) in out.iter_mut().enumerate() {
+        let c = Color::srgb(base.roles[i].x, base.roles[i].y, base.roles[i].z).to_linear();
+        *o = Vec4::new(c.red, c.green, c.blue, 1.0);
+    }
+    out
 }
 
 #[derive(Resource)]

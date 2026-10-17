@@ -325,6 +325,22 @@ pub fn draw(
 ) {
     let t = sim.t;
     let h = clamp(fx.halo.x * 1.25, 0.0, 1.0);
+    // nothing to draw while the moment is away (keep the halo, tethers and satellites hidden, no mesh rebuilds)
+    if h < 0.002 && m.streak.is_none() {
+        for (mut v, _) in &mut sets.p0() {
+            v.set_if_neq(Visibility::Hidden);
+        }
+        for (_, _, mut v) in &mut sets.p2() {
+            v.set_if_neq(Visibility::Hidden);
+        }
+        for (_, _, mut v) in &mut sets.p3() {
+            v.set_if_neq(Visibility::Hidden);
+        }
+        for (_, _, mut v, _) in &mut sets.p4() {
+            v.set_if_neq(Visibility::Hidden);
+        }
+        return;
+    }
     let acc = crate::theme::now_lin(Role::Acc);
     let ok = crate::theme::now_lin(Role::Ok);
     let col = acc.lerp(ok, fx.ok);

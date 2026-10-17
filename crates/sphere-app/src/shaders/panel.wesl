@@ -60,13 +60,14 @@ fn fade() -> f32 {
 // UI is drawn in the Balanced colours; swap each pixel that is one of them for the current theme's colour.
 // Texels are premultiplied, so compare the straight colour (tolerant for faint edge pixels).
 fn retheme(c: vec4<f32>) -> vec4<f32> {
-    if (c.a < 0.01) { return c; }
+    // nothing to swap in the Balanced theme (q.y is 0)
+    if (c.a < 0.01 || u.q.y < 0.5) { return c; }
     let s = pow(clamp(c.rgb / c.a, vec3<f32>(0.0), vec3<f32>(1.0)), vec3<f32>(1.0 / 2.2));
     var best = 1e9;
     var bi = -1;
     for (var i = 0; i < 8; i = i + 1) {
-        let f = pow(u.from_c[i].rgb, vec3<f32>(1.0 / 2.2));
-        let d = distance(s, f);
+        // from_c is stored gamma-encoded, so it compares with `s` directly
+        let d = distance(s, u.from_c[i].rgb);
         if (d < best) { best = d; bi = i; }
     }
     let tol = 0.05 + (1.0 - c.a) * 0.2;

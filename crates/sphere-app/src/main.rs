@@ -55,6 +55,11 @@ pub struct Args {
     pub work: bool,
     /// only the core (the app icon render)
     pub icon: bool,
+    /// anti-aliasing on the core: msaa4 (default), msaa2, smaa, fxaa
+    pub aa: String,
+    /// `--offscreen` with `--bench`: render into an image and wait for the GPU each frame, so the numbers are the
+    /// whole frame's cost, not the display's refresh
+    pub offscreen: bool,
     pub collapsed: bool,
     pub focus_term: bool,
     pub msaa: bool,
@@ -75,10 +80,14 @@ impl Args {
     pub fn offline(&self) -> bool {
         !self.live && (self.demo || self.shot.is_some() || self.bench.is_some())
     }
+    /// Rendering into an image with no window: screenshots, and the offscreen bench.
+    pub fn headless(&self) -> bool {
+        self.shot.is_some() || (self.offscreen && self.bench.is_some())
+    }
 }
 
 fn parse_args() -> Args {
-    let mut a = Args { cmd: None, bench: None, shot: None, frames: 120, depth: false, orbit: false, apps: false, work: false, icon: false, collapsed: false, focus_term: false, msaa: true, size: (1600, 1000), dt: 1.0 / 20.0, demo: false, live: false, moment: false, theme: None };
+    let mut a = Args { cmd: None, bench: None, shot: None, frames: 120, depth: false, orbit: false, apps: false, work: false, icon: false, aa: std::env::var("SPHERE_AA").unwrap_or_else(|_| "msaa4".into()), offscreen: false, collapsed: false, focus_term: false, msaa: true, size: (1600, 1000), dt: 1.0 / 20.0, demo: false, live: false, moment: false, theme: None };
     let mut it = std::env::args().skip(1);
     while let Some(s) = it.next() {
         match s.as_str() {
@@ -91,6 +100,8 @@ fn parse_args() -> Args {
             "--apps" => a.apps = true,
             "--work" => a.work = true,
             "--icon" => a.icon = true,
+            "--offscreen" => a.offscreen = true,
+            "--aa" => a.aa = it.next().unwrap_or_else(|| "msaa4".into()),
             "--collapsed" => a.collapsed = true,
             "--term" => a.focus_term = true,
             "--no-msaa" => a.msaa = false,
@@ -124,6 +135,7 @@ pub struct CamPanels;
 
 fn main() {
     let args = parse_args();
+    interactive_qos();
     let mut app = App::new();
     app.insert_resource(args.clone())
         .insert_resource(ClearColor(Color::BLACK))
@@ -169,7 +181,7 @@ fn main() {
     if !args.offline() {
         summon::install(&mut app);
     }
-    if args.shot.is_some() {
+    if args.headless() {
         app.add_plugins(ScheduleRunnerPlugin::run_loop(std::time::Duration::from_millis(1)));
         // Offscreen there is no swap chain to throttle submission, and a software rasteriser would let queued
         // frames pile up in memory. Wait for the GPU after each frame instead.
@@ -177,25 +189,63 @@ fn main() {
             r.add_systems(bevy::render::Render, wait_for_gpu.after(bevy::render::RenderSystems::Render));
         }
     }
+    if let Some(r) = app.get_sub_app_mut(bevy::render::RenderApp) {
+        r.add_systems(bevy::render::Render, render_thread_qos);
+    }
     app.run();
 }
 
 /// `--shot` renders offscreen into an image: no window, no display server, no surface needed.
 fn default_plugins(args: &Args) -> impl PluginGroup {
-    if args.shot.is_some() {
+    if args.headless() {
         DefaultPlugins
+            .set(task_pools())
             .set(WindowPlugin { primary_window: None, exit_condition: ExitCondition::DontExit, ..default() })
             .disable::<WinitPlugin>()
     } else {
-        DefaultPlugins.set(WindowPlugin {
+        DefaultPlugins.set(task_pools()).set(WindowPlugin {
             primary_window: Some(Window {
                 title: "Sphere".into(),
                 resolution: (args.size.0, args.size.1).into(),
                 present_mode: if args.bench.is_some() { PresentMode::AutoNoVsync } else { PresentMode::AutoVsync },
+                desired_maximum_frame_latency: std::env::var("SPHERE_LAT").ok().and_then(|v| v.parse().ok()).and_then(std::num::NonZeroU32::new),
+                mode: if std::env::var("SPHERE_FS").is_ok() { bevy::window::WindowMode::BorderlessFullscreen(bevy::window::MonitorSelection::Primary) } else { bevy::window::WindowMode::Windowed },
                 ..default()
             }),
             ..default()
         })
+    }
+}
+
+/// Worker threads run at user-interactive QoS, so macOS keeps them on performance cores and doesn't park them
+/// mid-frame (at the default QoS frames hitched by ~14 ms a few times a second).
+fn task_pools() -> TaskPoolPlugin {
+    use bevy::app::TaskPoolThreadAssignmentPolicy as P;
+    let hook: Option<std::sync::Arc<dyn Fn() + Send + Sync>> = Some(std::sync::Arc::new(interactive_qos));
+    let pol = |min: usize, max: usize, percent: f32| P { min_threads: min, max_threads: max, percent, on_thread_spawn: hook.clone(), on_thread_destroy: None };
+    TaskPoolPlugin {
+        task_pool_options: TaskPoolOptions {
+            io: pol(1, 2, 0.1),
+            async_compute: pol(1, 2, 0.1),
+            compute: pol(1, usize::MAX, 1.0),
+            ..default()
+        },
+    }
+}
+
+/// Marks the calling thread user-interactive (macOS); a no-op elsewhere.
+pub fn interactive_qos() {
+    #[cfg(target_os = "macos")]
+    unsafe {
+        libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_USER_INTERACTIVE, 0);
+    }
+}
+
+/// The render thread too: this runs in the render world, on that thread, and marks it once.
+fn render_thread_qos(_w: &mut World, mut done: Local<bool>) {
+    if !*done {
+        *done = true;
+        interactive_qos();
     }
 }
 
@@ -211,7 +261,7 @@ pub fn target_for(off: &Offscreen) -> RenderTarget {
 }
 
 fn setup_offscreen(mut commands: Commands, mut images: ResMut<Assets<Image>>, args: Res<Args>) {
-    if args.shot.is_none() {
+    if !args.headless() {
         commands.insert_resource(Offscreen(None));
         return;
     }
@@ -246,8 +296,9 @@ fn tick_sim(time: Res<Time<Real>>, mut sim: ResMut<Sim>) {
 pub fn camera_output(args: &Args, cam: WindowCam) -> (Msaa, ClearColorConfig, CameraOutputMode) {
     let skip = CameraOutputMode::Skip;
     let write = |blend| CameraOutputMode::Write { blend_state: Some(blend), clear_color: ClearColorConfig::None };
-    match (args.msaa, cam) {
-        (true, WindowCam::Core) => (Msaa::Sample4, ClearColorConfig::Custom(Color::BLACK), CameraOutputMode::default()),
+    let msaa_on = args.msaa && args.aa.starts_with("msaa");
+    match (msaa_on, cam) {
+        (true, WindowCam::Core) => (if args.aa == "msaa2" { Msaa::Sample2 } else { Msaa::Sample4 }, ClearColorConfig::Custom(Color::BLACK), CameraOutputMode::default()),
         (true, WindowCam::Panels) => (Msaa::Off, ClearColorConfig::Custom(Color::NONE), skip),
         (true, WindowCam::Overlay) => (Msaa::Off, ClearColorConfig::None, write(BlendState::PREMULTIPLIED_ALPHA_BLENDING)),
         (false, WindowCam::Core) => (Msaa::Off, ClearColorConfig::Custom(Color::BLACK), skip),
@@ -266,7 +317,7 @@ pub enum WindowCam {
 fn setup_cameras(mut commands: Commands, args: Res<Args>, off: Res<Offscreen>) {
     let proj = Projection::Perspective(PerspectiveProjection { fov: 40.0 * DEG, near: 10.0, far: 40000.0, ..default() });
     let (msaa, clear_color, output_mode) = camera_output(&args, WindowCam::Core);
-    commands.spawn((
+    let core = commands.spawn((
         Camera3d::default(),
         Camera { order: 0, clear_color, output_mode, ..default() },
         bevy::camera::Hdr,
@@ -278,7 +329,17 @@ fn setup_cameras(mut commands: Commands, args: Res<Args>, off: Res<Offscreen>) {
         target_for(&off),
         Transform::from_xyz(0.0, 0.0, 1500.0),
         CamCore,
-    ));
+    )).id();
+    // post-process AA instead of MSAA (cheaper at Retina full screen)
+    match args.aa.as_str() {
+        "smaa" => {
+            commands.entity(core).insert(bevy::anti_alias::smaa::Smaa { preset: bevy::anti_alias::smaa::SmaaPreset::High });
+        }
+        "fxaa" => {
+            commands.entity(core).insert(bevy::anti_alias::fxaa::Fxaa::default());
+        }
+        _ => {}
+    }
     let (msaa, clear_color, output_mode) = camera_output(&args, WindowCam::Panels);
     commands.spawn((
         Camera3d::default(),
