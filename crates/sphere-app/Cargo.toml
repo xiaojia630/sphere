@@ -1,0 +1,49 @@
+[package]
+name = "sphere-app"
+description = "The Sphere desktop app: a 3D command center for coding agents, with code review, git, containers, ports, system and files"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish = false
+
+[[bin]]
+name = "sphere-app"
+path = "src/main.rs"
+
+[dependencies]
+# Only what the app uses: no glTF, scenes, gizmos, animation or audio (sounds play through rodio on their own
+# thread), and X11 only on Linux.
+bevy = { version = "=0.20.0", default-features = false, features = [
+  "default_app", "std", "multi_threaded", "bevy_winit", "default_font", "png", "hdr", "smaa_luts", "zstd_rust",
+  "bevy_render", "bevy_core_pipeline", "bevy_anti_alias", "bevy_post_process", "bevy_pbr", "bevy_light",
+  "bevy_camera", "bevy_color", "bevy_image", "bevy_mesh", "bevy_shader", "bevy_material", "bevy_window",
+  "bevy_text", "bevy_ui", "bevy_ui_render", "bevy_input_focus",
+] }
+portable-pty = "=0.9.0"
+alacritty_terminal = "=0.26.0"
+fontdue = "=0.9.4"
+rodio = { version = "=0.22.2", default-features = false, features = ["playback"] }
+hound = "=3.5.1"
+sphere-proto.workspace = true
+sphere-client.workspace = true
+sphere-host.workspace = true
+tokio.workspace = true
+serde_json.workspace = true
+libc.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+bevy = { version = "=0.20.0", default-features = false, features = ["x11"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+global-hotkey = "=0.9.0"
+objc2 = "=0.6.5"
+objc2-app-kit = { version = "=0.3.2", default-features = false, features = ["std", "NSApplication", "NSResponder", "NSRunningApplication"] }
+objc2-foundation = { version = "=0.3.2", default-features = false, features = ["std", "NSString", "NSBundle", "NSError", "NSSet"] }
+objc2-user-notifications = { version = "=0.3.2", default-features = false, features = ["std", "block2", "UNUserNotificationCenter", "UNNotificationContent", "UNNotificationRequest", "UNNotificationTrigger", "UNNotificationSound"] }
+block2 = "=0.6.2"
+
+[features]
+# Linux Wayland sessions: build with `--features wayland` (needs libwayland-dev).
+wayland = ["bevy/wayland"]

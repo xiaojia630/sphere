@@ -1,0 +1,8 @@
+// Cut off in the middle of a test run, which is safe to run again.
+{"op":"init"}
+{"op":"wait_user"}
+{"mode":"fresh","op":"say","text":"testing"}
+{"mode":"fresh","op":"tool_use","id":"toolu_test","name":"Bash","input":{"command":"cargo test"}}
+{"mode":"fresh","op":"sleep","ms":600000}
+{"mode":"resume","op":"say_user","prefix":"resumed with: "}
+{"op":"result","text":"resumed ok"}

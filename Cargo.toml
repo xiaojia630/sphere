@@ -1,0 +1,57 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/sphere-proto",
+    "crates/sphere-host",
+    "crates/sphered",
+    "crates/sphere-client",
+    "crates/sphere-cli",
+    "crates/fake-claude",
+    "crates/sphere-app",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/xiaojia630/sphere"
+homepage = "https://github.com/xiaojia630/sphere"
+readme = "README.md"
+
+[workspace.dependencies]
+anyhow = "=1.0.104"
+base64 = "=0.23.1"
+clap = { version = "=4.6.7", features = ["derive"] }
+libc = "=0.2.190"
+rusqlite = { version = "=0.40.2", features = ["bundled"] }
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.154"
+tempfile = "=3.27.0"
+thiserror = "=2.0.21"
+time = { version = "=0.3.55", features = ["formatting", "macros", "std"] }
+toml = "=1.1.8"
+toml_edit = "=0.25.17"
+tokio = { version = "=1.53.3", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time", "signal", "fs", "process"] }
+tracing = "=0.1.44"
+tracing-subscriber = { version = "=0.3.23", features = ["env-filter"] }
+sphere-proto = { path = "crates/sphere-proto" }
+sphere-host = { path = "crates/sphere-host" }
+sphere-client = { path = "crates/sphere-client" }
+sphered = { path = "crates/sphered" }
+
+[profile.dev]
+opt-level = 1
+[profile.dev.package."*"]
+opt-level = 3
+[profile.release]
+opt-level = 3
+lto = false
+codegen-units = 16
+incremental = true
+# What ships (scripts/package-macos-app.sh): slower to build, smaller and faster to run.
+[profile.dist]
+inherits = "release"
+lto = "thin"
+codegen-units = 1
+incremental = false
+strip = true

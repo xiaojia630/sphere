@@ -1,0 +1,6 @@
+// Shows the generated settings it was started with.
+{"op":"init"}
+{"op":"wait_user"}
+{"op":"say_settings"}
+{"op":"say_args"}
+{"op":"result","text":"ok"}

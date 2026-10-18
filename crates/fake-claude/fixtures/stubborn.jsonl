@@ -1,0 +1,8 @@
+// Ignores SIGTERM, so stopping it takes the kill.
+{"op":"init"}
+{"op":"ignore_sigterm"}
+{"op":"ignore_eof"}
+{"op":"wait_user"}
+{"op":"say","text":"I will not go quietly."}
+{"op":"spawn_sleeper","secs":300}
+{"op":"sleep","ms":600000}

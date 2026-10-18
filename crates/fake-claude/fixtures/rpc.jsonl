@@ -1,0 +1,6 @@
+// An agent that tries to answer a request through the socket.
+{"op":"init"}
+{"op":"wait_user"}
+{"op":"rpc","method":"request.answer","params":{"request":"r999","answer":"yes"}}
+{"op":"rpc","method":"snapshot","params":{}}
+{"op":"result","text":"tried"}

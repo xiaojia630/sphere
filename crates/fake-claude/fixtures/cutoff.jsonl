@@ -1,0 +1,9 @@
+// Cut off in the middle of a push, which left the machine.
+{"op":"init"}
+{"op":"wait_user"}
+{"mode":"fresh","op":"say","text":"pushing"}
+{"mode":"fresh","op":"tool_use","id":"toolu_push","name":"Bash","input":{"command":"git push origin sphere/x"}}
+{"mode":"fresh","op":"sleep","ms":600000}
+{"mode":"resume","op":"say_args"}
+{"mode":"resume","op":"say_user","prefix":"resumed with: "}
+{"op":"result","text":"resumed ok"}

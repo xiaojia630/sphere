@@ -1,0 +1,12 @@
+[package]
+name = "fake-claude"
+description = "Replays a fixture over the Claude Code stream-json protocol, for tests"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+libc.workspace = true
+serde_json.workspace = true

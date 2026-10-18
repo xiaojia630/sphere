@@ -1,0 +1,9 @@
+// A push that needs a human: answered yes, or denied. Both branches echo what
+// the agent was told, so tests can check the exact response.
+{"op":"init"}
+{"op":"wait_user"}
+{"op":"say_args"}
+{"op":"say","text":"I need to push the branch."}
+{"op":"tool_use","id":"toolu_push","name":"Bash","input":{"command":"git push -u origin sphere/work"}}
+{"op":"ask","tool":"Bash","tool_use_id":"toolu_push","display_name":"Run shell command","description":"Push the branch","input":{"command":"git push -u origin sphere/work"},"suggestions":[{"type":"addRules","rules":[{"toolName":"Bash","ruleContent":"git push:*"}],"behavior":"allow","destination":"localSettings"}],"allow":[{"op":"say_response"},{"op":"tool_result","id":"toolu_push","result":"pushed"},{"op":"say","text":"Pushed."}],"deny":[{"op":"say_response"},{"op":"tool_result","id":"toolu_push","result":"denied","is_error":true},{"op":"say","text":"Not pushed."}]}
+{"op":"result","text":"finished","cost":0.01}

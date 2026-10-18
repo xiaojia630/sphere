@@ -1,0 +1,14 @@
+Sphere
+Copyright 2026 the Sphere contributors
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+Sphere's apps adapt the designs of these open-source projects (no code from them is included unless stated):
+  yazi (MIT), gitui (MIT), oxker (MIT), listeners (MIT), delta (MIT), herdr (Apache-2.0).
+
+It is built on and includes these libraries, under their own licenses (MIT and/or Apache-2.0):
+  Bevy, alacritty_terminal (Alacritty), portable-pty (WezTerm), rodio, hound, and the other crates listed in
+  Cargo.lock.
+
+Fonts in assets/fonts are under the SIL Open Font License 1.1 (licence texts alongside them):
+  Michroma, Rajdhani, JetBrains Mono.

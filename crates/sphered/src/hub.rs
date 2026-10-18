@@ -1,0 +1,335 @@
+//! The hub: one lock around "assign seq, persist, update the views, broadcast".
+//! Durable events are stored before anyone hears of them; live frames are only
+//! broadcast, and may be dropped under load.
+
+use crate::store::{OffsetUpdate, Store};
+use anyhow::Result;
+use sphere_proto::api::LiveFrame;
+use sphere_proto::{Event, EventBody, Views};
+use std::path::Path;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use tokio::sync::mpsc;
+
+#[derive(Debug, Clone)]
+#[allow(clippy::large_enum_variant)] // events dominate; boxing them would only add an allocation per message
+pub enum Msg {
+    Event(Event),
+    Live(LiveFrame),
+}
+
+struct Sub {
+    tx: mpsc::Sender<Msg>,
+    task: Option<String>,
+    lagged: Arc<AtomicBool>,
+}
+
+struct Inner {
+    store: Store,
+    views: Views,
+    subs: Vec<Sub>,
+}
+
+pub struct Hub {
+    inner: Mutex<Inner>,
+    next_task: AtomicU64,
+    next_request: AtomicU64,
+    queue_cap: usize,
+}
+
+/// A live subscription. Events after `replay_upto` arrive on `rx`; everything
+/// up to it is read from the store with [`Hub::replay_page`].
+pub struct Subscription {
+    pub rx: mpsc::Receiver<Msg>,
+    /// Set when the hub dropped this subscriber because its queue overflowed.
+    pub lagged: Arc<AtomicBool>,
+    pub replay_upto: u64,
+}
+
+impl Hub {
+    /// Open the store and rebuild the views from it.
+    pub fn open(path: &Path, queue_cap: usize) -> Result<Hub> {
+        Self::with_store(Store::open(path)?, queue_cap)
+    }
+
+    pub fn with_store(store: Store, queue_cap: usize) -> Result<Hub> {
+        let mut views = Views::default();
+        let mut since = 0;
+        loop {
+            let page = store.events_after(since, i64::MAX as u64, None, 1000)?;
+            let Some(last) = page.last().map(|e| e.seq) else {
+                break;
+            };
+            for ev in &page {
+                views.apply(ev);
+            }
+            since = last;
+        }
+        views.seq = views.seq.max(store.last_seq()?);
+        Ok(Hub {
+            next_task: AtomicU64::new(views.max_task()),
+            next_request: AtomicU64::new(views.max_request()),
+            inner: Mutex::new(Inner {
+                store,
+                views,
+                subs: vec![],
+            }),
+            queue_cap,
+        })
+    }
+
+    pub fn new_task_id(&self) -> String {
+        format!("t{}", self.next_task.fetch_add(1, Ordering::SeqCst) + 1)
+    }
+
+    pub fn new_request_id(&self) -> String {
+        format!("r{}", self.next_request.fetch_add(1, Ordering::SeqCst) + 1)
+    }
+
+    /// Read the views under the lock.
+    pub fn view<R>(&self, f: impl FnOnce(&Views) -> R) -> R {
+        f(&self.inner.lock().unwrap().views)
+    }
+
+    pub fn offset(&self, child: &str, stream: &str) -> Result<u64> {
+        self.inner.lock().unwrap().store.offset(child, stream)
+    }
+
+    pub fn last_seq(&self) -> u64 {
+        self.view(|v| v.seq)
+    }
+
+    /// Persist `bodies` (and `offset`) in one transaction, then update the
+    /// views and tell the subscribers.
+    pub fn commit(
+        &self,
+        task: &str,
+        bodies: Vec<EventBody>,
+        offset: Option<OffsetUpdate>,
+    ) -> Result<Vec<Event>> {
+        let mut g = self.inner.lock().unwrap();
+        let events = g.store.append(task, &bodies, offset.as_ref())?;
+        let Inner { views, subs, .. } = &mut *g;
+        for ev in &events {
+            views.apply(ev);
+        }
+        subs.retain(|s| {
+            for ev in &events {
+                if s.task.as_deref().is_some_and(|t| t != ev.task) {
+                    continue;
+                }
+                match s.tx.try_send(Msg::Event(ev.clone())) {
+                    Ok(()) => {}
+                    Err(mpsc::error::TrySendError::Full(_)) => {
+                        s.lagged.store(true, Ordering::SeqCst);
+                        return false;
+                    }
+                    Err(mpsc::error::TrySendError::Closed(_)) => return false,
+                }
+            }
+            true
+        });
+        Ok(events)
+    }
+
+    pub fn publish(&self, task: &str, body: EventBody) -> Result<Event> {
+        Ok(self.commit(task, vec![body], None)?.remove(0))
+    }
+
+    /// Broadcast a live frame to subscribers. Never stored; dropped when a
+    /// subscriber's queue is full.
+    pub fn live(&self, task: &str, text: String) {
+        let g = self.inner.lock().unwrap();
+        for s in &g.subs {
+            if s.task.as_deref().is_some_and(|t| t != task) {
+                continue;
+            }
+            let _ = s.tx.try_send(Msg::Live(LiveFrame {
+                task: task.to_string(),
+                text: text.clone(),
+            }));
+        }
+    }
+
+    /// Register a subscriber. Under the lock, so nothing is missed or doubled
+    /// between the events to replay (`..=replay_upto`) and the live ones.
+    pub fn subscribe(&self, task: Option<String>) -> Subscription {
+        let mut g = self.inner.lock().unwrap();
+        let (tx, rx) = mpsc::channel(self.queue_cap);
+        let lagged = Arc::new(AtomicBool::new(false));
+        let replay_upto = g.views.seq;
+        g.subs.push(Sub {
+            tx,
+            task,
+            lagged: lagged.clone(),
+        });
+        Subscription {
+            rx,
+            lagged,
+            replay_upto,
+        }
+    }
+
+    pub fn replay_page(
+        &self,
+        since: u64,
+        upto: u64,
+        task: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<Event>> {
+        self.inner
+            .lock()
+            .unwrap()
+            .store
+            .events_after(since, upto, task, limit)
+    }
+
+    pub fn history(
+        &self,
+        task: Option<&str>,
+        before: Option<u64>,
+        limit: usize,
+    ) -> Result<Vec<Event>> {
+        self.inner
+            .lock()
+            .unwrap()
+            .store
+            .history(task, before, limit)
+    }
+
+    pub fn subscriber_count(&self) -> usize {
+        self.inner.lock().unwrap().subs.len()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sphere_proto::TaskState;
+
+    fn hub(cap: usize) -> Hub {
+        Hub::with_store(Store::open_in_memory().unwrap(), cap).unwrap()
+    }
+
+    fn created() -> EventBody {
+        EventBody::TaskCreated {
+            title: "t".into(),
+            prompt: "p".into(),
+            repo: "/r".into(),
+            in_place: false,
+            budget_usd: 1.0,
+            mode: None,
+            model: None,
+            allow_rewrites: false,
+            resume_session: None,
+        }
+    }
+
+    fn say(t: &str) -> EventBody {
+        EventBody::Say { text: t.into() }
+    }
+
+    #[test]
+    fn commit_persists_before_broadcast_and_updates_views() {
+        let h = hub(16);
+        let mut sub = h.subscribe(None);
+        let id = h.new_task_id();
+        assert_eq!(id, "t1");
+        let ev = h.publish(&id, created()).unwrap();
+        assert_eq!(ev.seq, 1);
+        // What the subscriber heard is already in the store.
+        match sub.rx.try_recv().unwrap() {
+            Msg::Event(e) => {
+                assert_eq!(e.seq, 1);
+                assert_eq!(h.history(None, None, 10).unwrap().len(), 1);
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(
+            h.view(|v| v.task("t1").map(|t| t.state)),
+            Some(TaskState::Queued)
+        );
+        assert_eq!(h.new_task_id(), "t2");
+    }
+
+    #[test]
+    fn views_are_rebuilt_from_the_store_and_ids_continue() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.db");
+        {
+            let h = Hub::open(&path, 16).unwrap();
+            let id = h.new_task_id();
+            h.publish(&id, created()).unwrap();
+            h.publish(&id, say("hi")).unwrap();
+        }
+        let h = Hub::open(&path, 16).unwrap();
+        assert_eq!(h.last_seq(), 2);
+        assert_eq!(
+            h.view(|v| v.task("t1").map(|t| t.last_say.clone())),
+            Some("hi".into())
+        );
+        assert_eq!(h.new_task_id(), "t2");
+    }
+
+    #[test]
+    fn subscribe_replays_then_goes_live_with_no_gap() {
+        let h = hub(16);
+        h.publish("t1", created()).unwrap();
+        h.publish("t1", say("a")).unwrap();
+        let mut sub = h.subscribe(None);
+        assert_eq!(sub.replay_upto, 2);
+        h.publish("t1", say("b")).unwrap();
+        let replay = h.replay_page(0, sub.replay_upto, None, 100).unwrap();
+        assert_eq!(replay.len(), 2);
+        match sub.rx.try_recv().unwrap() {
+            Msg::Event(e) => assert_eq!(e.seq, 3),
+            other => panic!("{other:?}"),
+        }
+        assert!(sub.rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn a_slow_subscriber_is_dropped_and_flagged_but_live_frames_never_drop_it() {
+        let h = hub(2);
+        let mut slow = h.subscribe(None);
+        let mut other = h.subscribe(Some("t2".into()));
+        h.publish("t1", created()).unwrap();
+        h.publish("t1", say("1")).unwrap();
+        assert!(!slow.lagged.load(Ordering::SeqCst));
+        // Live frames beyond the queue are discarded without penalty.
+        for _ in 0..5 {
+            h.live("t1", "x".into());
+        }
+        assert!(!slow.lagged.load(Ordering::SeqCst));
+        h.publish("t1", say("2")).unwrap();
+        assert!(
+            slow.lagged.load(Ordering::SeqCst),
+            "queue overflow drops the client"
+        );
+        assert_eq!(
+            h.subscriber_count(),
+            1,
+            "the filtered subscriber is unaffected"
+        );
+        // The queue holds what fitted, then reports closed.
+        assert!(slow.rx.try_recv().is_ok());
+        assert!(other.rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn task_filtered_subscribers_only_hear_their_task() {
+        let h = hub(16);
+        let mut sub = h.subscribe(Some("t2".into()));
+        h.publish("t1", say("no")).unwrap();
+        h.publish("t2", say("yes")).unwrap();
+        h.live("t1", "no".into());
+        h.live("t2", "yes".into());
+        let mut got = vec![];
+        while let Ok(m) = sub.rx.try_recv() {
+            got.push(m);
+        }
+        assert_eq!(got.len(), 2);
+        assert!(matches!(&got[0], Msg::Event(e) if e.task == "t2"));
+        assert!(matches!(&got[1], Msg::Live(f) if f.task == "t2"));
+    }
+}
