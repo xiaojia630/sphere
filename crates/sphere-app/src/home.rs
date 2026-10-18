@@ -45,8 +45,21 @@ pub fn step_view(sim: Res<crate::core::Sim>, mut v: ResMut<View>) {
 }
 
 /// Home keys (prototype v2): 1 Flat, 2/D Depth, 3/O Orbit, E Depth↔Flat, F fit, C theme, R/0 reset, X collapse,
-/// M mute. Not while the command bar, the terminal or the Agent moment card has the keyboard, nor with Cmd/Ctrl/Alt.
-pub fn keys(mut ev: MessageReader<KeyboardInput>, keys: Res<ButtonInput<KeyCode>>, focus: Res<Focus>, moment: Res<crate::moment::Moment>, mut acts: ResMut<Acts>) {
+/// M mute. Not while the command bar, the terminal or the Agent moment card has the keyboard, nor with Cmd/Ctrl/Alt,
+/// nor while an app is open: the apps use the same letters (M merges, D discards, E asks, R runs the tests).
+#[allow(clippy::type_complexity)]
+pub fn keys(
+    mut ev: MessageReader<KeyboardInput>,
+    keys: Res<ButtonInput<KeyCode>>,
+    focus: Res<Focus>,
+    moment: Res<crate::moment::Moment>,
+    mut acts: ResMut<Acts>,
+    apps: (Res<crate::codeapp::CodeApp>, Res<crate::gitapp::GitApp>, Res<crate::containers::ContainersApp>, Res<crate::ports::PortsApp>, Res<crate::sysapp::SysApp>, Res<crate::filesapp::FilesApp>),
+) {
+    if apps.0.open || apps.1.open || apps.2.open || apps.3.open || apps.4.open || apps.5.open {
+        ev.clear();
+        return;
+    }
     let mods = keys.any_pressed([KeyCode::SuperLeft, KeyCode::SuperRight, KeyCode::ControlLeft, KeyCode::ControlRight, KeyCode::AltLeft, KeyCode::AltRight]);
     for e in ev.read() {
         if e.state != ButtonState::Pressed || mods || focus.cmd || focus.terminal || moment.shown {
