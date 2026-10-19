@@ -41,6 +41,9 @@ pub fn anchor(ax: char, x: f32, ay: char, y: f32, w: f32, h: f32) -> Vec3 {
 
 #[derive(Component)]
 pub struct SysRow(pub &'static str);
+/// The brand panel's sub line (it reads "Agent swarm" while the swarm is open).
+#[derive(Component)]
+pub struct BrandSub;
 #[derive(Component)]
 pub struct Meter(pub usize);
 #[derive(Component)]
@@ -139,7 +142,7 @@ pub fn setup(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut atlas
     let tt = c.spawn((Text::new("OS"), font(&f.ui700, 10.5, 2.52), TextColor(Color::BLACK), LineHeight::Px(10.5))).id();
     c.entity(tag).add_child(tt);
     c.entity(wm).add_children(&[t, tag]);
-    let sub = c.spawn((Text::new("AGENT OPERATING SYSTEM"), font(&f.ui600, 11.0, 5.72), TextColor(line), LineHeight::Px(11.0))).id();
+    let sub = c.spawn((BrandSub, Text::new("AGENT OPERATING SYSTEM"), font(&f.ui600, 11.0, 5.72), TextColor(line), LineHeight::Px(11.0))).id();
     c.entity(b).add_children(&[wm, sub]);
     spawn_panel_quad(c, &mut meshes, &mut pmats, &ui, &PanelSpec { id: PanelId::Brand, w, h, home: anchor('c', 800.0, 't', 20.0, w, h), home_scale: 1.0, side: 0.0, phase: 0.7, show_at: show_at(0), unframed: true });
 
@@ -349,8 +352,14 @@ fn rolo_fade(k: usize, mid: usize, n: usize) -> f32 {
     }
 }
 
+/// The idle hint's letter spacing in px at 12 px type: the spec's .28em (3.36) for a short hint, tighter for a long one
+/// so it stays on one line in the 780 px say panel (an average advance of about .55em plus the spacing).
+pub fn idle_spacing(chars: usize) -> f32 {
+    (760.0 / chars.max(1) as f32 - 12.0 * 0.55).clamp(0.6, 3.36)
+}
+
 /// Types Sphere's words into the Say line at 30 ms a character; back to the idle hint after 9 s.
-pub fn draw_say(time: Res<Time<Real>>, mut say: ResMut<Say>, mut q: Query<(&mut Text, &mut TextColor, &mut TextFont, &mut LineHeight, &mut bevy::text::LetterSpacing), With<SayText>>) {
+pub fn draw_say(time: Res<Time<Real>>, mut say: ResMut<Say>, swarm: Res<crate::swarm::Swarm>, mut idle_seen: Local<&'static str>, mut q: Query<(&mut Text, &mut TextColor, &mut TextFont, &mut LineHeight, &mut bevy::text::LetterSpacing), With<SayText>>) {
     let dt = time.delta_secs();
     let mut changed = false;
     if !say.text.is_empty() {
@@ -368,16 +377,22 @@ pub fn draw_say(time: Res<Time<Real>>, mut say: ResMut<Say>, mut q: Query<(&mut 
             changed = true;
         }
     }
+    // the idle hint: the home's, or the swarm's for its mode
+    let idle = if swarm.open { crate::swarm::feedback::idle_hint(&swarm.mode) } else { IDLE };
+    if *idle_seen != idle {
+        *idle_seen = idle;
+        changed = true;
+    }
     if !changed && !say.is_changed() {
         return;
     }
     for (mut t, mut c, mut f, mut lh, mut ls) in &mut q {
         if say.text.is_empty() {
-            t.0 = IDLE.into();
+            t.0 = idle.into();
             c.0 = role_color(Role::Dim);
             f.font_size = FontSize::Px(12.0);
             *lh = LineHeight::Px(16.0);
-            *ls = bevy::text::LetterSpacing::Px(3.36);
+            *ls = bevy::text::LetterSpacing::Px(idle_spacing(idle.chars().count()));
         } else {
             t.0 = say.text.chars().take(say.shown).collect();
             c.0 = role_color(Role::Hot);

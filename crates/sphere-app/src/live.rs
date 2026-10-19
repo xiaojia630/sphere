@@ -23,10 +23,19 @@ impl Live {
     }
 }
 
-/// Short-lived lines shown above the command bar.
+/// A toast's left bar: the theme's fill, green (something went through) or red (it failed).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum ToastKind {
+    #[default]
+    Plain,
+    Ok,
+    Bad,
+}
+
+/// Short-lived lines shown above the command bar: (text, seconds left, kind).
 #[derive(Resource, Default)]
 pub struct Toasts {
-    pub list: Vec<(String, f32)>,
+    pub list: Vec<(String, f32, ToastKind)>,
     pub version: u64,
     pending_sound: bool,
 }
@@ -39,7 +48,21 @@ impl Toasts {
     }
     /// A toast whose event already made its own sound.
     pub fn push_quiet(&mut self, s: impl Into<String>) {
-        self.list.push((s.into(), 2.4 + 0.42));
+        self.push_kind(s, ToastKind::Plain);
+    }
+    /// A toast with a green bar, with its sound (something went through).
+    pub fn push_ok(&mut self, s: impl Into<String>) {
+        self.pending_sound = true;
+        self.push_kind(s, ToastKind::Ok);
+    }
+    /// A toast with a red bar, with its sound (something failed).
+    pub fn push_bad(&mut self, s: impl Into<String>) {
+        self.pending_sound = true;
+        self.push_kind(s, ToastKind::Bad);
+    }
+    /// A toast of a kind whose event already made its own sound.
+    pub fn push_kind(&mut self, s: impl Into<String>, kind: ToastKind) {
+        self.list.push((s.into(), 2.4 + 0.42, kind));
         if self.list.len() > 3 {
             self.list.remove(0);
         }
@@ -99,7 +122,9 @@ fn pick(tasks: &[TaskView], merged: &HashSet<String>) -> Vec<Agent> {
 pub fn check_merged(time: Res<Time<Real>>, svc: Res<Service>, mut t: Local<f32>, mut busy: Local<Option<std::sync::Arc<std::sync::atomic::AtomicBool>>>) {
     use std::sync::atomic::{AtomicBool, Ordering};
     *t += time.delta_secs();
-    if *t < 4.0 || busy.as_ref().is_some_and(|b| b.load(Ordering::Relaxed)) {
+    // the first check runs at once (the swarm waits for it before it shows finished agents), then every 4 s
+    let first = !svc.shared.lock().unwrap().merged_checked;
+    if (*t < 4.0 && !first) || busy.as_ref().is_some_and(|b| b.load(Ordering::Relaxed)) {
         return;
     }
     *t = 0.0;
@@ -108,6 +133,12 @@ pub fn check_merged(time: Res<Time<Real>>, svc: Res<Service>, mut t: Local<f32>,
         s.tasks.iter().filter(|t| t.state == TaskState::Done && !t.in_place && t.branch.is_some()).filter_map(|t| Some((t.id.clone(), t.workdir.clone()?, t.base.clone()?))).collect()
     };
     if todo.is_empty() && svc.shared.lock().unwrap().merged.is_empty() {
+        // nothing finished yet: nothing can be merged (a task list that hasn't arrived waits for the next pass)
+        let mut s = svc.shared.lock().unwrap();
+        if !s.tasks.is_empty() && !s.merged_checked {
+            s.merged_checked = true;
+            s.version += 1;
+        }
         return;
     }
     let flag = busy.get_or_insert_with(|| std::sync::Arc::new(AtomicBool::new(false))).clone();
@@ -116,8 +147,9 @@ pub fn check_merged(time: Res<Time<Real>>, svc: Res<Service>, mut t: Local<f32>,
     std::thread::spawn(move || {
         let ids: HashSet<String> = todo.into_iter().filter(|(_, wd, base)| crate::review::is_merged(wd, base)).map(|(id, _, _)| id).collect();
         let mut s = shared.lock().unwrap();
-        if s.merged != ids {
+        if s.merged != ids || !s.merged_checked {
             s.merged = ids;
+            s.merged_checked = true;
             s.version += 1;
         }
         flag.store(false, Ordering::Relaxed);
@@ -262,6 +294,19 @@ pub fn tick_toasts(time: Res<Time<Real>>, mut toasts: ResMut<Toasts>, mut sound:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn toasts_carry_their_kind() {
+        let mut t = Toasts::default();
+        t.push("a");
+        t.push_quiet("b");
+        t.push_ok("c");
+        t.push_bad("d");
+        // the list keeps the last three
+        assert_eq!(t.list.iter().map(|x| (x.0.as_str(), x.2)).collect::<Vec<_>>(), vec![("b", ToastKind::Plain), ("c", ToastKind::Ok), ("d", ToastKind::Bad)]);
+        t.push_kind("e", ToastKind::Ok);
+        assert_eq!(t.list.last().map(|x| x.2), Some(ToastKind::Ok));
+    }
 
     fn task(id: &str, state: TaskState, at: &str) -> TaskView {
         serde_json::from_value(serde_json::json!({

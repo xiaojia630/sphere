@@ -62,6 +62,14 @@ impl Sound {
         self.play(name);
     }
 
+    /// `play_q` at a gain.
+    pub fn play_q_with(&mut self, name: &str, gain: f32, gap_ms: u128) {
+        if self.any_last.is_some_and(|t| t.elapsed().as_millis() < gap_ms) {
+            return;
+        }
+        self.play_with(name, gain, 0.0);
+    }
+
     pub fn set_muted(&mut self, m: bool) {
         self.muted = m;
         if m {
@@ -183,6 +191,13 @@ pub fn setup(mut commands: Commands, args: Res<crate::Args>) {
         off: args.offline(),
         voice: None,
     });
+}
+
+#[cfg(test)]
+impl Default for Sound {
+    fn default() -> Self {
+        Sound { tx: None, queue: Vec::new(), last: vec![None; NAMES.len()], any_last: None, muted: false, off: true, voice: None }
+    }
 }
 
 /// Hands the queued sounds to the playback thread.

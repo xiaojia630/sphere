@@ -185,6 +185,11 @@ fn money(c: f64) -> String {
     format!("${c:.2}")
 }
 
+/// What an agent cost, as Claude Code reports it: an estimate at API prices (a subscription isn't billed it).
+fn est(c: f64) -> String {
+    format!("≈${c:.2}")
+}
+
 pub fn event_lines(e: &Event, st: &Style) -> Vec<String> {
     let tag = format!("[{}]", if e.task.is_empty() { "-" } else { &e.task });
     let one = |s: String| vec![format!("{tag} {s}")];
@@ -336,7 +341,7 @@ pub fn event_lines(e: &Event, st: &Style) -> Vec<String> {
                 clip(summary.lines().next().unwrap_or(""), 160),
                 turns.map(|t| format!(" ({t} turns)")).unwrap_or_default(),
                 cost_usd
-                    .map(|c| format!(" total {}", money(c)))
+                    .map(|c| format!(" total {} (API est.)", est(c)))
                     .unwrap_or_default()
             ))
         }
@@ -355,7 +360,7 @@ pub fn ls_table(snap: &Snapshot) -> Vec<String> {
     }
     let mut out = vec![format!(
         "{:<5} {:<10} {:>7}  {:<28} {}",
-        "ID", "STATE", "COST", "BRANCH", "TITLE"
+        "ID", "STATE", "API EST", "BRANCH", "TITLE"
     )];
     for t in &snap.tasks {
         out.push(task_row(t));
@@ -376,8 +381,8 @@ pub fn ls_table(snap: &Snapshot) -> Vec<String> {
         ));
     }
     out.push(format!(
-        "today: {}{}",
-        money(snap.cost_today_usd),
+        "today: {} (API estimate){}",
+        est(snap.cost_today_usd),
         snap.daily_cap_usd
             .map(|c| format!(" of {} cap", money(c)))
             .unwrap_or_default()
@@ -390,7 +395,7 @@ fn task_row(t: &TaskView) -> String {
         "{:<5} {:<10} {:>7}  {:<28} {}",
         t.id,
         t.state.as_str(),
-        money(t.cost_usd),
+        est(t.cost_usd),
         clip(
             t.branch
                 .as_deref()
@@ -572,7 +577,7 @@ mod tests {
         );
         assert_eq!(
             turn,
-            vec!["[t1] finished: Added notes (3 turns) total $0.02"]
+            vec!["[t1] finished: Added notes (3 turns) total ≈$0.02 (API est.)"]
         );
         let answered = event_lines(
             &ev(
