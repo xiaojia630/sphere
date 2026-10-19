@@ -401,13 +401,13 @@ pub fn toasts(
     if *seen != t.version {
         *seen = t.version;
         commands.entity(stack).despawn_children();
-        for (i, (s, _)) in t.list.iter().enumerate() {
+        for (i, (s, _, kind)) in t.list.iter().enumerate() {
             let b = commands
                 .spawn((
                     ToastBox(i),
                     Node { padding: UiRect { left: px(12), right: px(14), top: px(9), bottom: px(8) }, border: UiRect { left: px(3), right: px(1), top: px(1), bottom: px(1) }, ..default() },
                     BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.72)),
-                    BorderColor { left: crate::theme::now(Role::Fill), right: with_alpha(line, 0.13), top: with_alpha(line, 0.13), bottom: with_alpha(line, 0.13) },
+                    BorderColor { left: crate::theme::now(match kind { crate::live::ToastKind::Plain => Role::Fill, crate::live::ToastKind::Ok => Role::Ok, crate::live::ToastKind::Bad => Role::Bad }), right: with_alpha(line, 0.13), top: with_alpha(line, 0.13), bottom: with_alpha(line, 0.13) },
                     UiTransform::default(),
                 ))
                 .id();
@@ -419,7 +419,7 @@ pub fn toasts(
     }
     let life = 2.4 + 0.42;
     for (tb, mut tr, mut bg, kids) in &mut boxes {
-        let Some((_, left)) = t.list.get(tb.0) else { continue };
+        let Some((_, left, _)) = t.list.get(tb.0) else { continue };
         let age = life - left;
         let (o, y, sc) = if age < 0.35 {
             let e = out_cubic(age / 0.35);

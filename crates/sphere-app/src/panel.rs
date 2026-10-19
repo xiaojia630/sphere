@@ -234,6 +234,8 @@ pub struct Atlas {
     pub image: Handle<Image>,
     pub camera: Entity,
     pub scale: f32,
+    /// texture width in px (`ATLAS_W`, or narrower for an app whose panels fit in less)
+    pub w: u32,
     x: u32,
     y: u32,
     shelf: u32,
@@ -242,7 +244,7 @@ pub struct Atlas {
 impl Atlas {
     pub fn new(commands: &mut Commands, images: &mut Assets<Image>, scale: f32, order: isize) -> Self {
         // a placeholder until `finish` knows the size (the camera needs its target to exist)
-        let image = images.add(atlas_image(1));
+        let image = images.add(atlas_image(ATLAS_W, 1));
         let camera = commands
             .spawn((
                 Camera2d,
@@ -253,7 +255,12 @@ impl Atlas {
                 AtlasForce(0),
             ))
             .id();
-        Atlas { image, camera, scale, x: 0, y: 0, shelf: 0 }
+        Atlas { image, camera, scale, w: ATLAS_W, x: 0, y: 0, shelf: 0 }
+    }
+    /// An atlas only `w` px wide (set before the panels spawn), for an app whose panels pack into less than the full width.
+    pub fn with_width(mut self, w: u32) -> Self {
+        self.w = w.min(ATLAS_W);
+        self
     }
     pub fn height(&self) -> u32 {
         (self.y + self.shelf).max(1)
@@ -261,7 +268,7 @@ impl Atlas {
     /// Points the panel materials drawn from this atlas at their rects (texture px until now).
     fn normalise(&self, mats: &mut Assets<PanelMaterial>) {
         let h = self.height() as f32;
-        let size = Vec4::new(ATLAS_W as f32, h, ATLAS_W as f32, h);
+        let size = Vec4::new(self.w as f32, h, self.w as f32, h);
         for (_, m) in mats.iter_mut() {
             if m.content.as_ref() == Some(&self.image) {
                 m.u.r /= size;
@@ -332,8 +339,8 @@ pub fn setup_atlas(mut commands: Commands, mut images: ResMut<Assets<Image>>, ar
     commands.insert_resource(AppAtlases::default());
 }
 
-fn atlas_image(h: u32) -> Image {
-    let mut img = Image::new_uninit(Extent3d { width: ATLAS_W, height: h, depth_or_array_layers: 1 }, TextureDimension::D2, TextureFormat::Rgba8UnormSrgb, RenderAssetUsages::default());
+fn atlas_image(w: u32, h: u32) -> Image {
+    let mut img = Image::new_uninit(Extent3d { width: w, height: h, depth_or_array_layers: 1 }, TextureDimension::D2, TextureFormat::Rgba8UnormSrgb, RenderAssetUsages::default());
     img.texture_descriptor.usage = bevy::render::render_resource::TextureUsages::TEXTURE_BINDING | bevy::render::render_resource::TextureUsages::RENDER_ATTACHMENT;
     img
 }
@@ -341,7 +348,7 @@ fn atlas_image(h: u32) -> Image {
 /// Sizes the home atlas, and points every panel material at its rect in its atlas.
 pub fn finish_atlas(atlas: Res<PanelAtlas>, apps: Res<AppAtlases>, mut images: ResMut<Assets<Image>>, mut mats: ResMut<Assets<PanelMaterial>>) {
     let h = atlas.height();
-    let _ = images.insert(&atlas.image, atlas_image(h));
+    let _ = images.insert(&atlas.image, atlas_image(atlas.w, h));
     atlas.normalise(&mut mats);
     for (_, a, _, _) in &apps.list {
         a.normalise(&mut mats);
@@ -349,7 +356,7 @@ pub fn finish_atlas(atlas: Res<PanelAtlas>, apps: Res<AppAtlases>, mut images: R
     if crate::stats::on() {
         eprintln!("stats: panel atlas {ATLAS_W}x{h} ({:.1} MB)", (ATLAS_W * h * 4) as f64 / 1e6);
         for (app, a, _, _) in &apps.list {
-            eprintln!("stats: app {app} atlas {ATLAS_W}x{} ({:.1} MB while open)", a.height(), (ATLAS_W * a.height() * 4) as f64 / 1e6);
+            eprintln!("stats: app {app} atlas {}x{} ({:.1} MB while open)", a.w, a.height(), (a.w * a.height() * 4) as f64 / 1e6);
         }
     }
 }
@@ -359,7 +366,7 @@ pub fn app_atlas_residency(mut apps: ResMut<AppAtlases>, mut images: ResMut<Asse
     for (_, a, alloc, want) in apps.list.iter_mut() {
         if *want != *alloc {
             *alloc = *want;
-            let _ = images.insert(&a.image, atlas_image(if *want { a.height() } else { 1 }));
+            let _ = images.insert(&a.image, atlas_image(a.w, if *want { a.height() } else { 1 }));
             if *want {
                 if let Ok(mut f) = force.get_mut(a.camera) {
                     f.0 = 4;
@@ -372,7 +379,7 @@ pub fn app_atlas_residency(mut apps: ResMut<AppAtlases>, mut images: ResMut<Asse
 /// A panel's UI root, placed in its own rect of the atlas (clipped to it).
 pub fn spawn_ui_panel(commands: &mut Commands, atlas: &mut Atlas, w: f32, h: f32) -> UiPanel {
     let (pw, ph) = ((w * atlas.scale).ceil() as u32, (h * atlas.scale).ceil() as u32);
-    if atlas.x + pw > ATLAS_W {
+    if atlas.x + pw > atlas.w {
         atlas.x = 0;
         atlas.y += atlas.shelf;
         atlas.shelf = 0;
@@ -380,6 +387,18 @@ pub fn spawn_ui_panel(commands: &mut Commands, atlas: &mut Atlas, w: f32, h: f32
     let (x, y) = (atlas.x, atlas.y);
     atlas.x += pw + GUTTER;
     atlas.shelf = atlas.shelf.max(ph + GUTTER);
+    ui_panel_at(commands, atlas, w, h, x, y)
+}
+
+/// A panel's UI at a given texel position in its atlas (the caller packs; the atlas grows to hold it).
+pub fn spawn_ui_panel_at(commands: &mut Commands, atlas: &mut Atlas, w: f32, h: f32, x: u32, y: u32) -> UiPanel {
+    let ph = (h * atlas.scale).ceil() as u32;
+    atlas.y = atlas.y.max(y + ph + GUTTER);
+    atlas.shelf = 0;
+    ui_panel_at(commands, atlas, w, h, x, y)
+}
+
+fn ui_panel_at(commands: &mut Commands, atlas: &Atlas, w: f32, h: f32, x: u32, y: u32) -> UiPanel {
     let root = commands
         .spawn((
             Node { width: px(w), height: px(h), position_type: PositionType::Absolute, left: px(x as f32 / atlas.scale), top: px(y as f32 / atlas.scale), overflow: Overflow::clip(), ..default() },

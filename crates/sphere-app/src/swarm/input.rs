@@ -179,6 +179,8 @@ pub enum SwarmCmd {
     Stop,
     Jump(usize),
     Back,
+    /// "status" / "how is the swarm doing": Sphere says `feedback::status_line`
+    Status,
 }
 
 /// `l` is the lower-cased, trimmed text.
@@ -197,6 +199,9 @@ pub fn parse(l: &str) -> Option<SwarmCmd> {
     }
     if is(&["back", "home", "close", "exit"]) {
         return Some(SwarmCmd::Back);
+    }
+    if is(&["status", "report", "how", "how is it going", "how is the swarm doing", "how are they doing", "how are the agents doing", "swarm status"]) || starts(&["status", "report"]) {
+        return Some(SwarmCmd::Status);
     }
     let rest = ["open ", "focus ", "jump ", "go to ", "agent "].iter().find_map(|p| l.strip_prefix(p)).unwrap_or(l);
     match rest.trim().parse::<usize>() {
@@ -254,6 +259,7 @@ struct Env<'w> {
     bar: ResMut<'w, CmdBar>,
     toasts: ResMut<'w, Toasts>,
     sound: ResMut<'w, Sound>,
+    say: ResMut<'w, crate::homepanels::Say>,
     open: ResMut<'w, Open>,
     sim: Res<'w, Sim>,
     args: Res<'w, crate::Args>,
@@ -465,6 +471,11 @@ fn command(e: &mut Env, st: &mut Input, c: SwarmCmd) {
             Some(id) => stop(e, &id),
             None => e.toasts.push("Open an agent first, then say stop"),
         },
+        SwarmCmd::Status => {
+            let line = super::feedback::status_line(&e.swarm.model);
+            e.sound.speak(&line);
+            e.say.say(line);
+        }
         SwarmCmd::Back => {
             if e.swarm.mode == Mode::Overview {
                 e.swarm.close();
@@ -561,9 +572,9 @@ fn drive(mut ev: MessageReader<KeyboardInput>, keys: Res<ButtonInput<KeyCode>>, 
     for (id, ok, text) in notes {
         st.merging.remove(&id);
         if ok {
-            e.toasts.push(text);
+            e.toasts.push_ok(text);
         } else {
-            e.toasts.push(text);
+            e.toasts.push_bad(text);
             e.sound.play_with("error", 0.6, 0.0);
         }
     }
@@ -875,6 +886,9 @@ mod tests {
         for w in ["back", "home", "close", "exit"] {
             assert_eq!(parse(w), Some(SwarmCmd::Back), "{w}");
         }
+        for w in ["status", "how", "report", "how is the swarm doing", "status report"] {
+            assert_eq!(parse(w), Some(SwarmCmd::Status), "{w}");
+        }
         assert_eq!(parse("3"), Some(SwarmCmd::Jump(3)));
         assert_eq!(parse("open 3"), Some(SwarmCmd::Jump(3)));
         assert_eq!(parse("go to 9"), Some(SwarmCmd::Jump(9)));
@@ -935,6 +949,7 @@ mod tests {
             .init_resource::<CmdBar>()
             .init_resource::<Toasts>()
             .init_resource::<Sound>()
+            .init_resource::<crate::homepanels::Say>()
             .init_resource::<Open>()
             .init_resource::<Moment>()
             .init_resource::<HudKeys>()
@@ -1013,6 +1028,32 @@ mod tests {
         app.update();
         assert_eq!(app.world().resource::<Swarm>().mode, Mode::Overview);
         assert!(app.world().resource::<Toasts>().list.iter().any(|t| t.0.starts_with("Stopped · b")));
+    }
+
+    #[test]
+    fn merge_outcomes_toast_green_or_red() {
+        use crate::live::ToastKind;
+        let mut app = world();
+        let tx = app.world().resource::<Input>().tx.clone();
+        tx.send(("d".to_string(), true, "Merged agent/d".to_string())).unwrap();
+        tx.send(("d".to_string(), false, "Merge failed: conflict".to_string())).unwrap();
+        app.update();
+        let kinds: Vec<(String, ToastKind)> = app.world().resource::<Toasts>().list.iter().map(|t| (t.0.clone(), t.2)).collect();
+        assert!(kinds.contains(&("Merged agent/d".to_string(), ToastKind::Ok)), "{kinds:?}");
+        assert!(kinds.contains(&("Merge failed: conflict".to_string(), ToastKind::Bad)), "{kinds:?}");
+        // Stop toasts plain
+        app.world_mut().resource_mut::<Swarm>().mode = Mode::Focus("b".into());
+        app.world_mut().resource_mut::<HudKeys>().0.push(KeyCode::KeyX);
+        app.update();
+        assert!(app.world().resource::<Toasts>().list.iter().any(|t| t.0.starts_with("Stopped") && t.2 == ToastKind::Plain));
+    }
+
+    #[test]
+    fn the_status_word_says_the_status_line() {
+        let mut app = world();
+        app.world_mut().resource_mut::<Open>().swarm_cmds.push(SwarmCmd::Status);
+        app.update();
+        assert_eq!(app.world().resource::<crate::homepanels::Say>().text, "4 agents: 1 working, 2 needs you, 1 ready to merge. Spent $0.00 today.");
     }
 
     #[test]

@@ -6,7 +6,7 @@ use crate::appframe::{clip, AppClicks, AppPart, Click, PaneRoot, Ui};
 use crate::fonts::UiFonts;
 use crate::panel::*;
 use crate::swarm::model::{self, Agent, Model, State};
-use crate::swarm::{Mode, Swarm, ATLAS};
+use crate::swarm::{Mode, Swarm, ATLAS, ATLAS_FOCUS};
 use crate::util::*;
 use bevy::prelude::*;
 
@@ -49,9 +49,30 @@ pub const SLOTS: (f32, f32) = (316.0, 290.0);
 pub const FOCUS: (f32, f32) = (478.0, 470.0);
 const ROWS_MAX: usize = 4;
 
+/// The swarm's main atlas at `scale` texels per stage px: its width and each of the strip, Orbits and Run slots'
+/// top-left texel (the strip on top, the two side panels under it). The focus panel has an atlas of its own
+/// (`focus_width`), resident only while a focus is open, so the overview's textures are a quarter of the full set.
+pub fn pack(scale: f32) -> (u32, [(u32, u32); 3]) {
+    let px = |v: f32| (v * scale).ceil() as u32;
+    let g = 2;
+    let (ow, sw) = (px(ORBITS.0), px(SLOTS.0));
+    let y = px(STRIP.1) + g;
+    let w = px(STRIP.0).max(ow + g + sw) + g;
+    (w, [(0, 0), (0, y), (ow + g, y)])
+}
+
+/// The focus atlas's width.
+pub fn focus_width(scale: f32) -> u32 {
+    (FOCUS.0 * scale).ceil() as u32 + 2
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn setup(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut images: ResMut<Assets<Image>>, (home, mut atlases): (Res<PanelAtlas>, ResMut<AppAtlases>), mut pmats: ResMut<Assets<PanelMaterial>>) {
-    let mut atlas = Atlas::new(&mut commands, &mut images, home.scale * APP_SHARP, -17);
+    // the home atlas's scale: these panels sit at the home panels' depth, and sharing the scale shares the glyph atlases
+    // the home's text already made (Bevy keeps one 512 px texture, and a CPU copy, per font and scaled size)
+    let (aw, spots) = pack(home.scale);
+    let mut atlas = Atlas::new(&mut commands, &mut images, home.scale, -17).with_width(aw);
+    let mut fatlas = Atlas::new(&mut commands, &mut images, home.scale, -16).with_width(focus_width(home.scale));
     let c = &mut commands;
     let mut roots = Vec::new();
     // (kind, size, stage anchor, side, z)
@@ -62,15 +83,16 @@ pub fn setup(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut image
         (Kind::Focus, FOCUS, crate::homepanels::anchor('l', 96.0, 'm', 500.0, FOCUS.0, FOCUS.1), 1.0),
     ];
     for (i, (kind, (w, h), at, side)) in list.into_iter().enumerate() {
-        let ui = spawn_ui_panel(c, &mut atlas, w, h);
+        let ui = if kind == Kind::Focus { spawn_ui_panel_at(c, &mut fatlas, w, h, 0, 0) } else { spawn_ui_panel_at(c, &mut atlas, w, h, spots[i].0, spots[i].1) };
         let mut home = at;
         home.z = if kind == Kind::Focus { 150.0 } else { 6.0 };
         let e = spawn_panel_quad(c, &mut meshes, &mut pmats, &ui, &PanelSpec { id: PanelId::App, w, h, home, home_scale: 1.0, side, phase: 0.9 + i as f32 * 1.3, show_at: 0.0, unframed: false });
-        c.entity(e).insert((HudPanel { kind, base: home, side }, AppPart { app: ATLAS, pane: Some(i as u8) }, PaneRoot(ui.root)));
+        c.entity(e).insert((HudPanel { kind, base: home, side }, AppPart { app: if kind == Kind::Focus { ATLAS_FOCUS } else { ATLAS }, pane: Some(i as u8) }, PaneRoot(ui.root)));
         roots.push(ui.root);
     }
     c.insert_resource(Roots { strip: roots[0], orbits: roots[1], slots: roots[2], focus: roots[3] });
     atlases.add(ATLAS, atlas);
+    atlases.add(ATLAS_FOCUS, fatlas);
 }
 
 /// The panels follow how open the swarm is; Orbits and Run slots step aside and back while a focus or request is
@@ -78,6 +100,7 @@ pub fn setup(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut image
 pub fn place(swarm: Res<Swarm>, mut atlases: ResMut<AppAtlases>, mut q: Query<(&mut Panel, &HudPanel)>) {
     let on = swarm.open || swarm.amt.x > 0.001;
     atlases.want(ATLAS, on);
+    atlases.want(ATLAS_FOCUS, on && (matches!(swarm.mode, Mode::Focus(_)) || swarm.focus_amt.x > 0.001));
     let amt = swarm.amt.x.clamp(0.0, 1.0);
     let dim = swarm.dim.x.clamp(0.0, 1.0);
     let foc = swarm.focus_amt.x.clamp(0.0, 1.0);
@@ -110,7 +133,7 @@ pub fn select(swarm: &mut Swarm, i: usize) {
 
 /// Clicks on the swarm's panes: a strip dot selects its agent; a button's key goes to `HudKeys` for the view.
 pub fn clicks(mut clicks: ResMut<AppClicks>, mut swarm: ResMut<Swarm>, mut keys: ResMut<HudKeys>) {
-    for c in clicks.take(ATLAS) {
+    for c in clicks.take(ATLAS).into_iter().chain(clicks.take(ATLAS_FOCUS)) {
         match c {
             Click::Pick(i) if swarm.open => select(&mut swarm, i),
             Click::Key(k) if swarm.open => keys.0.push(k),
@@ -226,8 +249,10 @@ fn spacer(c: &mut Commands) -> Entity {
     c.spawn(Node { flex_grow: 1.0, ..default() }).id()
 }
 
-fn mono(ui: &Ui, c: &mut Commands, s: impl Into<String>, size: f32, color: Color) -> Entity {
-    ui.text(c, s, &ui.f.mono, size, 0.0, color)
+/// Every mono run is one size: Bevy keeps a 512 px glyph texture (and a CPU copy) per font and scaled size, so the
+/// panels share the one the home's panels already made (11.5) instead of adding five.
+fn mono(ui: &Ui, c: &mut Commands, s: impl Into<String>, color: Color) -> Entity {
+    ui.text(c, s, &ui.f.mono, 11.5, 0.0, color)
 }
 
 /// A square of `s` px.
@@ -287,7 +312,7 @@ fn build_strip(c: &mut Commands, ui: &Ui, root: Entity, m: &Model, cur: Option<&
     let segs = row(c, 9.0);
     for (i, (n, label, cls)) in model::strip(m).into_iter().enumerate() {
         if i > 0 {
-            let s = ui.text(c, "·", &ui.f.ui500, 11.0, 0.0, dim());
+            let s = ui.text(c, "·", &ui.f.ui500, 10.5, 0.0, dim());
             c.entity(segs).add_child(s);
         }
         let zero = cls.is_some() && n == "0";
@@ -298,13 +323,13 @@ fn build_strip(c: &mut Commands, ui: &Ui, root: Entity, m: &Model, cur: Option<&
             None => (hot(), line()),
         };
         let seg = row(c, 6.0);
-        let nt = mono(ui, c, n, 12.0, nc);
-        let lt = ui.text(c, label.to_uppercase(), &ui.f.ui600, 11.0, 2.2, lc);
+        let nt = mono(ui, c, n, nc);
+        let lt = ui.text(c, label.to_uppercase(), &ui.f.ui600, 11.5, 2.0, lc);
         c.entity(seg).add_children(&[nt, lt]);
         c.entity(segs).add_child(seg);
     }
     let cost = row(c, 6.0);
-    let ct = mono(ui, c, model::strip_cost(m), 12.0, hot());
+    let ct = mono(ui, c, model::strip_cost(m), hot());
     let td = ui.text(c, "TODAY", &ui.f.ui500, 10.5, 1.0, dim());
     c.entity(cost).add_children(&[ct, td]);
     c.entity(segs).add_child(cost);
@@ -350,7 +375,7 @@ fn build_orbits(c: &mut Commands, ui: &Ui, root: Entity, m: &Model) {
         c.entity(icon).add_children(&[ell, dot]);
         let names = col(c, 2.0);
         let n = ui.text(c, clip(&key, 18).to_uppercase(), &ui.f.ui600, 13.0, 2.1, hot());
-        let s = mono(ui, c, clip(&sub, 28), 10.5, dim());
+        let s = mono(ui, c, clip(&sub, 28), dim());
         c.entity(names).add_children(&[n, s]);
         let chips = c.spawn(Node { flex_direction: FlexDirection::Row, align_items: AlignItems::Center, column_gap: px(4), margin: UiRect::left(auto()), ..default() }).id();
         for (j, st) in states.into_iter().enumerate().take(9) {
@@ -377,14 +402,14 @@ fn build_slots(c: &mut Commands, ui: &Ui, root: Entity, m: &Model) {
     for (i, slot) in rows.into_iter().enumerate().take(ROWS_MAX) {
         let r = row(c, 10.0);
         let idx = c.spawn(Node { width: px(14), flex_shrink: 0.0, ..default() }).id();
-        let it = mono(ui, c, (i + 1).to_string(), 11.0, dim());
+        let it = mono(ui, c, (i + 1).to_string(), dim());
         c.entity(idx).add_child(it);
         let (title, right, p, needs) = slot.unwrap_or(("Free".to_string(), "—".to_string(), 0.0, false));
         let free = right == "—";
         let name = ui.text(c, clip(&title, 24), &ui.f.ui600, 13.5, 0.3, if free { dim() } else if needs { acc() } else { hot() });
         let sp = spacer(c);
         let rt = c.spawn(Node { width: px(40), justify_content: JustifyContent::FlexEnd, ..default() }).id();
-        let rtt = mono(ui, c, right, 11.0, if free { dim() } else if needs { acc() } else { hot() });
+        let rtt = mono(ui, c, right, if free { dim() } else if needs { acc() } else { hot() });
         c.entity(rt).add_child(rtt);
         c.entity(r).add_children(&[idx, name, sp, rt]);
         let bar = c.spawn((Node { height: px(2), margin: UiRect { left: px(24), top: px(5), bottom: px(7), ..default() }, ..default() }, BackgroundColor(with_alpha(line(), 0.14)))).id();
@@ -407,7 +432,7 @@ fn build_slots(c: &mut Commands, ui: &Ui, root: Entity, m: &Model) {
         c.entity(q).add_child(r);
     }
     if queue.len() > 3 {
-        let more = mono(ui, c, format!("+{} more", queue.len() - 3), 10.0, dim());
+        let more = mono(ui, c, format!("+{} more", queue.len() - 3), dim());
         c.entity(q).add_child(more);
     }
     c.entity(list).add_child(q);
@@ -448,7 +473,7 @@ fn build_focus(c: &mut Commands, ui: &Ui, root: Entity, m: &Model, a: &Agent, no
     for (k, v) in [("Branch", clip(&a.branch, 26)), ("Running", running), ("Cost", format!("${:.2}", a.cost))] {
         let p = row(c, 8.0);
         let kt = ui.text(c, k.to_uppercase(), &ui.f.ui600, 9.0, 1.8, dim());
-        let vt = mono(ui, c, v, 11.5, hot());
+        let vt = mono(ui, c, v, hot());
         c.entity(p).add_children(&[kt, vt]);
         c.entity(meta).add_child(p);
     }
@@ -473,7 +498,7 @@ fn build_focus(c: &mut Commands, ui: &Ui, root: Entity, m: &Model, a: &Agent, no
     for (i, s) in a.steps.iter().take(5).enumerate() {
         let r = c.spawn(Node { flex_direction: FlexDirection::Row, align_items: AlignItems::Center, column_gap: px(8), height: px(21), ..default() }).id();
         let tw = c.spawn(Node { width: px(34), flex_shrink: 0.0, ..default() }).id();
-        let tt = mono(ui, c, model::ago(now - s.at, i == 0), 10.0, dim());
+        let tt = mono(ui, c, model::ago(now - s.at, i == 0), dim());
         c.entity(tw).add_child(tt);
         let mk = c.spawn(Node { width: px(5), height: px(5), flex_shrink: 0.0, ..default() }).id();
         if i == 0 && a.state == State::Working {
@@ -506,8 +531,8 @@ fn build_focus(c: &mut Commands, ui: &Ui, root: Entity, m: &Model, a: &Agent, no
             let t = ui.text(c, "CONFLICT", &ui.f.ui700, 8.5, 1.2, acc());
             c.entity(r).add_child(t);
         }
-        let ad = mono(ui, c, format!("+{}", f.added), 11.0, ok());
-        let de = mono(ui, c, format!("\u{2212}{}", f.removed), 11.0, bad());
+        let ad = mono(ui, c, format!("+{}", f.added), ok());
+        let de = mono(ui, c, format!("\u{2212}{}", f.removed), bad());
         c.entity(r).add_children(&[ad, de]);
         c.entity(body).add_child(r);
     }
@@ -522,7 +547,7 @@ fn build_focus(c: &mut Commands, ui: &Ui, root: Entity, m: &Model, a: &Agent, no
             Some('\u{2212}') => bad(),
             _ => hot(),
         };
-        let t = mono(ui, c, w, 11.0, col);
+        let t = mono(ui, c, w, col);
         c.entity(dr).add_child(t);
     }
     c.entity(body).add_child(dr);
@@ -559,4 +584,31 @@ fn build_focus(c: &mut Commands, ui: &Ui, root: Entity, m: &Model, a: &Agent, no
     c.entity(hint).add_child(ht);
     c.entity(ac).add_children(&[sp, hint]);
     c.entity(body).add_child(ac);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_atlas_packs_without_overlap_and_far_below_the_full_width_shelves() {
+        for scale in [1.0f32, 1.65, 2.2, 3.0] {
+            let (w, spots) = pack(scale);
+            let sizes = [STRIP, ORBITS, SLOTS];
+            let rects: Vec<(u32, u32, u32, u32)> = spots.iter().zip(sizes).map(|(&(x, y), (pw, ph))| (x, y, x + (pw * scale).ceil() as u32, y + (ph * scale).ceil() as u32)).collect();
+            for r in &rects {
+                assert!(r.2 <= w, "{r:?} passes the width {w}");
+            }
+            for i in 0..3 {
+                for j in i + 1..3 {
+                    let (a, b) = (rects[i], rects[j]);
+                    assert!(a.2 <= b.0 || b.2 <= a.0 || a.3 <= b.1 || b.3 <= a.1, "{a:?} overlaps {b:?}");
+                }
+            }
+            let h = rects.iter().map(|r| r.3).max().unwrap();
+            let area: u32 = rects.iter().map(|r| (r.2 - r.0) * (r.3 - r.1)).sum();
+            assert!((w * h) as f32 <= area as f32 * 1.5, "{w}x{h} wastes too much for {area}");
+            assert!(focus_width(scale) as f32 >= FOCUS.0 * scale);
+        }
+    }
 }

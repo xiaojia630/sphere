@@ -34,10 +34,49 @@ pub fn cues(e: &Event, overview: bool, relevant: bool) -> Vec<(&'static str, f32
 /// How long a landed step's tick keeps other sounds out (SPEC `sfxQ(.., 600)`).
 const TICK_GAP_MS: u128 = 600;
 
+/// SPEC 3.4: the merge's impact (the shock, the sweep, the toast, the line) lands .62 s after the satellite starts
+/// to collapse into the core, at the motion pace.
+const MERGE_IMPACT_SECS: f32 = 0.62;
+
+/// Events whose effects wait for something on screen (the merge's collapse): (seconds left, event).
+#[derive(Default)]
+pub struct Later(Vec<(f32, Event)>);
+
+impl Later {
+    pub fn push(&mut self, secs: f32, e: Event) {
+        self.0.push((secs, e));
+    }
+    /// Advances `dt` and returns the events that are due, in the order they were queued.
+    pub fn tick(&mut self, dt: f32) -> Vec<Event> {
+        let mut due = Vec::new();
+        self.0.retain_mut(|(t, e)| {
+            *t -= dt;
+            if *t <= 0.0 {
+                due.push(e.clone());
+            }
+            *t > 0.0
+        });
+        due
+    }
+    #[cfg(test)]
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+/// The toast an event makes here. A stop has none: its action toasts at once itself.
+pub fn toast_for(e: &Event, m: &Model) -> Option<(String, model::ToastKind)> {
+    if matches!(e, Event::Stopped(_)) {
+        return None;
+    }
+    model::toast(e, m)
+}
+
 /// Drains `Events` while the swarm is open (and drops them when it is closed).
 #[allow(clippy::too_many_arguments)]
 pub fn feedback(
     swarm: Res<Swarm>,
+    sim: Res<crate::core::Sim>,
     mut events: ResMut<model::Events>,
     mut toasts: ResMut<crate::live::Toasts>,
     mut sound: ResMut<crate::sound::Sound>,
@@ -45,24 +84,38 @@ pub fn feedback(
     mut fx: ResMut<crate::fx::Fx>,
     mut ctl: ResMut<crate::core::CoreCtl>,
     mut ticker: ResMut<SwarmTicker>,
+    mut later: Local<Later>,
 ) {
     if !swarm.open {
         events.0.clear();
+        later.0.clear();
         return;
     }
-    if events.0.is_empty() {
+    let due = later.tick(sim.dt);
+    if events.0.is_empty() && due.is_empty() {
         return;
     }
     let overview = swarm.mode == Mode::Overview;
-    for e in std::mem::take(&mut events.0) {
-        let m = &swarm.model;
+    let m = &swarm.model;
+    // (event, whether it is a delayed one coming due)
+    let work: Vec<(Event, bool)> = std::mem::take(&mut events.0).into_iter().map(|e| (e, false)).chain(due.into_iter().map(|e| (e, true))).collect();
+    for (e, was_late) in work {
+        if matches!(e, Event::Merged(_)) && !was_late {
+            // the ticker has it now; the rest waits for the collapse
+            if let Some(t) = model::ticker(&e, m) {
+                ticker.0.insert(0, t);
+                ticker.0.truncate(TICKER_MAX);
+            }
+            later.push(crate::motion::delay(crate::motion::Pace::Big, MERGE_IMPACT_SECS), e);
+            continue;
+        }
         let id = match &e {
             Event::StepLanded(id) => Some(id.as_str()),
             _ => None,
         };
         let relevant = id.is_some_and(|id| swarm.hover.as_deref() == Some(id) || swarm.current() == Some(id));
-        if let Some((s, _kind)) = model::toast(&e, m) {
-            toasts.push_quiet(s);
+        if let Some((s, kind)) = toast_for(&e, m) {
+            toasts.push_kind(s, kind);
         }
         for (name, gain) in cues(&e, overview, relevant) {
             if matches!(e, Event::StepLanded(_)) {
@@ -92,9 +145,11 @@ pub fn feedback(
                 }
             }
         }
-        if let Some(t) = model::ticker(&e, m) {
-            ticker.0.insert(0, t);
-            ticker.0.truncate(TICKER_MAX);
+        if !was_late {
+            if let Some(t) = model::ticker(&e, m) {
+                ticker.0.insert(0, t);
+                ticker.0.truncate(TICKER_MAX);
+            }
         }
     }
 }
@@ -110,7 +165,7 @@ pub fn ticker_items(events: &[(String, String, bool)], m: &Model) -> Vec<String>
 /// The Say line's idle hint for the swarm's mode (SPEC 4.3).
 pub fn idle_hint(mode: &Mode) -> &'static str {
     match mode {
-        Mode::Overview => "1 TO 9 JUMP TO AN AGENT · TAB CYCLES · N FOR THE NEXT ONE THAT NEEDS YOU · ESC BACK · F TO FIT",
+        Mode::Overview => "1-9 JUMP · TAB CYCLES · N NEXT THAT NEEDS YOU · ESC BACK · F FIT",
         Mode::Focus(_) => "ENTER MERGES OR OPENS IN CODE · A TO ASK · TAB FOR THE NEXT AGENT · ESC BACK",
         Mode::Request(_) => "ENTER TO SEND · E TO CHANGE · L FOR LATER · ← → FOR THE OTHERS · ESC BACK",
     }
@@ -118,7 +173,6 @@ pub fn idle_hint(mode: &Mode) -> &'static str {
 
 /// SPEC 6.2: "6 agents: 3 working, 1 ready to merge, 2 queued. Spent $1.89 today." (the clauses after
 /// "working" only when there are some).
-#[allow(dead_code)] // the command bar's "status" hooks it
 pub fn status_line(m: &Model) -> String {
     let n = m.agents.iter().filter(|a| !matches!(a.state, State::Merged | State::Stopped)).count();
     let mut s = format!("{n} {}: {} working", if n == 1 { "agent" } else { "agents" }, m.count(State::Working));
@@ -171,6 +225,26 @@ mod tests {
     }
 
     #[test]
+    fn a_merges_effects_wait_for_the_collapse() {
+        let mut l = Later::default();
+        l.push(0.62, Event::Merged("a".into()));
+        l.push(0.2, Event::Merged("b".into()));
+        assert!(l.tick(0.1).is_empty());
+        assert_eq!(l.tick(0.15), vec![Event::Merged("b".into())]);
+        assert!(l.tick(0.3).is_empty());
+        assert_eq!(l.tick(0.1), vec![Event::Merged("a".into())]);
+        assert!(l.is_empty());
+        assert!(l.tick(5.0).is_empty());
+    }
+
+    #[test]
+    fn a_stop_is_toasted_by_its_action_not_by_the_event() {
+        let model = m(&[State::Stopped, State::Done], 0.0);
+        assert_eq!(toast_for(&Event::Stopped("0".into()), &model), None);
+        assert_eq!(toast_for(&Event::Ready("1".into()), &model).map(|t| t.1), Some(model::ToastKind::Ok));
+    }
+
+    #[test]
     fn the_swarm_ticker_ends_with_slots_and_cost() {
         use State::*;
         let model = m(&[Working, Needs, Queued], 1.84);
@@ -180,8 +254,13 @@ mod tests {
 
     #[test]
     fn idle_hints_follow_the_mode() {
-        assert!(idle_hint(&Mode::Overview).starts_with("1 TO 9"));
+        assert!(idle_hint(&Mode::Overview).starts_with("1-9 JUMP"));
         assert!(idle_hint(&Mode::Focus("a".into())).starts_with("ENTER MERGES"));
         assert!(idle_hint(&Mode::Request("a".into())).starts_with("ENTER TO SEND"));
+        // every hint fits one line of the 780 px say panel at its letter spacing (about .55em + spacing per char at 12 px)
+        for m in [Mode::Overview, Mode::Focus("a".into()), Mode::Request("a".into())] {
+            let n = idle_hint(&m).chars().count();
+            assert!(n as f32 * (12.0 * 0.55 + crate::homepanels::idle_spacing(n)) <= 780.0, "{m:?}: {n} chars");
+        }
     }
 }

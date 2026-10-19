@@ -788,11 +788,7 @@ pub enum Event {
     StepLanded(String),
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ToastKind {
-    Plain,
-    Ok,
-}
+pub use crate::live::ToastKind;
 
 /// The events from `prev` to `next`: only for agents in both (a new agent has no event), and conflicts that are
 /// new, or gone while both agents are still there.

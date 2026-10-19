@@ -130,6 +130,17 @@ fn ease(rate: f32, dt: f32) -> f32 {
     1.0 - (-rate * dt).exp()
 }
 
+/// An eased "on" heading for 0 (rate 8), exactly 0 once it is under 1%, so a part that lost its subject fades out
+/// in place and then hides.
+fn fade_out(on: f32, dt: f32) -> f32 {
+    let v = on - on * ease(8.0, dt);
+    if v < 0.01 {
+        0.0
+    } else {
+        v
+    }
+}
+
 // ------------------------------------------------------------------ the overlay's parts
 
 const N_LABELS: usize = 9;
@@ -257,7 +268,7 @@ fn build_label(c: &mut Commands, f: &UiFonts, root: Entity, owner: usize, a: &mo
     c.entity(title).insert(Node { max_width: px(LABEL_W - 26.0), overflow: Overflow::clip(), ..default() });
     // repo, chip, percent
     let meta = c.spawn(Node { width: percent(100), flex_direction: dir, align_items: AlignItems::Center, column_gap: px(8), ..default() }).id();
-    let rp = text(c, owner, repo.to_uppercase(), &f.ui600, 10.0, 1.6, mute());
+    let rp = text(c, owner, repo.to_uppercase(), &f.ui600, 9.5, 1.6, mute());
     let (cb, cbg, ctx) = match a.state {
         State::Needs => (acc, Some(acc), Color::BLACK),
         State::Done | State::Merged => (ok, None, ok),
@@ -269,10 +280,10 @@ fn build_label(c: &mut Commands, f: &UiFonts, root: Entity, owner: usize, a: &mo
         let sq = boxed(c, owner, Node { width: px(5), height: px(5), ..default() }, Some(tc(Role::Fill)), None);
         c.entity(chip).add_child(sq);
     }
-    let ct = text(c, owner, model::chip(a.state).to_uppercase(), &f.ui600, 9.0, 1.6, ctx);
+    let ct = text(c, owner, model::chip(a.state).to_uppercase(), &f.ui600, 9.5, 1.5, ctx);
     c.entity(chip).add_child(ct);
     let sp = c.spawn(Node { flex_grow: 1.0, ..default() }).id();
-    let pc = text(c, owner, model::pct(a), &f.mono, 11.0, 0.0, if done { ok } else { hot });
+    let pc = text(c, owner, model::pct(a), &f.mono, 10.5, 0.0, if done { ok } else { hot });
     c.entity(meta).add_children(&[rp, chip, sp, pc]);
     // step and cost
     let st = c.spawn(Node { width: percent(100), flex_direction: dir, align_items: AlignItems::Center, column_gap: px(7), ..default() }).id();
@@ -282,7 +293,7 @@ fn build_label(c: &mut Commands, f: &UiFonts, root: Entity, owner: usize, a: &mo
         c.entity(st).add_child(b);
     }
     let sw = c.spawn(Node { flex_grow: 1.0, flex_basis: px(0), overflow: Overflow::clip(), justify_content: if left { JustifyContent::FlexEnd } else { JustifyContent::FlexStart }, ..default() }).id();
-    let step = text(c, owner, crate::appframe::clip(&a.step, 32), &f.ui500, 12.0, 0.2, if queued { mute() } else { line });
+    let step = text(c, owner, crate::appframe::clip(&a.step, 32), &f.ui500, 12.5, 0.2, if queued { mute() } else { line });
     c.entity(sw).add_child(step);
     let cost = text(c, owner, model::cost(a), &f.mono, 10.5, 0.0, mute());
     c.entity(st).add_children(&[sw, cost]);
@@ -297,8 +308,8 @@ fn build_label(c: &mut Commands, f: &UiFonts, root: Entity, owner: usize, a: &mo
 
 fn build_ring(c: &mut Commands, f: &UiFonts, root: Entity, owner: usize, name: &str, sub: &str) {
     let r = c.spawn(Node { flex_direction: FlexDirection::Row, align_items: AlignItems::Center, column_gap: px(8), ..default() }).id();
-    let a = text(c, owner, name.to_uppercase(), &f.ui600, 9.5, 3.2, mute());
-    let b = text(c, owner, sub, &f.mono, 9.5, 0.4, tc(Role::Dim));
+    let a = text(c, owner, name.to_uppercase(), &f.ui600, 9.5, 3.0, mute());
+    let b = text(c, owner, sub, &f.mono, 10.5, 0.4, tc(Role::Dim));
     c.entity(r).add_children(&[a, b]);
     c.entity(root).add_child(r);
 }
@@ -313,7 +324,7 @@ fn build_chip(c: &mut Commands, f: &UiFonts, root: Entity, owner: usize, file: &
         FadeBorder(owner, with_alpha(acc, 0.62)),
     ));
     let sq = boxed(c, owner, Node { width: px(6), height: px(6), ..default() }, Some(acc), None);
-    let t1 = text(c, owner, "BOTH EDITING", &f.ui700, 9.5, 1.5, acc);
+    let t1 = text(c, owner, "BOTH EDITING", &f.ui700, 10.5, 1.3, acc);
     let t2 = text(c, owner, file, &f.mono, 10.5, 0.0, hot);
     c.entity(root).add_children(&[sq, t1, t2]);
 }
@@ -340,7 +351,7 @@ fn build_tip(c: &mut Commands, f: &UiFonts, root: Entity, owner: usize, t1: &str
         FadeBorder(owner, tc(Role::Fill)),
     ));
     let a = text(c, owner, t1.to_uppercase(), &f.ui700, 10.5, 2.73, tc(Role::Hot));
-    let b = text(c, owner, t2, &f.ui500, 12.0, 0.96, tc(Role::Line));
+    let b = text(c, owner, t2, &f.ui500, 12.5, 0.9, tc(Role::Line));
     c.entity(root).add_children(&[a, b]);
 }
 
@@ -351,6 +362,18 @@ fn put(n: &mut Node, p: Vec2) {
         n.left = l;
         n.top = t;
     }
+}
+
+/// Re-applies a part's left/top after its children were rebuilt: the `build_*` fns insert a fresh `Node` (auto
+/// position = the screen's top-left corner) and the placement only runs next frame, so without this a plate rebuilt
+/// by a theme or content change shows at (0,0) for a frame (every frame while the theme eases).
+fn keep_pos(c: &mut Commands, root: Entity, at: (Val, Val)) {
+    c.entity(root).queue(move |mut e: EntityWorldMut| {
+        if let Some(mut n) = e.get_mut::<Node>() {
+            n.left = at.0;
+            n.top = at.1;
+        }
+    });
 }
 
 /// Opacity, quantised so easing doesn't touch every colour every frame.
@@ -411,7 +434,7 @@ fn overlay(
     let gt = GlobalTransform::from(*ctr);
     let dt = sim.dt;
     let size = cam.logical_viewport_size().unwrap_or(Vec2::new(args.size.0 as f32, args.size.1 as f32));
-    let proj = |p: Vec3| cam.world_to_viewport(&gt, p).ok();
+    let proj = |p: Vec3| cam.world_to_viewport(&gt, p).ok().filter(|v| v.is_finite());
     // the strip's bottom edge (stage y 58) + 10; the dock top - 12
     let y0 = proj(crate::panel::stage_to_world(800.0, 58.0)).map(|v| v.y).unwrap_or(68.0) + 10.0;
     let safe = Rect { min: Vec2::new(36.0, y0), max: Vec2::new(size.x - 36.0, (size.y - 94.0).max(y0 + 60.0)) };
@@ -488,8 +511,10 @@ fn overlay(
         let key = format!("{}|{}|{}|{:?}|{}|{}|{}|{}|{}", a.title, repo, model::pct(a), a.state, a.step, model::cost(a), left, hov_on, ov.theme);
         if ov.key[o] != key {
             ov.key[o] = key;
+            let at = nodes.get(ov.roots[o]).map(|x| (x.0.left, x.0.top)).unwrap_or_default();
             commands.entity(ov.roots[o]).despawn_children();
             build_label(&mut commands, &f, ov.roots[o], o, a, repo, left, hov_on);
+            keep_pos(&mut commands, ov.roots[o], at);
         }
         ov.side[o] = side;
         // measured plate size (stage px), the plate scaled by the depth factor k
@@ -573,18 +598,21 @@ fn overlay(
         let file = cr.and_then(|(a, b, _)| model.conflicts.iter().find(|k| (&k.a == a && &k.b == b) || (&k.a == b && &k.b == a))).map(|k| k.file.clone());
         let p = cr.and_then(|c| proj(c.2));
         let (Some(file), Some(p)) = (file, p) else {
-            ov.on[o] = 0.0;
-            ov.opac[o] = 0.0;
+            // the conflict cleared (or its crest is not on screen): fade out where it is, then hide
+            ov.on[o] = fade_out(ov.on[o], dt);
+            ov.opac[o] = quant(ov.opac[o].min(clamp(ov.on[o], 0.0, 1.0)));
             if let Ok((_, _, mut v, _)) = nodes.get_mut(ov.roots[o]) {
-                v.set_if_neq(Visibility::Hidden);
+                v.set_if_neq(if ov.opac[o] > 0.01 { Visibility::Inherited } else { Visibility::Hidden });
             }
             continue;
         };
         let key = format!("{file}|{}", ov.theme);
         if ov.key[o] != key {
             ov.key[o] = key;
+            let at = nodes.get(ov.roots[o]).map(|x| (x.0.left, x.0.top)).unwrap_or_default();
             commands.entity(ov.roots[o]).despawn_children();
             build_chip(&mut commands, &f, ov.roots[o], o, &file);
+            keep_pos(&mut commands, ov.roots[o], at);
         }
         ov.on[o] += (1.0 - ov.on[o]) * ease(5.0, dt);
         if let Ok((mut n, _, mut v, cn)) = nodes.get_mut(ov.roots[o]) {
@@ -634,8 +662,10 @@ fn overlay(
                     let key = format!("{time}|{s}|{}", ov.theme);
                     if ov.key[o] != key {
                         ov.key[o] = key;
+                        let at = nodes.get(ov.roots[o]).map(|x| (x.0.left, x.0.top)).unwrap_or_default();
                         commands.entity(ov.roots[o]).despawn_children();
                         build_call(&mut commands, &f, ov.roots[o], o, &time, &s);
+                        keep_pos(&mut commands, ov.roots[o], at);
                     }
                     if let Ok((mut n, _, mut v, cn)) = nodes.get_mut(ov.roots[o]) {
                         let sz = cn.size() * cn.inverse_scale_factor();
@@ -663,8 +693,10 @@ fn overlay(
         let key = format!("{t1}|{t2}|{}", ov.theme);
         if ov.key[o] != key {
             ov.key[o] = key;
+            let at = nodes.get(ov.roots[o]).map(|x| (x.0.left, x.0.top)).unwrap_or_default();
             commands.entity(ov.roots[o]).despawn_children();
             build_tip(&mut commands, &f, ov.roots[o], o, &t1, &t2);
+            keep_pos(&mut commands, ov.roots[o], at);
         }
         let at = ms.pos.or_else(|| hid.as_deref().and_then(|id| scene.nodes.iter().find(|n| n.0 == id)).and_then(|n| proj(n.1)));
         if let (Some(p), Ok((mut n, _, mut v, cn))) = (at, nodes.get_mut(ov.roots[o])) {
@@ -713,6 +745,34 @@ mod tests {
 
     fn rect(x0: f32, y0: f32, x1: f32, y1: f32) -> Rect {
         Rect { min: Vec2::new(x0, y0), max: Vec2::new(x1, y1) }
+    }
+
+    #[test]
+    fn a_part_without_its_subject_fades_out_to_exactly_zero() {
+        let mut v = 1.0;
+        let mut last = v;
+        for _ in 0..200 {
+            v = fade_out(v, 1.0 / 60.0);
+            assert!(v <= last);
+            last = v;
+        }
+        assert_eq!(v, 0.0);
+        assert_eq!(fade_out(0.0, 0.05), 0.0);
+    }
+
+    #[test]
+    fn a_rebuilt_plate_keeps_its_position() {
+        let mut world = World::new();
+        let e = world.spawn(Node { position_type: PositionType::Absolute, left: px(300), top: px(120), ..default() }).id();
+        // what build_* does: replace the Node (left/top back to auto), then keep_pos restores them
+        let at = world.get::<Node>(e).map(|n| (n.left, n.top)).unwrap();
+        let mut q = bevy::ecs::world::CommandQueue::default();
+        let mut c = Commands::new(&mut q, &world);
+        c.entity(e).insert(Node { position_type: PositionType::Absolute, width: px(268), ..default() });
+        keep_pos(&mut c, e, at);
+        q.apply(&mut world);
+        let n = world.get::<Node>(e).unwrap();
+        assert_eq!((n.left, n.top, n.width), (px(300), px(120), px(268)));
     }
 
     #[test]

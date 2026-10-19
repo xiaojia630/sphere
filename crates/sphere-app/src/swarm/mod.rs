@@ -15,6 +15,8 @@ use bevy::prelude::*;
 
 /// The swarm's own atlas in `AppAtlases` (apps use 0-5).
 pub const ATLAS: u8 = 6;
+/// The focus panel's own atlas (the tall panel, over half the swarm's texels): only resident while a focus is open.
+pub const ATLAS_FOCUS: u8 = 7;
 
 /// How far the orbit plane tips from face-on, in degrees (SPEC 2.1): Low 71, Mid 60, High 46.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]

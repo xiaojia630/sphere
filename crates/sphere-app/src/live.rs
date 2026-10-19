@@ -23,10 +23,19 @@ impl Live {
     }
 }
 
-/// Short-lived lines shown above the command bar.
+/// A toast's left bar: the theme's fill, green (something went through) or red (it failed).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum ToastKind {
+    #[default]
+    Plain,
+    Ok,
+    Bad,
+}
+
+/// Short-lived lines shown above the command bar: (text, seconds left, kind).
 #[derive(Resource, Default)]
 pub struct Toasts {
-    pub list: Vec<(String, f32)>,
+    pub list: Vec<(String, f32, ToastKind)>,
     pub version: u64,
     pending_sound: bool,
 }
@@ -39,7 +48,21 @@ impl Toasts {
     }
     /// A toast whose event already made its own sound.
     pub fn push_quiet(&mut self, s: impl Into<String>) {
-        self.list.push((s.into(), 2.4 + 0.42));
+        self.push_kind(s, ToastKind::Plain);
+    }
+    /// A toast with a green bar, with its sound (something went through).
+    pub fn push_ok(&mut self, s: impl Into<String>) {
+        self.pending_sound = true;
+        self.push_kind(s, ToastKind::Ok);
+    }
+    /// A toast with a red bar, with its sound (something failed).
+    pub fn push_bad(&mut self, s: impl Into<String>) {
+        self.pending_sound = true;
+        self.push_kind(s, ToastKind::Bad);
+    }
+    /// A toast of a kind whose event already made its own sound.
+    pub fn push_kind(&mut self, s: impl Into<String>, kind: ToastKind) {
+        self.list.push((s.into(), 2.4 + 0.42, kind));
         if self.list.len() > 3 {
             self.list.remove(0);
         }
@@ -262,6 +285,19 @@ pub fn tick_toasts(time: Res<Time<Real>>, mut toasts: ResMut<Toasts>, mut sound:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn toasts_carry_their_kind() {
+        let mut t = Toasts::default();
+        t.push("a");
+        t.push_quiet("b");
+        t.push_ok("c");
+        t.push_bad("d");
+        // the list keeps the last three
+        assert_eq!(t.list.iter().map(|x| (x.0.as_str(), x.2)).collect::<Vec<_>>(), vec![("b", ToastKind::Plain), ("c", ToastKind::Ok), ("d", ToastKind::Bad)]);
+        t.push_kind("e", ToastKind::Ok);
+        assert_eq!(t.list.last().map(|x| x.2), Some(ToastKind::Ok));
+    }
 
     fn task(id: &str, state: TaskState, at: &str) -> TaskView {
         serde_json::from_value(serde_json::json!({
