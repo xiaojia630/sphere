@@ -648,7 +648,13 @@ impl Manager {
         let spawned = self
             .host
             .spawn(SpawnParams {
-                cmd: self.cfg.agent_command.clone(),
+                // the full path: the host looks a bare name up on its own PATH, which may be Finder's bare one
+                cmd: crate::envpath::which(
+                    &self.cfg.agent_command,
+                    &std::env::var("PATH").unwrap_or_default(),
+                )
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_else(|| self.cfg.agent_command.clone()),
                 args,
                 cwd: Some(workdir.to_string_lossy().to_string()),
                 env,
