@@ -52,6 +52,7 @@ pub fn update(
     live: Res<crate::live::Live>,
     args: Res<crate::Args>,
     stats: Res<crate::sysstats::SysStats>,
+    sound: Res<crate::sound::Sound>,
     moment: Res<crate::moment::Moment>,
     cams: Query<(&Camera, &GlobalTransform), With<CamCore>>,
     gts: Query<&GlobalTransform>,
@@ -133,11 +134,7 @@ pub fn update(
     let s = stats.get();
     for (cs, mut t) in &mut sets.p3() {
         let want = match cs.0 {
-            0 => match agents.time_spans(crate::core::now_minutes()).len() {
-                0 => "Today · no agent runs yet".to_string(),
-                1 => "Today · 1 agent run".to_string(),
-                n => format!("Today · {n} agent runs"),
-            },
+            0 => crate::core::today_line(agents.time_spans(crate::core::now_minutes()).len()),
             1 => format!("CPU {:.0}% · memory {:.0}%", s.cpu * 100.0, s.mem * 100.0),
             2 => agents.summary(),
             3 => match &live.link {
@@ -146,8 +143,8 @@ pub fn update(
                 Some(crate::service::Link::Down(_)) => "sphered offline".to_string(),
                 _ => "connecting to sphered".to_string(),
             },
-            4 => "/ to type".to_string(),
-            _ => "Sphere".to_string(),
+            4 => sound.voice_state().tip().to_string(),
+            _ => concat!("Sphere ", env!("CARGO_PKG_VERSION")).to_string(),
         };
         if t.0 != want {
             t.0 = want;
