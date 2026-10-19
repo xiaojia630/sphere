@@ -2,8 +2,10 @@
 # Compares two builds of Sphere on this Mac under the same conditions: every measurement runs for A, then for B,
 # alternating for a few rounds, so a busy moment on the machine hits both. Plug the Mac in, keep the screen on and
 # unlocked, and leave the Sphere windows uncovered (a covered window drops to 2 fps: such a run is retried once, then
-# marked "covered"). Each run opens a Sphere window for about 20 s.
-# usage: A=target/perf/bin/before/sphere-app scripts/perf-ab.sh [label] [rounds]   (B defaults to target/release/sphere-app)
+# marked "covered"). Each run opens a Sphere window for about 20 s. OFFSCREEN=1 opens none: every run renders
+# offscreen with vsync off and waits for the GPU each frame, so its fps is the whole frame's cost, and it can run while
+# you use the Mac.
+# usage: A=target/perf/bin/before/sphere-app [OFFSCREEN=1] scripts/perf-ab.sh [label] [rounds]   (B defaults to target/release/sphere-app)
 #   -> target/perf/ab-<label>-<time>/summary.md, raw logs next to it
 # macOS only. It never touches a Sphere that was already running, only notes it.
 set -uo pipefail
@@ -75,6 +77,24 @@ bench_ab() { # run build bin args...
     echo "$run	$build	$(fps_of "$u")	$(field "$u" 'CPU [0-9.]+ cores')	$(field "$u" '[0-9.]+ ms/frame')	$(field "$u" 'CPU power [0-9.]+ W')	$(field "$u" '[0-9]+ wake-ups/s')			" >>"$OUT/rows.tsv"
 }
 
+# offscreen, no window (OFFSCREEN=1): the GPU time and the footprint are read in the middle of the run
+offscreen() { # run build bin args...
+    local run=$1 build=$2 bin=$3
+    shift 3
+    quiet_machine
+    local log="$OUT/$run-$build-$round.log"
+    "$bin" "$@" >"$log" 2>&1 &
+    local pid=$!
+    sleep 4
+    local g0 g1
+    g0=$(gpu_ns "$pid")
+    sleep 4
+    g1=$(gpu_ns "$pid")
+    footprint "$pid" >"$OUT/footprint-$run-$build-$round.txt" 2>&1
+    wait "$pid" 2>/dev/null
+    row "$run" "$build" "$(usage_of "$log")" "$(gpu_pct "$g0" "$g1" 4)" "$OUT/footprint-$run-$build-$round.txt"
+}
+
 say "# Sphere A/B: $label"
 say ""
 say "- A: $A ($(du -h "$A" | cut -f1)), B: $B ($(du -h "$B" | cut -f1)); branch $(git rev-parse --short HEAD)"
@@ -89,6 +109,13 @@ for round in $(seq "$rounds"); do
     for build in A B; do
         bin=$A
         [ "$build" = B ] && bin=$B
+        if [ -n "${OFFSCREEN:-}" ]; then
+            offscreen home "$build" "$bin" --bench 12 --offscreen
+            offscreen swarm "$build" "$bin" --bench 12 --offscreen --swarm
+            offscreen apps "$build" "$bin" --bench 12 --offscreen --apps
+            offscreen work "$build" "$bin" --bench 12 --offscreen --work
+            continue
+        fi
         visible home "$build" "$bin" --demo
         visible swarm "$build" "$bin" --demo --swarm
         bench_ab bench-home "$build" "$bin" --bench 8
