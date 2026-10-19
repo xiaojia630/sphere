@@ -95,7 +95,7 @@ pub fn setup(mut commands: Commands, f: Res<UiFonts>, root: Res<crate::hud::Over
                 flex_basis: px(440),
                 min_width: px(0),
                 height: px(48),
-                padding: UiRect { left: px(8), right: px(14), ..default() },
+                padding: UiRect::horizontal(px(14)),
                 column_gap: px(12),
                 align_items: AlignItems::Center,
                 border: UiRect::all(px(1)),
@@ -108,17 +108,6 @@ pub fn setup(mut commands: Commands, f: Res<UiFonts>, root: Res<crate::hud::Over
             BorderColor::all(with_alpha(line, 0.34)),
         ))
         .id();
-    // the mic (voice arrives with M5): a 32 px ring with a small capsule
-    let mic = commands
-        .spawn((
-            Node { width: px(32), height: px(32), flex_shrink: 0.0, border: UiRect::all(px(1)), border_radius: BorderRadius::MAX, justify_content: JustifyContent::Center, align_items: AlignItems::Center, ..default() },
-            BorderColor::all(with_alpha(line, 0.34)),
-        ))
-        .id();
-    let cap = commands
-        .spawn((Node { width: px(5), height: px(9), border: UiRect::all(px(1)), border_radius: BorderRadius::all(px(2.5)), ..default() }, BorderColor::all(role_color(Role::Hot))))
-        .id();
-    commands.entity(mic).add_child(cap);
     let prompt = commands.spawn((Text::new("›"), font(&f.mono, 18.0, 0.0), TextColor(role_color(Role::Fill)))).id();
     let text = commands
         .spawn((
@@ -143,7 +132,7 @@ pub fn setup(mut commands: Commands, f: Res<UiFonts>, root: Res<crate::hud::Over
         .id();
     let hint_t = commands.spawn((Text::new("ENTER"), font(&f.ui700, 9.5, 1.9), TextColor(role_color(Role::Dim)), LineHeight::Px(9.5))).id();
     commands.entity(hint).add_child(hint_t);
-    commands.entity(bar).add_children(&[mic, prompt, text, caret, spacer, hint]);
+    commands.entity(bar).add_children(&[prompt, text, caret, spacer, hint]);
     commands.entity(dock).add_child(bar);
     commands.entity(root.0).add_child(wrap);
 }
