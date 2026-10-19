@@ -356,12 +356,18 @@ fn spawn_sphered() -> Result<(), String> {
     cmd.spawn().map(|_| ()).map_err(|e| format!("could not start sphered ({}): {e}", sphered_exe().display()))
 }
 
+/// The sphered socket, and whether it is the app's own. SPHERE_SOCKET points the app at another sphered (tests, a
+/// second state dir); the app then never starts or restarts one itself.
+fn socket() -> (PathBuf, bool) {
+    match std::env::var_os("SPHERE_SOCKET") {
+        Some(s) => (PathBuf::from(s), false),
+        None => (sphere_proto::paths::default_socket(), true),
+    }
+}
+
 async fn connect(sh: &Mutex<Shared>) -> Client {
-    // SPHERE_SOCKET points the app at another sphered (tests, a second state dir); the app then never
-    // starts one itself.
-    let custom = std::env::var_os("SPHERE_SOCKET").map(PathBuf::from);
-    let socket = custom.clone().unwrap_or_else(sphere_proto::paths::default_socket);
-    let mut started = custom.is_some();
+    let (socket, own) = socket();
+    let mut started = !own;
     let mut backoff = Duration::from_millis(100);
     loop {
         match Client::connect(&socket).await {
@@ -384,9 +390,11 @@ async fn connect(sh: &Mutex<Shared>) -> Client {
 }
 
 async fn run(sh: Arc<Mutex<Shared>>, mut rx: mpsc::UnboundedReceiver<Cmd>) {
+    // what was done about an out-of-date sphered, kept across reconnects so it happens once
+    let mut up = crate::restart::Upgrade::default();
     loop {
         let client = connect(&sh).await;
-        if let Err(e) = session(&sh, &client, &mut rx).await {
+        if let Err(e) = session(&sh, &client, &mut rx, &mut up).await {
             set_link(&sh, Link::Down(e));
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
@@ -401,10 +409,15 @@ const PING: Duration = Duration::from_secs(2);
 /// and serve commands. A snapshot is taken again only if an event was missed (or one is not understood): the mirror
 /// starts over from it and goes on. Sphered dropping us ends the session and the next one starts afresh. The two
 /// timers, the ping and the look for Claude sessions running outside Sphere, run only while Sphere is on screen (the
-/// window coming back wakes them with `Cmd::Shown`).
-async fn session(sh: &Arc<Mutex<Shared>>, c: &Client, rx: &mut mpsc::UnboundedReceiver<Cmd>) -> Result<(), String> {
+/// window coming back wakes them with `Cmd::Shown`). An out-of-date sphered is restarted once no agent runs (`restart`):
+/// checked on connecting and, while the versions differ, after each event.
+async fn session(sh: &Arc<Mutex<Shared>>, c: &Client, rx: &mut mpsc::UnboundedReceiver<Cmd>, up: &mut crate::restart::Upgrade) -> Result<(), String> {
     c.hello(ClientKind::App).await.map_err(|e| e.to_string())?;
+    let daemon = c.status().await.map_err(|e| e.to_string())?.version;
     let snap = c.snapshot().await.map_err(|e| e.to_string())?;
+    if upgrade(sh, up, &daemon, running(&snap.tasks)).await {
+        return Ok(());
+    }
     let seq = snap.seq;
     // backfill the runs of every active task and the most recent others up to the snapshot (the swarm shows each
     // active agent's steps), then the subscription carries on
@@ -449,6 +462,13 @@ async fn session(sh: &Arc<Mutex<Shared>>, c: &Client, rx: &mut mpsc::UnboundedRe
                         let snap = c.snapshot().await.map_err(|e| e.to_string())?;
                         mirror = Mirror::connect(snap, &mut sh.lock().unwrap());
                         mirror.fold(&ev, &mut sh.lock().unwrap()).map_err(|e| format!("{gap}; {e}"))?;
+                    }
+                    // an out-of-date sphered waiting for the agents to finish
+                    if daemon != env!("CARGO_PKG_VERSION") {
+                        let n = running(&sh.lock().unwrap().tasks);
+                        if upgrade(sh, up, &daemon, n).await {
+                            return Ok(());
+                        }
                     }
                 }
                 // typing frames: the app shows nothing of them
@@ -514,6 +534,41 @@ async fn session(sh: &Arc<Mutex<Shared>>, c: &Client, rx: &mut mpsc::UnboundedRe
                     }
                 });
             }
+        }
+    }
+}
+
+/// Agents sphered is running or about to: queued, working or waiting on you.
+fn running(tasks: &[TaskView]) -> usize {
+    tasks.iter().filter(|t| matches!(t.state, sphere_proto::TaskState::Queued | sphere_proto::TaskState::Working | sphere_proto::TaskState::NeedsYou)).count()
+}
+
+/// Acts on a sphered whose version differs from the app's (see `restart`). True when sphered was stopped, so the
+/// session ends and the reconnect starts the bundled one. Only the app's own sphered is touched; sphere-host never.
+async fn upgrade(sh: &Mutex<Shared>, up: &mut crate::restart::Upgrade, daemon: &str, running: usize) -> bool {
+    use crate::restart::{words, Act};
+    let app = env!("CARGO_PKG_VERSION");
+    let (socket, own) = socket();
+    if !own {
+        return false;
+    }
+    let Some(act) = up.step(app, daemon, running) else { return false };
+    if act != Act::Restart {
+        if let Some(w) = words(act, app, daemon) {
+            note(sh, w);
+        }
+        return false;
+    }
+    let stopped = tokio::task::spawn_blocking(move || crate::restart::stop_sphered(&crate::restart::Real, &socket, Duration::from_secs(5))).await.map_err(|e| e.to_string()).and_then(|r| r);
+    match stopped {
+        Ok(()) => {
+            set_link(sh, Link::Starting);
+            true
+        }
+        Err(e) => {
+            up.give_up();
+            note(sh, format!("Background service is out of date (sphered {daemon}, app {app}); could not restart it: {e}"));
+            false
         }
     }
 }
@@ -936,7 +991,7 @@ mod tests {
                         }
                         "history" => serde_json::json!({"events": []}),
                         "subscribe" => serde_json::json!({"seq": snaps[0].seq}),
-                        "status" => serde_json::json!({"seq": snaps[0].seq, "version": "test", "active": 0, "queued": 0, "needs_you": 0, "cost_today_usd": 0.0, "tasks": [], "requests": [], "host_pid": null}),
+                        "status" => serde_json::json!({"seq": snaps[0].seq, "version": env!("CARGO_PKG_VERSION"), "active": 0, "queued": 0, "needs_you": 0, "cost_today_usd": 0.0, "tasks": [], "requests": [], "host_pid": null}),
                         _ => serde_json::json!({"ok": true}),
                     };
                     let reply = serde_json::json!({"jsonrpc": "2.0", "id": req["id"], "result": result});
@@ -990,7 +1045,7 @@ mod tests {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let client = Client::connect(&fake.path).await.unwrap();
         let s = sh.clone();
-        (sh, tx, tokio::spawn(async move { session(&s, &client, &mut rx).await }))
+        (sh, tx, tokio::spawn(async move { session(&s, &client, &mut rx, &mut crate::restart::Upgrade::default()).await }))
     }
 
     /// Waits (five seconds at most) for `ok` to hold.
@@ -1024,7 +1079,8 @@ mod tests {
         .await;
         // the link used to fetch a snapshot some 80 ms after an event: give it three times that
         tokio::time::sleep(Duration::from_millis(250)).await;
-        assert_eq!((fake.calls("hello"), fake.calls("snapshot"), fake.calls("subscribe"), fake.calls("status")), (1, 1, 1, 0));
+        // the one status is the version check on connecting; a ping would be a second
+        assert_eq!((fake.calls("hello"), fake.calls("snapshot"), fake.calls("subscribe"), fake.calls("status")), (1, 1, 1, 1));
         {
             let s = sh.lock().unwrap();
             assert_eq!(s.link, Some(Link::Connected));
@@ -1052,8 +1108,9 @@ mod tests {
         let fake = Fake::start("ping", vec![snap], vec![], false);
         let (sh, _tx, _task) = connected(&fake).await;
         until(|| sh.lock().unwrap().link == Some(Link::Connected)).await;
-        assert_eq!(fake.calls("status"), 0, "no ping at once");
-        until(|| fake.calls("status") > 0).await;
+        // a ping is a status call, after the one that checks the version on connecting
+        assert_eq!(fake.calls("status"), 1, "no ping at once");
+        until(|| fake.calls("status") > 1).await;
         until(|| sh.lock().unwrap().rtt_ms.is_some()).await;
         assert_eq!(fake.calls("snapshot"), 1);
     }
@@ -1067,7 +1124,7 @@ mod tests {
         tx.send(Cmd::Shown).unwrap();
         tx.send(Cmd::Interrupt { task: "t1".into() }).unwrap();
         until(|| fake.calls("task.interrupt") == 1).await;
-        assert_eq!(fake.calls("status"), 0, "the window being shown again changes nothing while the timer is already on");
+        assert_eq!(fake.calls("status"), 1, "the window being shown again changes nothing while the timer is already on");
     }
 
     #[tokio::test(flavor = "current_thread")]

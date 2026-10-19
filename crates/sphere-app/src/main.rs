@@ -38,6 +38,7 @@ mod sysapp;
 mod sysstats;
 mod takeover;
 mod theme;
+mod restart;
 mod review;
 mod stats;
 mod term;
