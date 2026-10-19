@@ -100,15 +100,9 @@ fn safe_relative(p: &str) -> bool {
             .any(|c| matches!(c, std::path::Component::ParentDir))
 }
 
-/// Create the workspace for a task: a worktree on `sphere/<slug>`, or the repo
+/// Create the workspace for a task: a detached worktree (see `ensure_branch`), or the repo
 /// itself with `in_place`. Runs the repo's copy list and setup command.
-pub fn prepare(
-    worktrees: &Path,
-    repo: &Path,
-    task_id: &str,
-    title: &str,
-    in_place: bool,
-) -> Result<Workspace> {
+pub fn prepare(worktrees: &Path, repo: &Path, task_id: &str, in_place: bool) -> Result<Workspace> {
     let top = repo_toplevel(repo)?;
     let base = git(&top, &["rev-parse", "HEAD"]).context("the repository has no commits yet")?;
     if in_place {
@@ -126,13 +120,6 @@ pub fn prepare(
     if let Some(parent) = workdir.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let base_name = format!("sphere/{}", slug(title));
-    let mut branch = base_name.clone();
-    let mut n = 2;
-    while branch_exists(&top, &branch) {
-        branch = format!("{base_name}-{n}");
-        n += 1;
-    }
     // forget worktrees whose folders are gone: task ids start again with a fresh database, and git refuses a
     // path that is still registered to a deleted worktree
     let _ = git(&top, &["worktree", "prune"]);
@@ -141,8 +128,7 @@ pub fn prepare(
         &[
             "worktree",
             "add",
-            "-b",
-            &branch,
+            "--detach",
             &workdir.to_string_lossy(),
             "HEAD",
         ],
@@ -192,9 +178,29 @@ pub fn prepare(
     }
     Ok(Workspace {
         workdir,
-        branch: Some(branch),
+        branch: None,
         base,
     })
+}
+
+/// Puts a detached task worktree on its own unique `sphere/<slug>` branch (uncommitted changes come along).
+pub fn ensure_branch(workdir: &Path, repo: &Path, title: &str) -> Result<String> {
+    // two refreshes can race: one at a time, and a worktree already on a branch keeps it
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    if let Ok(cur) = git(workdir, &["symbolic-ref", "--quiet", "--short", "HEAD"]) {
+        return Ok(cur);
+    }
+    let top = repo_toplevel(repo)?;
+    let base_name = format!("sphere/{}", slug(title));
+    let mut branch = base_name.clone();
+    let mut n = 2;
+    while branch_exists(&top, &branch) {
+        branch = format!("{base_name}-{n}");
+        n += 1;
+    }
+    git(workdir, &["switch", "-c", &branch])?;
+    Ok(branch)
 }
 
 /// Files changed since `base`, from `git diff --numstat` plus untracked files.
@@ -275,29 +281,48 @@ mod tests {
     }
 
     #[test]
-    fn creates_a_worktree_on_its_own_branch_and_avoids_branch_collisions() {
+    fn creates_a_detached_worktree_and_branches_it_on_demand_avoiding_collisions() {
         let tmp = tempfile::tempdir().unwrap();
         let repo = tmp.path().join("myrepo");
         init_repo(&repo);
         let wt = tmp.path().join("worktrees");
 
-        let a = prepare(&wt, &repo, "t1", "Fix login", false).unwrap();
+        let a = prepare(&wt, &repo, "t1", false).unwrap();
         assert_eq!(a.workdir, wt.join("myrepo").join("t1"));
-        assert_eq!(a.branch.as_deref(), Some("sphere/fix-login"));
+        assert_eq!(a.branch, None);
         assert!(a.workdir.join("README.md").exists());
+        assert_eq!(
+            git(&a.workdir, &["rev-parse", "--abbrev-ref", "HEAD"]).unwrap(),
+            "HEAD",
+            "detached"
+        );
+        std::fs::write(a.workdir.join("new.txt"), "x\n").unwrap();
+        assert_eq!(
+            ensure_branch(&a.workdir, &repo, "Fix login").unwrap(),
+            "sphere/fix-login"
+        );
         assert_eq!(
             git(&a.workdir, &["rev-parse", "--abbrev-ref", "HEAD"]).unwrap(),
             "sphere/fix-login"
         );
+        assert!(a.workdir.join("new.txt").exists(), "changes come along");
         assert_eq!(
             git(&repo, &["rev-parse", "--abbrev-ref", "HEAD"]).unwrap(),
             "main",
             "the checkout is untouched"
         );
 
-        let b = prepare(&wt, &repo, "t2", "Fix login", false).unwrap();
-        assert_eq!(b.branch.as_deref(), Some("sphere/fix-login-2"));
+        let b = prepare(&wt, &repo, "t2", false).unwrap();
+        assert_eq!(
+            ensure_branch(&b.workdir, &repo, "Fix login").unwrap(),
+            "sphere/fix-login-2"
+        );
         assert_eq!(a.base, b.base);
+        assert_eq!(
+            ensure_branch(&b.workdir, &repo, "Fix login").unwrap(),
+            "sphere/fix-login-2",
+            "a second call keeps the branch"
+        );
     }
 
     #[test]
@@ -306,12 +331,11 @@ mod tests {
         let repo = tmp.path().join("myrepo");
         init_repo(&repo);
         let wt = tmp.path().join("worktrees");
-        let a = prepare(&wt, &repo, "t1", "Fix login", false).unwrap();
+        let a = prepare(&wt, &repo, "t1", false).unwrap();
         std::fs::remove_dir_all(&a.workdir).unwrap();
         // a fresh database hands out t1 again
-        let b = prepare(&wt, &repo, "t1", "Fix login", false).unwrap();
+        let b = prepare(&wt, &repo, "t1", false).unwrap();
         assert_eq!(b.workdir, a.workdir);
-        assert_eq!(b.branch.as_deref(), Some("sphere/fix-login-2"));
         assert!(b.workdir.join("README.md").exists());
     }
 
@@ -320,7 +344,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let repo = tmp.path().join("r");
         init_repo(&repo);
-        let w = prepare(&tmp.path().join("wt"), &repo, "t1", "x", true).unwrap();
+        let w = prepare(&tmp.path().join("wt"), &repo, "t1", true).unwrap();
         assert_eq!(w.workdir, repo.canonicalize().unwrap());
         assert_eq!(w.branch, None);
         assert!(!tmp.path().join("wt").exists());
@@ -338,7 +362,7 @@ mod tests {
             "copy = [\".env\", \"missing.txt\"]\nsetup = \"echo ready > setup-ran.txt\"\n",
         )
         .unwrap();
-        let w = prepare(&tmp.path().join("wt"), &repo, "t1", "x", false).unwrap();
+        let w = prepare(&tmp.path().join("wt"), &repo, "t1", false).unwrap();
         assert_eq!(
             std::fs::read_to_string(w.workdir.join(".env")).unwrap(),
             "SECRET=1\n"
@@ -360,18 +384,18 @@ mod tests {
             "setup = \"echo nope >&2; exit 3\"\n",
         )
         .unwrap();
-        let err = prepare(&tmp.path().join("wt"), &repo, "t1", "x", false).unwrap_err();
+        let err = prepare(&tmp.path().join("wt"), &repo, "t1", false).unwrap_err();
         assert!(format!("{err:#}").contains("nope"), "{err:#}");
 
         std::fs::write(repo.join(".sphere/config.toml"), "copy = [\"../escape\"]\n").unwrap();
-        let err = prepare(&tmp.path().join("wt"), &repo, "t2", "y", false).unwrap_err();
+        let err = prepare(&tmp.path().join("wt"), &repo, "t2", false).unwrap_err();
         assert!(format!("{err:#}").contains("refusing"), "{err:#}");
     }
 
     #[test]
     fn not_a_repo_is_a_clear_error() {
         let tmp = tempfile::tempdir().unwrap();
-        let err = prepare(&tmp.path().join("wt"), tmp.path(), "t1", "x", false).unwrap_err();
+        let err = prepare(&tmp.path().join("wt"), tmp.path(), "t1", false).unwrap_err();
         assert!(
             format!("{err:#}").contains("not a git repository"),
             "{err:#}"
@@ -383,7 +407,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let repo = tmp.path().join("r");
         init_repo(&repo);
-        let w = prepare(&tmp.path().join("wt"), &repo, "t1", "x", false).unwrap();
+        let w = prepare(&tmp.path().join("wt"), &repo, "t1", false).unwrap();
         assert!(files_touched(&w.workdir, &w.base).unwrap().is_empty());
         std::fs::write(w.workdir.join("README.md"), "hello\nworld\n").unwrap();
         std::fs::write(w.workdir.join("new.txt"), "a\nb\nc\n").unwrap();

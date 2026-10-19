@@ -834,7 +834,7 @@ pub fn build_agents_ui(commands: &mut Commands, root: Entity, f: &UiFonts, agent
         let (chip_txt, chip_fg, chip_bg, chip_border) = match a.state {
             AState::Working => ("WORKING", line, Color::NONE, g1),
             AState::Needs => ("NEEDS YOU", Color::BLACK, acc, acc),
-            AState::Done => ("DONE", ok, Color::NONE, with_alpha(ok, 0.7)),
+            AState::Done => (a.chip.unwrap_or("DONE"), ok, Color::NONE, with_alpha(ok, 0.7)),
             AState::Failed => (a.chip.unwrap_or("FAILED"), bad, Color::NONE, with_alpha(bad, 0.7)),
         };
         let chip = commands

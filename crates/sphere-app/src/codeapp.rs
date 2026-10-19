@@ -991,6 +991,10 @@ pub fn keys(
                     toasts.push("The agent is still working: wait for it, or stop it first");
                     continue;
                 }
+                if act != Act::Discard && (crate::live::answered(&t) || (!t.in_place && t.branch.is_none())) {
+                    toasts.push("Answered · nothing to merge: the agent changed no files");
+                    continue;
+                }
                 if t.workdir.as_deref().is_none_or(|w| !std::path::Path::new(w).is_dir()) {
                     toasts.push("The worktree is gone: nothing to act on");
                     continue;
@@ -1469,10 +1473,11 @@ pub fn draw(mut commands: Commands, app: Res<CodeApp>, svc: Res<Service>, roots:
         return;
     };
     draw_task(c, &ui, root(Pane::Task), &t, &run, app.review.as_ref());
-    draw_tree(c, &ui, root(Pane::Tree), &app, Some(app.file));
+    let answered = crate::live::answered(&t);
+    draw_tree(c, &ui, root(Pane::Tree), &app, Some(app.file), answered);
     draw_diff(c, &ui, root(Pane::Diff), &app, &run);
     draw_tests(c, &ui, root(Pane::Tests), t.workdir.as_deref(), "the agent's worktree", app.tests.as_ref());
-    draw_acts(c, &ui, root(Pane::Acts), &app);
+    draw_acts(c, &ui, root(Pane::Acts), &app, answered);
 }
 
 fn draw_top(c: &mut Commands, ui: &Ui, root: Entity, t: Option<&TaskView>) {
@@ -1597,7 +1602,7 @@ fn bar_blocks(c: &mut Commands, ui: &Ui, add: usize, del: usize) -> Entity {
     row
 }
 
-fn draw_tree(c: &mut Commands, ui: &Ui, root: Entity, app: &CodeApp, selected: Option<usize>) {
+fn draw_tree(c: &mut Commands, ui: &Ui, root: Entity, app: &CodeApp, selected: Option<usize>, answered: bool) {
     let b = ui.body(c, root);
     let r = app.review.as_ref();
     let folder = app.is_folder();
@@ -1628,7 +1633,7 @@ fn draw_tree(c: &mut Commands, ui: &Ui, root: Entity, app: &CodeApp, selected: O
         return;
     }
     if r.files.is_empty() {
-        let s = if folder { "Clean: no uncommitted changes".to_string() } else if r.merged { format!("Merged into {}: nothing left to review", r.base) } else { format!("No changes yet against {}", r.base) };
+        let s = if folder { "Clean: no uncommitted changes".to_string() } else if answered { "Answered · nothing to merge".to_string() } else if r.merged { format!("Merged into {}: nothing left to review", r.base) } else { format!("No changes yet against {}", r.base) };
         note(c, s, ui.dim);
         return;
     }
@@ -1888,7 +1893,7 @@ fn draw_tests(c: &mut Commands, ui: &Ui, root: Entity, wd: Option<&str>, what: &
     c.entity(inner).add_children(&[sp, foot]);
 }
 
-fn draw_acts(c: &mut Commands, ui: &Ui, root: Entity, app: &CodeApp) {
+fn draw_acts(c: &mut Commands, ui: &Ui, root: Entity, app: &CodeApp, answered: bool) {
     let b = ui.body(c, root);
     let (a, d) = app.review.as_ref().map(|r| (r.added(), r.removed())).unwrap_or((0, 0));
     let tests = match &app.tests {
@@ -1908,7 +1913,14 @@ fn draw_acts(c: &mut Commands, ui: &Ui, root: Entity, app: &CodeApp) {
     c.entity(b).add_children(&[h, inner]);
     let armed = app.armed.map(|x| x.0);
     let buttons = action_buttons(app.is_folder());
+    if answered {
+        let n = ui.text(c, "Answered · nothing to merge", &ui.f.ui500, 12.0, 0.5, ui.dim);
+        c.entity(inner).add_child(n);
+    }
     for (label, key, code, act, role, filled) in buttons {
+        if answered && matches!(act, Some(Act::Merge | Act::Pr)) {
+            continue;
+        }
         let is_armed = act.is_some() && act == armed;
         // armed: amber (red for discard) until you press again
         let col = if is_armed && role != Role::Bad { role_color(Role::Acc) } else { role_color(role) };
@@ -1952,13 +1964,13 @@ fn draw_folder(c: &mut Commands, ui: &Ui, roots: &CodeRoots, app: &CodeApp, dir:
         Some(FileView::Diff(i)) => Some(i),
         _ => None,
     };
-    draw_tree(c, ui, root(Pane::Tree), app, sel);
+    draw_tree(c, ui, root(Pane::Tree), app, sel, false);
     match sel {
         Some(_) => draw_diff(c, ui, root(Pane::Diff), app, &crate::service::Run::default()),
         None => draw_file_view(c, ui, root(Pane::Diff), app),
     }
     draw_tests(c, ui, root(Pane::Tests), Some(&dir.to_string_lossy()), "the folder", app.tests.as_ref());
-    draw_acts(c, ui, root(Pane::Acts), app);
+    draw_acts(c, ui, root(Pane::Acts), app, false);
 }
 
 /// The left pane: the folder as a tree, folders first. Changed files carry their git letter.
