@@ -62,6 +62,12 @@ pub fn setup(mut cursor: Query<&mut CursorOptions, With<PrimaryWindow>>, args: R
     }
 }
 
+/// Whether the system cursor shows: over the dock (where the reticle hides), or with the pointer outside the
+/// window (where the reticle can't follow).
+fn system_cursor(inside: bool, over_dock: bool) -> bool {
+    !inside || over_dock
+}
+
 type PanelPick<'w, 's> = Query<'w, 's, (Entity, &'static Panel, &'static GlobalTransform, &'static Visibility)>;
 
 type TilePick<'w, 's> = Query<'w, 's, (&'static crate::orbit::Tile, &'static GlobalTransform, &'static Visibility)>;
@@ -460,10 +466,22 @@ pub fn draw_reticle(
     agents: Res<crate::core::Agents>,
     stats: Res<crate::sysstats::SysStats>,
     swarm: Res<crate::swarm::Swarm>,
+    args: Res<crate::Args>,
+    mut cursor: Query<&mut CursorOptions, With<PrimaryWindow>>,
     mut at: Local<Vec2>,
     mut q: ParamSet<(Query<(&mut Node, &mut UiTransform, &mut Visibility), With<Reticle>>, Query<(&mut Node, &mut Visibility), With<Tip>>, Query<(&TipText, &mut Text)>)>,
 ) {
     let dt = time.delta_secs();
+    // over the dock and the command bar the reticle steps aside for the system cursor (a text caret over the
+    // bar): one of the two always shows
+    if !args.offline() {
+        let want = system_cursor(ms.pos.is_some(), matches!(ms.hit, Some(Hit::Visor)));
+        for mut c in &mut cursor {
+            if c.visible != want {
+                c.visible = want;
+            }
+        }
+    }
     let Some(p) = ms.pos else {
         for (_, _, mut v) in &mut q.p0() {
             v.set_if_neq(Visibility::Hidden);
@@ -522,5 +540,19 @@ pub fn draw_reticle(
                 t.0 = want.clone();
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_cursor_always_shows() {
+        // over the scene the reticle is the cursor; over the dock (the reticle hides there) and outside the
+        // window the system cursor shows
+        assert!(!system_cursor(true, false));
+        assert!(system_cursor(true, true));
+        assert!(system_cursor(false, false));
     }
 }

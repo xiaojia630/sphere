@@ -818,6 +818,12 @@ pub fn keys(
     for c in clicks.take(APP) {
         match c {
             Click::Key(k) => codes.push((k, false)),
+            Click::Pick(i) if i >= PARENT_PICK => {
+                // a row of the parent column or the preview: go to its folder with that row picked
+                if let Some((dir, name)) = side_target(&app, i) {
+                    app.go(dir, Some(name));
+                }
+            }
             Click::Pick(i) => {
                 // a second click on the same row opens it
                 if i == app.cursor {
@@ -1306,6 +1312,31 @@ fn chip(c: &mut Commands, ui: &Ui, label: &str, key: KeyCode, on: bool) -> Entit
     e
 }
 
+/// Clicks on the side columns' rows: the parent column's from PARENT_PICK, the preview's from PREVIEW_PICK.
+const PARENT_PICK: usize = 1 << 20;
+const PREVIEW_PICK: usize = 2 << 20;
+
+fn side_pick(other: KeyCode, i: usize) -> usize {
+    if other == KeyCode::KeyH { PARENT_PICK + i } else { PREVIEW_PICK + i }
+}
+
+/// What a click on row `i` of a side column asks for: the folder to go to and the name to land on.
+fn side_target(app: &FilesApp, pick: usize) -> Option<(PathBuf, String)> {
+    if pick >= PREVIEW_PICK {
+        let i = pick - PREVIEW_PICK;
+        match &app.prev {
+            Some((dir, Preview::Dir(l))) => l.entries.get(i).map(|e| (dir.clone(), e.name.clone())),
+            _ => None,
+        }
+    } else if pick >= PARENT_PICK {
+        let i = pick - PARENT_PICK;
+        let dir = app.cwd.parent()?.to_path_buf();
+        app.parent.get(i).map(|e| (dir, e.name.clone()))
+    } else {
+        None
+    }
+}
+
 /// What a column shows: its rows, which one is the cursor, and where the window on them starts.
 struct Col<'a> {
     title: &'a str,
@@ -1348,8 +1379,9 @@ fn column_into(c: &mut Commands, ui: &Ui, b: Entity, col: Col) {
                 BackgroundColor(if on { with_alpha(ui.line, if col.active { 0.12 } else { 0.07 }) } else if picked { with_alpha(role_color(Role::Acc), 0.12) } else { Color::NONE }),
             ))
             .id();
-        // rows where you are pick (twice opens); the parent column goes up, the preview goes in
-        c.entity(row).insert(if col.active { Click::Pick(i) } else { Click::Key(col.other) });
+        // rows where you are pick (twice opens); a row in the parent column or the preview moves there with that row
+        // picked (its folder becomes the one you are in)
+        c.entity(row).insert(Click::Pick(if col.active { i } else { side_pick(col.other, i) }));
         let tint = if e.broken { role_color(Role::Bad) } else if e.dir { ui.hot } else { ui.dim };
         let ic = c.spawn((Text::new(icon(e)), font(&ui.f.mono, 11.0, 0.0), TextColor(tint), Node { width: px(16), flex_shrink: 0.0, ..default() })).id();
         let shown = if e.dir { format!("{}/", clip_name(&e.name, col.cells.saturating_sub(1))) } else { clip_name(&e.name, col.cells) };
@@ -1641,6 +1673,28 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         panic!("the worker never answered");
+    }
+
+    #[test]
+    fn a_click_on_a_folder_in_the_side_columns_goes_there_with_it_picked() {
+        let d = tmp("sidecols");
+        for f in ["a/one", "a/two/deep", "b"] {
+            std::fs::create_dir_all(d.join(f)).unwrap();
+        }
+        let mut toasts = crate::live::Toasts::default();
+        let mut app = FilesApp { open: true, ..Default::default() };
+        // in `a`, on `two`: the parent column lists a and b, the preview lists what's in `two`
+        app.go(d.join("a"), Some("two".into()));
+        settle(&mut app, &mut toasts);
+        assert_eq!(app.current(), Some(d.join("a/two")));
+        // a click on `b` in the parent column: you're in the parent with `b` picked (not just "up")
+        let bi = app.parent.iter().position(|e| e.name == "b").unwrap();
+        assert_eq!(side_target(&app, side_pick(KeyCode::KeyH, bi)), Some((d.clone(), "b".into())));
+        // a click on `deep` in the preview: you're in `two` with `deep` picked
+        assert_eq!(side_target(&app, side_pick(KeyCode::KeyL, 0)), Some((d.join("a/two"), "deep".into())));
+        // a row past the list is nothing
+        assert_eq!(side_target(&app, side_pick(KeyCode::KeyH, 99)), None);
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]
