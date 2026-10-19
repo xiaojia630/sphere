@@ -90,13 +90,25 @@ pub fn login_shell_path(timeout: Duration) -> Option<String> {
     parse_shell_output(&out)
 }
 
+/// A PATH of nothing but the system folders: what launchd gives an app opened from Finder or the Dock. Started
+/// from a terminal (the CLI, the tests) sphered already has the user's PATH and skips asking the shell.
+pub fn is_bare(path: &str) -> bool {
+    path.split(':')
+        .filter(|d| !d.is_empty())
+        .all(|d| matches!(d, "/usr/bin" | "/bin" | "/usr/sbin" | "/sbin"))
+}
+
 /// Sets this process's PATH to the merged one. Call it first thing in `main`, before any thread starts.
 pub fn fix_path() -> String {
     let current = std::env::var("PATH").unwrap_or_default();
     let home = std::env::var_os("HOME")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| "/".into());
-    let login = login_shell_path(Duration::from_secs(3));
+    let login = if is_bare(&current) {
+        login_shell_path(Duration::from_secs(3))
+    } else {
+        None
+    };
     let path = merged(&current, login.as_deref(), &home, |d| Path::new(d).is_dir());
     std::env::set_var("PATH", &path);
     path
@@ -140,6 +152,14 @@ mod tests {
             p,
             "/usr/bin:/bin:/usr/sbin:/sbin:/Users/me/.local/bin:/opt/homebrew/bin"
         );
+    }
+
+    #[test]
+    fn only_a_bare_path_asks_the_login_shell() {
+        assert!(is_bare("/usr/bin:/bin:/usr/sbin:/sbin"));
+        assert!(is_bare(""));
+        assert!(!is_bare("/Users/me/.local/bin:/usr/bin:/bin"));
+        assert!(!is_bare("/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"));
     }
 
     #[test]
