@@ -263,10 +263,10 @@ pub fn flows(
 fn next(m: &mut Moment, live: &Live, sound: &mut crate::sound::Sound, fx: &mut MomentFx) {
     m.holding = None;
     m.version += 1;
-    if waiting(live, m).is_empty() {
+    if crate::moment::pending_count(live, m) == 0 {
         m.all_done = Some(0.0);
         sound.play("done");
-        let words = "That's everything. Nothing needs you right now.";
+        let words = if waiting(live, m).is_empty() { "That's everything. Nothing needs you right now." } else { "That's everything for now. N brings back what you put off." };
         sound.speak(words);
         fx.ok = 0.0;
     } else {

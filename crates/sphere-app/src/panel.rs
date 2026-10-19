@@ -930,7 +930,7 @@ pub fn build_agents_ui(commands: &mut Commands, root: Entity, f: &UiFonts, agent
     if empty {
         let e = commands
             .spawn((
-                Text::new("No agents yet. Type a task in the bar below."),
+                Text::new("No agents running. Type a task in the bar below."),
                 font(&f.ui500, 13.0, 1.04),
                 TextColor(with_alpha(line, 0.7)),
                 LineHeight::Px(16.9),
@@ -1342,7 +1342,7 @@ mod tests {
         if full.is_empty() {
             let e = commands
                 .spawn((
-                    Text::new("No agents yet. Type a task in the bar below."),
+                    Text::new("No agents running. Type a task in the bar below."),
                     font(&f.ui500, 13.0, 1.04),
                     TextColor(with_alpha(line, 0.7)),
                     LineHeight::Px(16.9),

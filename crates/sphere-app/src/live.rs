@@ -116,15 +116,33 @@ fn rank(t: &TaskView) -> u8 {
     }
 }
 
-/// The panel's view of every task: the first rows (what needs you first, then working, then queued, then the most
-/// recent finished) and the counts. The panel and the ring show four rows at most, so only those are built: one pass
-/// over the tasks, no sort, and a row costs a few strings however many tasks there are.
-fn pick(tasks: &[TaskView], merged: &HashSet<String>) -> Roster {
+/// A task that failed or was stopped before its agent ever ran (no session, no step, no cost): a start
+/// that didn't happen, not an agent.
+fn never_ran(t: &TaskView) -> bool {
+    matches!(t.state, TaskState::Failed | TaskState::Stopped) && t.session_id.is_none() && t.steps == 0 && t.cost_usd == 0.0
+}
+
+/// How long a finished, failed or stopped agent stays in the panel.
+const RECENT_SECS: i64 = 24 * 3600;
+
+/// The panel's view of the agents: the first rows (what needs you first, then working, then queued, then the most
+/// recent finished) and the counts. Finished ones go after a day; starts that never ran are left out but the latest,
+/// so its error still shows. `now` is unix seconds. The panel and the ring show four rows at most, so only those are
+/// built: one pass over the tasks, no sort, and a row costs a few strings however many tasks there are.
+fn pick(tasks: &[TaskView], merged: &HashSet<String>, now: i64) -> Roster {
+    let recent = |t: &TaskView| crate::working::parse_rfc3339(&t.updated_at).is_none_or(|at| now - at < RECENT_SECS);
+    let latest_dud = tasks.iter().filter(|t| never_ran(t)).max_by(|a, b| a.updated_at.cmp(&b.updated_at)).map(|t| t.id.as_str());
+    let keep = |t: &TaskView| match t.state {
+        TaskState::NeedsYou | TaskState::Working | TaskState::Queued => true,
+        _ if never_ran(t) => latest_dud == Some(t.id.as_str()) && recent(t),
+        _ => recent(t),
+    };
     // a task goes ahead of an earlier one only if it ranks better or, at the same rank, changed more recently
     let ahead = |t: &TaskView, o: &TaskView| rank(t) < rank(o) || (rank(t) == rank(o) && t.updated_at > o.updated_at);
     let (mut top, mut n) = ([0usize; 4], 0);
-    let (mut working, mut waiting) = (0, 0);
-    for (i, t) in tasks.iter().enumerate() {
+    let (mut total, mut working, mut waiting) = (0, 0, 0);
+    for (i, t) in tasks.iter().enumerate().filter(|(_, t)| keep(t)) {
+        total += 1;
         match t.state {
             TaskState::Queued | TaskState::Working => working += 1,
             TaskState::NeedsYou => waiting += 1,
@@ -143,7 +161,7 @@ fn pick(tasks: &[TaskView], merged: &HashSet<String>) -> Roster {
         }
     }
     let rows = top[..n].iter().map(|&i| row(&tasks[i], merged.contains(&tasks[i].id))).collect();
-    Roster { rows, total: tasks.len(), working, waiting }
+    Roster { rows, total, working, waiting }
 }
 
 /// What the finished-task check found out about a task, and what it knew then: when the task last changed and where
@@ -290,10 +308,10 @@ pub fn check_merged(time: Res<Time<Real>>, svc: Res<Service>, mut t: Local<f32>,
 }
 
 /// Brings the Agents panel, the Timeline, the open requests and the toasts up to date with the shared slot. Runs its
-/// pass when the slot's version moved and does each part only if its input changed: the rows and counts on every
+/// pass when the slot's version moved or a minute turned, and does each part only if its input changed: the rows and counts on every
 /// pass (one scan, a few rows built), the Timeline arcs when one moved, the titles when a task joined; a resource is
 /// marked changed only when its content differs.
-pub fn sync(svc: Res<Service>, mut live: ResMut<Live>, mut agents: ResMut<Agents>, mut toasts: ResMut<Toasts>, args: Res<crate::Args>, mut seen: Local<(u64, u64)>, mut hidden: Local<bool>) {
+pub fn sync(svc: Res<Service>, mut live: ResMut<Live>, mut agents: ResMut<Agents>, mut toasts: ResMut<Toasts>, args: Res<crate::Args>, mut seen: Local<(u64, u64, i64)>, mut hidden: Local<bool>) {
     if args.offline() {
         if args.moment && live.requests.is_empty() {
             demo_request(&mut live);
@@ -305,10 +323,13 @@ pub fn sync(svc: Res<Service>, mut live: ResMut<Live>, mut agents: ResMut<Agents
     if was_hidden && !*hidden {
         svc.send(Cmd::Shown);
     }
+    // a finished agent leaves the panel a day after it last changed: look again each minute, not only on news
+    let now = crate::core::unix_now();
     let mut s = svc.shared.lock().unwrap();
-    if s.version == live.seen {
+    if s.version == live.seen && now / 60 == seen.2 {
         return;
     }
+    seen.2 = now / 60;
     // the version is bookkeeping: writing it must not wake what follows `Live`
     live.bypass_change_detection().seen = s.version;
     for n in s.notes.drain(..) {
@@ -320,7 +341,7 @@ pub fn sync(svc: Res<Service>, mut live: ResMut<Live>, mut agents: ResMut<Agents
         }
         live.link = s.link.clone();
     }
-    let roster = pick(&s.tasks, &s.merged);
+    let roster = pick(&s.tasks, &s.merged, now);
     if agents.differs(&roster) {
         agents.set_roster(roster);
     }
@@ -487,7 +508,7 @@ mod tests {
     fn every_agent_counts_and_the_panel_shows_three_and_more_past_four() {
         let tasks: Vec<TaskView> = (0..6).map(|i| task(&format!("t{i}"), TaskState::Working, &format!("2026-10-19T00:0{i}:00Z"))).collect();
         let mut agents = Agents::empty();
-        agents.set_roster(pick(&tasks, &HashSet::new()));
+        agents.set_roster(pick(&tasks, &HashSet::new(), NOW));
         assert_eq!(agents.working(), 6, "agents past the fourth still count");
         assert_eq!((agents.list.len(), agents.total), (4, 6), "four rows are kept, six agents are counted");
         assert_eq!(crate::panel::agent_rows(agents.total), (3, 3));
@@ -495,11 +516,36 @@ mod tests {
         assert_eq!(crate::panel::agent_rows(0), (0, 0));
     }
 
+    /// 2026-10-19T12:00:00Z
+    const NOW: i64 = 1_792_411_200;
+
+    #[test]
+    fn starts_that_never_ran_are_not_agents_but_the_latest_shows() {
+        let mut tasks: Vec<TaskView> = (0..5).map(|i| task(&format!("f{i}"), TaskState::Failed, &format!("2026-10-19T00:0{i}:00Z"))).collect();
+        let mut done = task("d1", TaskState::Done, "2026-10-18T13:00:00Z");
+        done.steps = 3;
+        tasks.push(done);
+        let mut ran = task("f9", TaskState::Failed, "2026-10-18T14:00:00Z");
+        ran.session_id = Some("s".into());
+        tasks.push(ran);
+        let names: Vec<String> = pick(&tasks, &HashSet::new(), NOW).rows.into_iter().map(|a| a.name).collect();
+        assert_eq!(names, vec!["Task f4", "Task f9", "Task d1"]);
+    }
+
+    #[test]
+    fn finished_agents_leave_after_a_day_but_working_ones_stay() {
+        let mut old = task("d0", TaskState::Done, "2026-10-17T10:00:00Z");
+        old.steps = 5;
+        let tasks = vec![old, task("w0", TaskState::Working, "2026-10-17T10:00:00Z"), task("x0", TaskState::Failed, "2026-10-17T11:00:00Z")];
+        let names: Vec<String> = pick(&tasks, &HashSet::new(), NOW).rows.into_iter().map(|a| a.name).collect();
+        assert_eq!(names, vec!["Task w0"]);
+    }
+
     #[test]
     fn a_merged_agent_reads_merged() {
         let tasks = vec![task("t1", TaskState::Done, "2026-10-19T00:00:00Z"), task("t2", TaskState::Done, "2026-10-19T00:01:00Z")];
         let merged: HashSet<String> = ["t1".to_string()].into();
-        let rows = pick(&tasks, &merged).rows;
+        let rows = pick(&tasks, &merged, NOW).rows;
         let step = |n: &str| rows.iter().find(|a| a.name == n).unwrap().step.clone();
         assert_eq!(step("Task t1"), "Merged · sphere/t1");
         assert_eq!(step("Task t2"), "Done: finished");
@@ -507,15 +553,22 @@ mod tests {
         assert_eq!(crate::appframe::finished(&tasks[1], &merged), "Finished");
     }
 
-    /// The rows as they were built before only the first were: every task, sorted whole. The oracle for `pick`.
-    fn every_row(tasks: &[TaskView], merged: &HashSet<String>) -> Vec<Agent> {
+    /// The rows as they were built before only the first were: every agent kept, sorted whole. The oracle for `pick`.
+    fn every_row(tasks: &[TaskView], merged: &HashSet<String>, now: i64) -> Vec<Agent> {
+        let recent = |t: &TaskView| crate::working::parse_rfc3339(&t.updated_at).is_none_or(|at| now - at < RECENT_SECS);
+        let latest_dud = tasks.iter().filter(|t| never_ran(t)).max_by(|a, b| a.updated_at.cmp(&b.updated_at)).map(|t| t.id.clone());
+        let keep = |t: &TaskView| match t.state {
+            TaskState::NeedsYou | TaskState::Working | TaskState::Queued => true,
+            _ if never_ran(t) => latest_dud.as_ref() == Some(&t.id) && recent(t),
+            _ => recent(t),
+        };
         let rank = |t: &TaskView| match t.state {
             TaskState::NeedsYou => 0,
             TaskState::Working => 1,
             TaskState::Queued => 2,
             _ => 3,
         };
-        let mut v: Vec<&TaskView> = tasks.iter().collect();
+        let mut v: Vec<&TaskView> = tasks.iter().filter(|t| keep(t)).collect();
         v.sort_by(|a, b| rank(a).cmp(&rank(b)).then_with(|| b.updated_at.cmp(&a.updated_at)));
         v.into_iter().map(|t| row(t, merged.contains(&t.id))).collect()
     }
@@ -530,13 +583,19 @@ mod tests {
         };
         for round in 0..400 {
             let n = next(14) as usize;
-            // few distinct times, so many tasks tie and the order of equals is tested
-            let tasks: Vec<TaskView> = (0..n).map(|i| task(&format!("t{i}"), states[next(6) as usize], &format!("2026-10-19T00:0{}:00Z", next(3)))).collect();
+            // few distinct times, so many tasks tie and the order of equals is tested; some are days old
+            let tasks: Vec<TaskView> = (0..n)
+                .map(|i| {
+                    let mut t = task(&format!("t{i}"), states[next(6) as usize], &format!("2026-10-1{}T00:0{}:00Z", 7 + next(3), next(3)));
+                    t.steps = next(2) as u32;
+                    t
+                })
+                .collect();
             let merged: HashSet<String> = tasks.iter().filter(|_| next(3) == 0).map(|t| t.id.clone()).collect();
-            let all = every_row(&tasks, &merged);
-            let r = pick(&tasks, &merged);
-            assert_eq!(r.rows, all[..n.min(4)], "round {round}: {} tasks", n);
-            assert_eq!(r.total, n);
+            let all = every_row(&tasks, &merged, NOW);
+            let r = pick(&tasks, &merged, NOW);
+            assert_eq!(r.rows, all[..all.len().min(4)], "round {round}: {} tasks", n);
+            assert_eq!(r.total, all.len());
             assert_eq!(r.working, all.iter().filter(|a| a.state == AState::Working).count());
             assert_eq!(r.waiting, all.iter().filter(|a| a.state == AState::Needs).count());
             assert_eq!(r, Roster::of(&all), "the same roster as the whole list gives");
