@@ -177,7 +177,9 @@ fn main() {
     interactive_qos();
     let mut app = App::new();
     // screenshots and demos play Fast unless told otherwise; the app plays what was chosen last
-    motion::use_motion(args.motion.unwrap_or_else(|| if args.offline() { motion::Motion::Fast } else { motion::saved() }));
+    let (m, boost) = if args.offline() { (motion::Motion::Fast, 1.0) } else { motion::saved() };
+    motion::use_motion(args.motion.unwrap_or(m));
+    motion::use_boost(boost);
     app.insert_resource(args.clone())
         .insert_resource(ClearColor(Color::BLACK))
         .add_plugins(default_plugins(&args))

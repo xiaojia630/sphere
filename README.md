@@ -225,7 +225,7 @@ More keys:
 - W: the Working view on the latest agent (it also opens when you start one). P interrupts its turn, T brings its output forward, Esc goes home.
 - N: the Agent moment for what needs you (it rises by itself when a request arrives). Enter answers yes, E changes (type, Enter), L is later, ← → steps through them, Esc puts them away. Sphere reads each one out.
 - Terminal: T focuses it, Esc releases it, Cmd+T new tab, Cmd+W close, Cmd+1..9 switch, Cmd+V paste. Tabs run your login shell inside sphere-host, so they survive the app closing: the next launch re-attaches them (replaying their output). If the host can't be reached they live in the app.
-- Motion: transitions play Fast by default (apps, the Working view, the Agent moment and the app orbit settle in about a third of a second). `motion cinematic` in the command bar brings back the slower original timing, `motion fast` returns, and `motion` alone switches. The choice is remembered.
+- Motion: transitions play Fast by default (apps, the Working view, the Agent moment and the app orbit settle in about a fifth of a second). `motion cinematic` in the command bar brings back the slower original timing, `motion fast` returns, and `motion` alone switches. `motion 1.5` plays Fast 1.5 times quicker still (0.25 to 4). The choice is remembered.
 - Option+Space (macOS) brings Sphere up over anything and hides it again. When something needs you while Sphere isn't in front, you get a notification.
 
 Sounds are synthesised and rendered to WAV (`crates/sphere-app/assets/sounds`). Speech uses macOS `say` with the Daniel voice.

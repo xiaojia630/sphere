@@ -247,7 +247,17 @@ pub(crate) fn home_command(t: &str, acts: &mut crate::home::Acts, open: &mut cra
         // "motion fast", "motion cinematic"; "motion" alone switches
         use crate::motion::{self, Motion};
         let rest = l.split_once(' ').map(|(_, r)| r).unwrap_or("");
+        // "motion 1.5": Fast at 1.5 times its speed
+        if let Some(b) = rest.trim().trim_end_matches('x').parse::<f32>().ok().filter(|b| b.is_finite() && *b > 0.0) {
+            motion::set_boost(b);
+            toasts.push(format!("Motion · Fast × {}", (motion::boost() * 100.0).round() / 100.0));
+            return true;
+        }
         let m = Motion::from_key(rest).unwrap_or(if motion::get() == Motion::Fast { Motion::Cinematic } else { Motion::Fast });
+        if m == Motion::Fast && Motion::from_key(rest).is_some() {
+            // "motion fast" is Fast as it comes
+            motion::use_boost(1.0);
+        }
         motion::set(m);
         toasts.push(format!("Motion · {}", if m == Motion::Fast { "Fast" } else { "Cinematic" }));
         return true;
