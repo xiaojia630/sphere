@@ -326,16 +326,26 @@ pub fn draw_rolodex(
         node.top = px(136.0 - mid as f32 * 34.0);
     }
     let line = role_color(Role::Line);
-    // the window fades its top and bottom quarter
-    let fade = |k: usize| -> f32 {
-        let d = (k as f32 - mid as f32).abs();
-        if d <= 2.0 { 1.0 } else { (1.0 - (d - 2.0) / 2.5).max(0.0) }
-    };
+    let fade = |k: usize| rolo_fade(k, mid, n);
     for (t, mut c) in &mut texts {
         c.set_if_neq(TextColor(if t.0 == mid { role_color(Role::Hot) } else { with_alpha(line, 0.5 * fade(t.0)) }));
     }
     for (d, mut c) in &mut dots {
         c.set_if_neq(BackgroundColor(if d.0 == mid { role_color(Role::Fill) } else { with_alpha(line, 0.6 * fade(d.0)) }));
+    }
+}
+
+/// How bright row `k` of the drum is with row `mid` selected: the window fades its top and bottom quarter, and
+/// the bottom row as far from the selection as half the drum is hidden (it is the same app as the top row,
+/// which would otherwise show twice).
+fn rolo_fade(k: usize, mid: usize, n: usize) -> f32 {
+    let d = k.abs_diff(mid);
+    if k > mid && d * 2 >= n {
+        0.0
+    } else if d <= 2 {
+        1.0
+    } else {
+        (1.0 - (d as f32 - 2.0) / 2.5).max(0.0)
     }
 }
 
@@ -375,6 +385,27 @@ pub fn draw_say(time: Res<Time<Real>>, mut say: ResMut<Say>, mut q: Query<(&mut 
             f.font_size = FontSize::Px(size);
             *lh = LineHeight::Px(size * 1.35);
             *ls = bevy::text::LetterSpacing::Px(size * 0.02);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_rolodex_shows_each_app_once() {
+        let n = APPS.len();
+        for (sel, app) in APPS.iter().enumerate() {
+            let mid = n + sel;
+            // the window is 9 rows: 4 above the band and 4 below
+            let shown: Vec<usize> = (mid - 4..=mid + 4).filter(|&k| rolo_fade(k, mid, n) > 0.0).map(|k| k % n).collect();
+            let mut uniq = shown.clone();
+            uniq.sort();
+            uniq.dedup();
+            assert_eq!(uniq.len(), shown.len(), "an app shows twice with {} selected: {shown:?}", app.0);
+            assert_eq!(shown.len(), n, "every app shows with {} selected: {shown:?}", app.0);
+            assert_eq!(rolo_fade(mid, mid, n), 1.0);
         }
     }
 }
