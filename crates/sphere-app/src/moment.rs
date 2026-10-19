@@ -101,6 +101,14 @@ impl Moment {
         true
     }
 
+    /// Answered from a notification: hidden like a card answer until the next snapshot drops it.
+    pub fn mark_answered(&mut self, id: &str) {
+        if !self.answered.iter().any(|x| x == id) {
+            self.answered.push(id.to_string());
+            self.version += 1;
+        }
+    }
+
     /// Esc: the card goes back until something new arrives.
     pub fn put_back(&mut self, live: &Live, sound: &mut crate::sound::Sound) {
         if !self.shown || self.busy() {
@@ -455,7 +463,7 @@ fn clip(t: &str, n: usize) -> String {
     }
 }
 
-fn options(input: &Value) -> Vec<String> {
+pub fn options(input: &Value) -> Vec<String> {
     input["questions"][0]["options"]
         .as_array()
         .map(|a| a.iter().map(|o| s(o, "label")).filter(|l| !l.is_empty()).collect())

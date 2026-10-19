@@ -414,6 +414,7 @@ fn set_outside(sh: &Mutex<Shared>, list: Vec<sphere_proto::api::OutsideSession>)
 }
 
 async fn command(c: &Client, cmd: Cmd, sh: &Mutex<Shared>) -> Result<(), String> {
+    use sphere_proto::api::kind;
     match cmd {
         Cmd::TakeOver { session_id } => {
             let r = c.take_over(&session_id).await.map_err(|e| e.to_string());
@@ -439,7 +440,8 @@ async fn command(c: &Client, cmd: Cmd, sh: &Mutex<Shared>) -> Result<(), String>
             let p = sphere_client::AnswerParams { request, answer, text, input: None, always };
             match c.answer(p).await {
                 Ok(()) => Ok(()),
-                Err(e) if e.is_already_answered() => Ok(()),
+                // answered elsewhere (the card, the CLI, a notification) or gone: nothing left to answer, so not an error
+                Err(e) if matches!(e.kind(), Some(k) if k == kind::ALREADY_ANSWERED || k == kind::NOT_FOUND || k == kind::WITHDRAWN) => Ok(()),
                 Err(e) => Err(format!("could not answer: {e}")),
             }
         }
