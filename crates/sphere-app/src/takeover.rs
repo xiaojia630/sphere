@@ -960,7 +960,7 @@ fn demo_task(svc: &Service) -> (String, String) {
     use sphere_proto::{Event, EventBody, StepKind, TaskView};
     let t: TaskView = serde_json::from_value(serde_json::json!({
         "id": "t-takeover", "title": "Migrate billing webhooks to v2", "prompt": "", "state": "working", "status": "Running the webhook tests",
-        "repo": "/demo/api-server", "branch": "sphere/migrate-billing-webhooks", "in_place": true, "budget_usd": 5.0, "cost_usd": 0.84,
+        "repo": "/demo/api-server", "in_place": true, "budget_usd": 5.0, "cost_usd": 0.84,
         "started_at": "2026-10-19T09:20:00Z", "updated_at": "2026-10-19T09:44:00Z", "steps": 5,
     }))
     .expect("demo task");
