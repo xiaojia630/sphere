@@ -461,6 +461,30 @@ async fn later_keeps_the_request_open_and_the_agent_paused() {
 }
 
 #[tokio::test]
+async fn the_snapshot_counts_how_long_agents_waited_on_you_today() {
+    let mut env = Env::new("permission");
+    env.start_daemon().await;
+    let c = env.client().await;
+    let mut w = env.watcher(0, None).await;
+    env.start_task(&c, "Waited on", "go").await;
+    let EventBody::Request { request } = w.wait("request", is_request).await.body else {
+        unreachable!()
+    };
+
+    w.settle(1100).await;
+    assert_eq!(
+        c.snapshot().await.unwrap().waited_today_secs,
+        0,
+        "a request still waiting is the client's to add"
+    );
+
+    c.yes(&request.id).await.unwrap();
+    w.wait("turn", is_turn).await;
+    let waited = c.snapshot().await.unwrap().waited_today_secs;
+    assert!(waited >= 1, "it waited over a second, got {waited}");
+}
+
+#[tokio::test]
 async fn questions_and_plans_are_requests_with_their_own_kinds() {
     let mut env = Env::new("question");
     env.start_daemon().await;

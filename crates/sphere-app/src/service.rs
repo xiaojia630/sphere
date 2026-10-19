@@ -91,6 +91,8 @@ pub struct Shared {
     pub hidden: bool,
     /// take-overs that came back, for `takeover::finish` to pick up: (the session id asked for, the outcome)
     pub taken: Vec<(String, Result<sphere_proto::api::TakeOverResult, String>)>,
+    /// seconds agents waited on you today over requests already closed (the mirror's; `Live` adds the open ones)
+    pub waited_today_secs: u64,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -172,7 +174,8 @@ impl Run {
 
 pub enum Cmd {
     Start { repo: String, prompt: String },
-    Answer { request: String, answer: AnswerKind, text: Option<String> },
+    /// `always`: also save the rule the agent suggested (a yes only)
+    Answer { request: String, answer: AnswerKind, text: Option<String>, always: bool },
     Send { task: String, text: String },
     Interrupt { task: String },
     Stop { task: String },
@@ -192,6 +195,13 @@ pub struct Service {
 impl Service {
     pub fn send(&self, c: Cmd) {
         let _ = self.tx.send(c);
+    }
+
+    /// A service with no link thread, whose commands can be read back from the receiver (tests).
+    #[cfg(test)]
+    pub fn with_receiver() -> (Service, mpsc::UnboundedReceiver<Cmd>) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        (Service { shared: Arc::new(Mutex::new(Shared::default())), tx }, rx)
     }
 }
 
@@ -255,6 +265,7 @@ impl Mirror {
         let day = today();
         let views = Views::from_snapshot(snap, &day);
         s.cost_today_usd = views.cost_on(&day);
+        s.waited_today_secs = views.waited_on(&day);
         // only a finished task can read merged
         s.merged.retain(|id| at.get(id).is_some_and(|&i| s.tasks[i].state == TaskState::Done));
         s.roster += 1;
@@ -291,10 +302,12 @@ impl Mirror {
         if let Some(t) = self.views.task(&ev.task) {
             put(&mut self.at, t, s);
         }
-        let cost = self.views.cost_on(&today());
+        let day = today();
+        let cost = self.views.cost_on(&day);
         if cost != s.cost_today_usd {
             s.cost_today_usd = cost;
         }
+        s.waited_today_secs = self.views.waited_on(&day);
         s.version += 1;
         Ok(())
     }
@@ -591,6 +604,7 @@ fn set_outside(sh: &Mutex<Shared>, list: Vec<sphere_proto::api::OutsideSession>)
 }
 
 async fn command(c: &Client, cmd: Cmd, sh: &Mutex<Shared>) -> Result<(), String> {
+    use sphere_proto::api::kind;
     match cmd {
         Cmd::TakeOver { session_id } => {
             let r = c.take_over(&session_id).await.map_err(|e| e.to_string());
@@ -612,11 +626,12 @@ async fn command(c: &Client, cmd: Cmd, sh: &Mutex<Shared>) -> Result<(), String>
             };
             c.start_task(p).await.map(|_| ()).map_err(|e| format!("could not start: {e}"))
         }
-        Cmd::Answer { request, answer, text } => {
-            let p = sphere_client::AnswerParams { request, answer, text, input: None, always: false };
+        Cmd::Answer { request, answer, text, always } => {
+            let p = sphere_client::AnswerParams { request, answer, text, input: None, always };
             match c.answer(p).await {
                 Ok(()) => Ok(()),
-                Err(e) if e.is_already_answered() => Ok(()),
+                // answered elsewhere (the card, the CLI, a notification) or gone: nothing left to answer, so not an error
+                Err(e) if matches!(e.kind(), Some(k) if k == kind::ALREADY_ANSWERED || k == kind::NOT_FOUND || k == kind::WITHDRAWN) => Ok(()),
                 Err(e) => Err(format!("could not answer: {e}")),
             }
         }
@@ -726,7 +741,7 @@ mod tests {
     }
 
     fn empty_snapshot() -> Snapshot {
-        Snapshot { seq: 0, tasks: vec![], requests: vec![], cost_today_usd: 0.0, daily_cap_usd: None, max_concurrent: Some(3) }
+        Snapshot { seq: 0, tasks: vec![], requests: vec![], cost_today_usd: 0.0, daily_cap_usd: None, max_concurrent: Some(3), waited_today_secs: 0 }
     }
 
     /// A mirror next to the server's own views: both fed the same events.
@@ -753,6 +768,7 @@ mod tests {
             let open: Vec<RequestView> = self.server.open_requests().into_iter().cloned().collect();
             assert_eq!(self.s.requests, open, "open requests");
             assert_eq!(self.s.cost_today_usd, self.server.cost_on(&today()), "cost");
+            assert_eq!(self.s.waited_today_secs, self.server.waited_on(&today()), "waited");
         }
         fn counters(&self) -> (u64, u64, u64) {
             (self.s.roster, self.s.states, self.s.spans)
@@ -803,10 +819,10 @@ mod tests {
         for e in [created(1, "t1"), started(2, "t1"), step(3, "t1", "a"), ask(4, "t1", "r1"), created(5, "t2")] {
             server.apply(&e);
         }
-        let snap = Snapshot { seq: server.seq, tasks: server.tasks().into_iter().cloned().collect(), requests: server.open_requests().into_iter().cloned().collect(), cost_today_usd: 1.25, daily_cap_usd: None, max_concurrent: Some(2) };
+        let snap = Snapshot { seq: server.seq, tasks: server.tasks().into_iter().cloned().collect(), requests: server.open_requests().into_iter().cloned().collect(), cost_today_usd: 1.25, daily_cap_usd: None, max_concurrent: Some(2), waited_today_secs: 90 };
         let mut s = Shared::default();
         let mut mirror = Mirror::connect(snap, &mut s);
-        assert_eq!((s.tasks.len(), s.requests.len(), s.cost_today_usd, s.max_concurrent), (2, 1, 1.25, Some(2)));
+        assert_eq!((s.tasks.len(), s.requests.len(), s.cost_today_usd, s.max_concurrent, s.waited_today_secs), (2, 1, 1.25, Some(2), 90));
         assert!(s.roster > 0 && s.states > 0 && s.spans > 0 && s.version > 0);
         for e in [answer(6, "t1", "r1"), step_done(7, "t1", "a"), turn(8, "t1", 0.5)] {
             server.apply(&e);
@@ -816,6 +832,7 @@ mod tests {
         assert_eq!(s.tasks, tasks);
         assert!(s.requests.is_empty());
         assert_eq!(s.cost_today_usd, 1.25, "a turn on another day leaves today's cost alone");
+        assert_eq!(s.waited_today_secs, 90, "so does a request answered on another day");
     }
 
     #[test]
@@ -1031,7 +1048,7 @@ mod tests {
         for e in events {
             v.apply(e);
         }
-        Snapshot { seq: v.seq, tasks: v.tasks().into_iter().cloned().collect(), requests: v.open_requests().into_iter().cloned().collect(), cost_today_usd: 0.0, daily_cap_usd: None, max_concurrent: Some(3) }
+        Snapshot { seq: v.seq, tasks: v.tasks().into_iter().cloned().collect(), requests: v.open_requests().into_iter().cloned().collect(), cost_today_usd: 0.0, daily_cap_usd: None, max_concurrent: Some(3), waited_today_secs: 0 }
     }
 
     /// A sphered at event 3 (one task that works), and the two events it sends next: a question, then a second task.

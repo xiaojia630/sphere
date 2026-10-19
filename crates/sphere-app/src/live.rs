@@ -16,6 +16,8 @@ pub struct Live {
     pub requests: Vec<RequestView>,
     /// Task titles by id, for the card header.
     pub titles: Vec<(String, String)>,
+    /// Seconds agents waited on you today over requests already closed (sphered's count, from the link's mirror).
+    pub waited_closed_secs: u64,
     pub version: u64,
     seen: u64,
 }
@@ -23,6 +25,28 @@ pub struct Live {
 impl Live {
     pub fn title<'a>(&'a self, task: &'a str) -> &'a str {
         self.titles.iter().find(|(id, _)| id == task).map(|(_, t)| t.as_str()).unwrap_or(task)
+    }
+
+    /// Seconds agents have waited on you today, as of `now` (unix seconds): the closed requests' total plus what each
+    /// request still open or snoozed has waited so far.
+    pub fn waited_today_secs(&self, now: i64) -> u64 {
+        waited_total(self.waited_closed_secs, &self.requests, now)
+    }
+}
+
+/// `closed` plus how long each request still open or snoozed has waited as of `now` (unix seconds, from its `opened_at`).
+pub fn waited_total(closed: u64, requests: &[RequestView], now: i64) -> u64 {
+    let open = requests.iter().filter(|r| r.status.is_open()).filter_map(|r| crate::working::parse_rfc3339(&r.opened_at));
+    open.fold(closed, |sum, at| sum.saturating_add((now - at).max(0) as u64))
+}
+
+/// A wait in whole minutes, as the panels say it: "1 min", "12 min", "1 h 5 min" (an exact hour is "2 h").
+pub fn fmt_waited(secs: u64) -> String {
+    let mins = secs / 60;
+    match (mins / 60, mins % 60) {
+        (0, m) => format!("{m} min"),
+        (h, 0) => format!("{h} h"),
+        (h, m) => format!("{h} h {m} min"),
     }
 }
 
@@ -337,6 +361,9 @@ pub fn sync(svc: Res<Service>, mut live: ResMut<Live>, mut agents: ResMut<Agents
     seen.2 = now / 60;
     // the version is bookkeeping: writing it must not wake what follows `Live`
     live.bypass_change_detection().seen = s.version;
+    if live.waited_closed_secs != s.waited_today_secs {
+        live.waited_closed_secs = s.waited_today_secs;
+    }
     for n in s.notes.drain(..) {
         toasts.push(n);
     }
@@ -381,7 +408,8 @@ pub fn sync(svc: Res<Service>, mut live: ResMut<Live>, mut agents: ResMut<Agents
     }
 }
 
-/// The prototype's kind of moment, for `--moment` screenshots: an agent asking to run a command.
+/// The prototype's kind of moment, for `--moment` screenshots: an agent asking to run a command (with a rule to remember,
+/// and another agent asking the very same) and an edit to approve.
 fn demo_request(live: &mut Live) {
     let info = sphere_proto::RequestInfo {
         id: "r1".into(),
@@ -392,7 +420,7 @@ fn demo_request(live: &mut Live) {
         description: Some("Run the login tests against staging".into()),
         summary: "The login test is flaky, not broken. I'd like to run it against staging to confirm the fix.".into(),
         input: serde_json::json!({"command": "npm test -- --grep login --env staging", "description": "Run the login tests against staging"}),
-        suggestions: vec![],
+        suggestions: vec![serde_json::json!({"type": "addRules", "rules": [{"toolName": "Bash", "ruleContent": "npm test:*"}], "behavior": "allow", "destination": "localSettings"})],
         blocked_path: None,
         tool_use_id: None,
         agent_request: None,
@@ -402,13 +430,19 @@ fn demo_request(live: &mut Live) {
     r2.id = "r2".into();
     r2.task = "t2".into();
     r2.tool = "Edit".into();
+    r2.suggestions = vec![];
     r2.summary = "Squash and merge the login fix into main".into();
     let mut r3 = info.clone();
     r3.id = "r3".into();
     r3.task = "t3".into();
     r3.summary = "minio stopped because its disk is full; clear old caches and restart it".into();
-    let rv = |i: sphere_proto::RequestInfo| RequestView { info: i, status: sphere_proto::RequestStatus::Open, opened_at: "2026-10-16T17:52:00Z".into() };
-    live.requests = vec![rv(info), rv(r2), rv(r3)];
+    // opened a few minutes ago, the oldest first
+    let rv = |i: sphere_proto::RequestInfo, mins: i64| RequestView {
+        info: i,
+        status: sphere_proto::RequestStatus::Open,
+        opened_at: sphere_proto::rfc3339_from_unix_ms(((crate::core::unix_now() - mins * 60) * 1000) as u64),
+    };
+    live.requests = vec![rv(info, 4), rv(r2, 3), rv(r3, 2)];
     live.titles = vec![("t1".into(), "Fix flaky login test".into()), ("t2".into(), "Merge the login fix".into()), ("t3".into(), "Restart minio".into())];
     live.version += 1;
 }
@@ -835,6 +869,50 @@ mod tests {
         });
         app.update();
         assert_eq!(toasts(&app), ["Task t1 is done", "Task t3 failed"]);
+    }
+
+    fn waiting_request(id: &str, status: sphere_proto::RequestStatus, opened_at: &str) -> RequestView {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "task": format!("t-{id}"), "kind": "permission", "tool": "Bash", "summary": "", "input": {},
+            "status": status, "opened_at": opened_at,
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn the_waited_total_adds_what_open_and_snoozed_requests_have_waited_so_far() {
+        use sphere_proto::RequestStatus::*;
+        let reqs = vec![
+            // 5 min and 30 min before NOW
+            waiting_request("r1", Open, "2026-10-19T11:55:00Z"),
+            waiting_request("r2", Snoozed, "2026-10-19T11:30:00Z"),
+            // closed ones are in the closed total already
+            waiting_request("r3", Answered, "2026-10-19T08:00:00Z"),
+            waiting_request("r4", Withdrawn, "2026-10-19T08:00:00Z"),
+            // a clock a little behind the service's, and a time that can't be read, add nothing
+            waiting_request("r5", Open, "2026-10-19T12:00:30Z"),
+            waiting_request("r6", Open, "not a time"),
+        ];
+        assert_eq!(waited_total(120, &reqs, NOW), 120 + 300 + 1800);
+        assert_eq!(waited_total(0, &[], NOW), 0);
+        assert_eq!(waited_total(90, &reqs[2..4], NOW), 90);
+        // the same through Live, which keeps the snapshot's figure beside the open requests
+        let live = Live { waited_closed_secs: 120, requests: reqs, ..default() };
+        assert_eq!(live.waited_today_secs(NOW), 2220);
+        // it grows with the clock while requests wait (r5 has waited 30 s by then)
+        assert_eq!(live.waited_today_secs(NOW + 60), 2220 + 60 + 60 + 30);
+    }
+
+    #[test]
+    fn a_wait_reads_in_whole_minutes_then_hours() {
+        assert_eq!(fmt_waited(59), "0 min");
+        assert_eq!(fmt_waited(60), "1 min");
+        assert_eq!(fmt_waited(119), "1 min");
+        assert_eq!(fmt_waited(12 * 60 + 30), "12 min");
+        assert_eq!(fmt_waited(59 * 60 + 59), "59 min");
+        assert_eq!(fmt_waited(3600), "1 h");
+        assert_eq!(fmt_waited(65 * 60), "1 h 5 min");
+        assert_eq!(fmt_waited(3 * 3600 + 120), "3 h 2 min");
     }
 
     #[test]

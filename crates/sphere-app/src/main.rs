@@ -25,6 +25,7 @@ mod live;
 mod moment;
 mod momentfx;
 mod mouse;
+mod notifyact;
 mod orbit;
 mod opsdata;
 mod ports;
@@ -242,7 +243,7 @@ fn main() {
             (
                 (keys, stage_view, camera_rig, update_core, spin_system, update_materials, panel::update_panels, hud::update_readout, hud::update_backdrop)
                     .chain(),
-                (takeover::sync, live::check_merged, live::sync, live::transitions, moment::update, summon::notify, live::tick_toasts, panel::rebuild_agents_ui, hud::update_readout_text, hud::update_clock, panel::blink_system, homepanels::update, homepanels::draw_rolodex, homepanels::draw_say).chain(),
+                (takeover::sync, live::check_merged, live::sync, live::transitions, moment::update, summon::notify, summon::from_notifications, live::tick_toasts, panel::rebuild_agents_ui, hud::update_readout_text, hud::update_clock, panel::blink_system, homepanels::update, homepanels::draw_rolodex, homepanels::draw_say).chain(),
                 (term::pump, cmdbar::keys, takeover::keys, moment::keys, term::read_keys, home::keys, orbit::keys, working::keys, (codeapp::keys, gitapp::keys, containers::keys, ports::keys, sysapp::keys, filesapp::keys).chain(), momentfx::keys, visor::buttons, takeover::buttons, mouse::update, takeover::commands, appframe::test_click, appframe::test_wheel, appframe::route_clicks, home::apply, apps::apply).chain(),
                 (working::update, working::place_panels, working::draw, (codeapp::update, codeapp::place, codeapp::draw, gitapp::update, gitapp::place, gitapp::draw, containers::update, containers::place, containers::draw, ports::update, ports::place, ports::draw, sysapp::update, sysapp::place, sysapp::draw, filesapp::update, filesapp::place, filesapp::draw).chain(), momentfx::flows, momentfx::draw, momentfx::draw_sats, callouts::update).chain(),
                 (orbit::update, mouse::draw_reticle, visor::draw_buttons, visor::ticker, visor::toasts, home::landed_sound, home::step_view, fx::update, term::draw, cmdbar::draw, takeover::script, takeover::draw, takeover::hover_look, moment::draw).chain(),

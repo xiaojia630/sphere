@@ -172,8 +172,9 @@ pub fn idle_hint(mode: &Mode) -> &'static str {
 }
 
 /// SPEC 6.2: "6 agents: 3 working, 1 ready to merge, 2 queued. About $1.89 today, API estimate." (the clauses after
-/// "working" only when there are some).
-pub fn status_line(m: &Model) -> String {
+/// "working" only when there are some), then "Agents waited 12 min on you today." once `waited_secs` (what agents have
+/// waited on you today, `Live::waited_today_secs`) is a minute or more.
+pub fn status_line(m: &Model, waited_secs: u64) -> String {
     let n = m.agents.iter().filter(|a| !matches!(a.state, State::Merged | State::Stopped)).count();
     let mut s = format!("{n} {}: {} working", if n == 1 { "agent" } else { "agents" }, m.count(State::Working));
     for (c, what) in [(m.count(State::Needs), "needs you"), (m.count(State::Done), "ready to merge"), (m.count(State::Queued), "queued")] {
@@ -182,6 +183,9 @@ pub fn status_line(m: &Model) -> String {
         }
     }
     s.push_str(&format!(". About ${:.2} today, API estimate.", m.cost_today));
+    if waited_secs >= 60 {
+        s.push_str(&format!(" Agents waited {} on you today.", crate::live::fmt_waited(waited_secs)));
+    }
     s
 }
 
@@ -201,11 +205,24 @@ mod tests {
     #[test]
     fn status_line_matches_the_spec() {
         use State::*;
-        assert_eq!(status_line(&m(&[Working, Working, Working, Done, Queued, Queued], 1.89)), "6 agents: 3 working, 1 ready to merge, 2 queued. About $1.89 today, API estimate.");
-        assert_eq!(status_line(&m(&[Working, Needs, Done, Queued], 0.0)), "4 agents: 1 working, 1 needs you, 1 ready to merge, 1 queued. About $0.00 today, API estimate.");
-        assert_eq!(status_line(&m(&[Working], 12.5)), "1 agent: 1 working. About $12.50 today, API estimate.");
-        assert_eq!(status_line(&m(&[Working, Merged, Stopped], 1.0)), "1 agent: 1 working. About $1.00 today, API estimate.");
-        assert_eq!(status_line(&Model::default()), "0 agents: 0 working. About $0.00 today, API estimate.");
+        assert_eq!(status_line(&m(&[Working, Working, Working, Done, Queued, Queued], 1.89), 0), "6 agents: 3 working, 1 ready to merge, 2 queued. About $1.89 today, API estimate.");
+        assert_eq!(status_line(&m(&[Working, Needs, Done, Queued], 0.0), 0), "4 agents: 1 working, 1 needs you, 1 ready to merge, 1 queued. About $0.00 today, API estimate.");
+        assert_eq!(status_line(&m(&[Working], 12.5), 0), "1 agent: 1 working. About $12.50 today, API estimate.");
+        assert_eq!(status_line(&m(&[Working, Merged, Stopped], 1.0), 0), "1 agent: 1 working. About $1.00 today, API estimate.");
+        assert_eq!(status_line(&Model::default(), 0), "0 agents: 0 working. About $0.00 today, API estimate.");
+    }
+
+    #[test]
+    fn status_line_says_how_long_agents_waited_on_you_once_it_is_a_minute() {
+        use State::*;
+        let two = m(&[Working, Needs], 1.89);
+        let base = "2 agents: 1 working, 1 needs you. About $1.89 today, API estimate.";
+        // under a minute says nothing
+        assert_eq!(status_line(&two, 59), base);
+        assert_eq!(status_line(&two, 60), format!("{base} Agents waited 1 min on you today."));
+        assert_eq!(status_line(&two, 12 * 60 + 59), format!("{base} Agents waited 12 min on you today."));
+        assert_eq!(status_line(&two, 65 * 60), format!("{base} Agents waited 1 h 5 min on you today."));
+        assert_eq!(status_line(&Model::default(), 3 * 3600), "0 agents: 0 working. About $0.00 today, API estimate. Agents waited 3 h on you today.");
     }
 
     #[test]

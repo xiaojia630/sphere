@@ -6,8 +6,12 @@ use crate::util::*;
 use bevy::prelude::*;
 use bevy::text::LineHeight;
 
-/// The eight apps, in rolodex and orbit order. Terminal and Agents open real panels; the rest come later.
-pub const APPS: [(&str, bool); 8] = [
+/// Music isn't built yet, so it is hidden from the rolodex, the orbit and the bar; true brings its "soon" tile back.
+pub const SHOW_MUSIC: bool = false;
+
+/// Every app, in rolodex and orbit order (`false`: not built yet, it says it comes later). Music is last, so hiding
+/// it leaves the others' indices as they are.
+const ALL_APPS: [(&str, bool); 8] = [
     ("Terminal", true),
     ("Agents", true),
     ("Code", true),
@@ -17,6 +21,9 @@ pub const APPS: [(&str, bool); 8] = [
     ("Files", true),
     ("Music", false),
 ];
+
+/// The apps that show, in rolodex and orbit order.
+pub const APPS: &[(&str, bool)] = if SHOW_MUSIC { &ALL_APPS } else { ALL_APPS.split_at(7).0 };
 
 /// Where panel `i` of the boot order appears (0.42 s + i · 0.09 s): brand, system, apps, telemetry, clock,
 /// rail, agents, say.
@@ -41,6 +48,9 @@ pub fn anchor(ax: char, x: f32, ay: char, y: f32, w: f32, h: f32) -> Vec3 {
 
 #[derive(Component)]
 pub struct SysRow(pub &'static str);
+/// The line under System's Needs you row: how long agents have waited on you today (hidden until it is a minute).
+#[derive(Component)]
+pub struct WaitedLine;
 /// The brand panel's sub line (it reads "Agent swarm" while the swarm is open).
 #[derive(Component)]
 pub struct BrandSub;
@@ -146,8 +156,8 @@ pub fn setup(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut atlas
     c.entity(b).add_children(&[wm, sub]);
     spawn_panel_quad(c, &mut meshes, &mut pmats, &ui, &PanelSpec { id: PanelId::Brand, w, h, home: anchor('c', 800.0, 't', 20.0, w, h), home_scale: 1.0, side: 0.0, phase: 0.7, show_at: show_at(0), unframed: true });
 
-    // ---- system: left 54, top 54, framed
-    let (w, h) = (316.0, 212.0);
+    // ---- system: left 54, top 54, framed (a little taller than its six rows, for the waited line under Needs you)
+    let (w, h) = (316.0, 220.0);
     let ui = spawn_ui_panel(c, &mut atlas, w, h);
     let b = body(c, ui.root, true);
     let hd = hdr(c, &f, "Sphere · System", &format!("v{}", env!("CARGO_PKG_VERSION")));
@@ -158,6 +168,12 @@ pub fn setup(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut atlas
         let dd = c.spawn((SysRow(k), Text::new(v.to_uppercase()), font(&f.ui600, 14.0, 2.24), TextColor(if acc { role_color(Role::Acc) } else { hot }), LineHeight::Px(25.2))).id();
         c.entity(row).add_children(&[dt, dd]);
         c.entity(b).add_child(row);
+        if k == "Needs you" {
+            let wl = c
+                .spawn((WaitedLine, Text::new(""), font(&f.ui500, 11.0, 1.76), TextColor(dim), LineHeight::Px(13.0), Node { display: Display::None, align_self: AlignSelf::FlexEnd, margin: UiRect { top: px(-6), ..default() }, ..default() }))
+                .id();
+            c.entity(b).add_child(wl);
+        }
     }
     spawn_panel_quad(c, &mut meshes, &mut pmats, &ui, &PanelSpec { id: PanelId::System, w, h, home: anchor('l', 54.0, 't', 54.0, w, h), home_scale: 1.0, side: 1.0, phase: 2.9, show_at: show_at(1), unframed: false });
 
@@ -178,7 +194,7 @@ pub fn setup(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut atlas
     let bl = c.spawn((Node { position_type: PositionType::Absolute, left: px(0), top: px(-1), bottom: px(-1), width: px(9), border: UiRect { left: px(1), top: px(1), bottom: px(1), ..default() }, ..default() }, BorderColor::all(hot))).id();
     let br = c.spawn((Node { position_type: PositionType::Absolute, right: px(0), top: px(-1), bottom: px(-1), width: px(9), border: UiRect { right: px(1), top: px(1), bottom: px(1), ..default() }, ..default() }, BorderColor::all(hot))).id();
     c.entity(band).add_children(&[bl, br]);
-    let list = c.spawn((Node { position_type: PositionType::Absolute, left: px(0), right: px(0), top: px(136.0 - 8.0 * 34.0), flex_direction: FlexDirection::Column, ..default() }, RoloList)).id();
+    let list = c.spawn((Node { position_type: PositionType::Absolute, left: px(0), right: px(0), top: px(136.0 - APPS.len() as f32 * 34.0), flex_direction: FlexDirection::Column, ..default() }, RoloList)).id();
     // three copies, so the drum wraps: the selected row is always in the middle copy
     for k in 0..APPS.len() * 3 {
         let i = k % APPS.len();
@@ -265,7 +281,7 @@ pub fn update(
     sound: Res<crate::sound::Sound>,
     mut acc: Local<f32>,
     mut last_voice: Local<Option<crate::sound::VoiceState>>,
-    mut texts: ParamSet<(Query<(&SysRow, &mut Text, &mut TextColor)>, Query<(&MeterValue, &mut Text)>)>,
+    mut texts: ParamSet<(Query<(&SysRow, &mut Text, &mut TextColor)>, Query<(&MeterValue, &mut Text)>, Query<(&mut Text, &mut Node), With<WaitedLine>>)>,
     mut segs: Query<(&Meter, &mut BackgroundColor)>,
 ) {
     *acc += time.delta_secs();
@@ -299,6 +315,18 @@ pub fn update(
         }
         c.set_if_neq(TextColor(col));
     }
+    let waited = waited_line(live.waited_today_secs(crate::core::unix_now()));
+    for (mut t, mut n) in &mut texts.p2() {
+        let shown = if waited.is_some() { Display::Flex } else { Display::None };
+        if n.display != shown {
+            n.display = shown;
+        }
+        if let Some(w) = &waited {
+            if &t.0 != w {
+                t.0 = w.clone();
+            }
+        }
+    }
     if !s.ready {
         return;
     }
@@ -315,6 +343,11 @@ pub fn update(
         let on = (j as f32) < (vals[i] * 22.0).round();
         bg.set_if_neq(BackgroundColor(if on { fill } else { with_alpha(line, 0.13) }));
     }
+}
+
+/// The line under Needs you once agents have waited a minute or more on you today: "3 MIN WAITED TODAY".
+fn waited_line(secs: u64) -> Option<String> {
+    (secs >= 60).then(|| format!("{} waited today", crate::live::fmt_waited(secs)).to_uppercase())
 }
 
 /// The rolodex: the selected row bright with a lit dot, the list slid so it sits in the band.
@@ -371,10 +404,10 @@ pub fn rolo_row_at(y: f32, sel: usize) -> Option<usize> {
 
 /// How bright row `k` of the drum is with row `mid` selected: the window fades its top and bottom quarter, and
 /// the bottom row as far from the selection as half the drum is hidden (it is the same app as the top row,
-/// which would otherwise show twice).
+/// which would otherwise show twice); with an odd number of apps the top row past half the drum is hidden too.
 fn rolo_fade(k: usize, mid: usize, n: usize) -> f32 {
     let d = k.abs_diff(mid);
-    if k > mid && d * 2 >= n {
+    if (k > mid && d * 2 >= n) || (k < mid && d * 2 > n) {
         0.0
     } else if d <= 2 {
         1.0
@@ -449,13 +482,26 @@ mod tests {
             assert_eq!(rolo_row_at(band - ROLO_ROW, sel), Some((sel + APPS.len() - 1) % APPS.len()));
             assert_eq!(rolo_row_at(band + 2.0 * ROLO_ROW, sel), Some((sel + 2) % APPS.len()));
         }
-        // with Terminal selected (as the home starts), Containers is the row at the top, Git & PRs at the bottom
-        assert_eq!(APPS[rolo_row_at(ROLO_WIN_TOP + 5.0, 0).unwrap()].0, "Containers");
+        // with Terminal selected (as the home starts), Containers is the top row shown, Git & PRs the bottom one
+        let up = (APPS.len() / 2) as f32;
+        assert_eq!(APPS[rolo_row_at(band - up * ROLO_ROW, 0).unwrap()].0, "Containers");
         assert_eq!(APPS[rolo_row_at(band + 3.0 * ROLO_ROW, 0).unwrap()].0, "Git & PRs");
-        // the heading, the hint under the window, and the hidden bottom row aren't rows
+        // the heading, the hint under the window, and the hidden rows past half the drum aren't rows
         assert_eq!(rolo_row_at(4.0, 0), None);
         assert_eq!(rolo_row_at(ROLO_WIN_TOP + ROLO_WIN_H + 4.0, 0), None);
         assert_eq!(rolo_row_at(band + 4.0 * ROLO_ROW, 0), None);
+        if APPS.len() % 2 == 1 {
+            assert_eq!(rolo_row_at(band - (up + 1.0) * ROLO_ROW, 0), None);
+        }
+    }
+
+    #[test]
+    fn the_waited_line_shows_from_a_minute() {
+        assert_eq!(waited_line(0), None);
+        assert_eq!(waited_line(59), None);
+        assert_eq!(waited_line(60).as_deref(), Some("1 MIN WAITED TODAY"));
+        assert_eq!(waited_line(12 * 60 + 40).as_deref(), Some("12 MIN WAITED TODAY"));
+        assert_eq!(waited_line(65 * 60).as_deref(), Some("1 H 5 MIN WAITED TODAY"));
     }
 
     #[test]
@@ -472,5 +518,15 @@ mod tests {
             assert_eq!(shown.len(), n, "every app shows with {} selected: {shown:?}", app.0);
             assert_eq!(rolo_fade(mid, mid, n), 1.0);
         }
+    }
+
+    #[test]
+    fn music_hides_behind_its_switch() {
+        assert_eq!(APPS.iter().any(|a| a.0 == "Music"), SHOW_MUSIC);
+        // the others keep their places: the app indices (Code 2, Files 6, ...) don't move
+        assert_eq!(APPS[2].0, "Code");
+        assert_eq!(APPS[3].0, "Git & PRs");
+        assert_eq!(APPS[6].0, "Files");
+        assert_eq!(&APPS[..7], &ALL_APPS[..7]);
     }
 }

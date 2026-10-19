@@ -1,4 +1,4 @@
-//! Core open (prototype: Core Open): the core tips back 62° like a holo-table and eight smoked-glass app tiles
+//! Core open (prototype: Core Open): the core tips back 62° like a holo-table and the app tiles (seven while Music hides)
 //! rise on light beams onto a spinnable orbit. A, the dock's Apps button, typing "apps", or holding the sphere
 //! opens it; Esc, A, or a click on the sphere closes it. ← → (or the wheel, or a drag) spin it; Enter or a
 //! click opens the front app. Terminal and Agents open their real panels; the rest come later.
@@ -17,8 +17,21 @@ use bevy::text::LineHeight;
 const R: f32 = 560.0;
 const Z: f32 = -160.0;
 const H: f32 = 110.0;
-const STEP: f32 = 45.0 * DEG;
-const FAN: [usize; 8] = [0, 1, 7, 2, 6, 3, 5, 4];
+/// How many tiles ride the orbit, evenly spaced (45° apart for eight).
+const N: usize = APPS.len();
+const STEP: f32 = TAU / N as f32;
+/// The fan-out order, as offsets from the front: the front, then alternating neighbours, the back last.
+const FAN: [usize; N] = fan();
+
+const fn fan() -> [usize; N] {
+    let mut f = [0; N];
+    let mut k = 1;
+    while k < N {
+        f[k] = if k % 2 == 1 { k.div_ceil(2) } else { N - k / 2 };
+        k += 1;
+    }
+    f
+}
 pub const TILE_W: f32 = 232.0;
 pub const TILE_H: f32 = 190.0;
 
@@ -27,8 +40,8 @@ pub struct Orb {
     pub open: bool,
     pub amt: Spring,
     pub a: Spring,
-    pub(crate) em: [Spring; 8],
-    kick: [Spring; 8],
+    pub(crate) em: [Spring; N],
+    kick: [Spring; N],
     /// seconds since the last open/close (for the fan-out stagger)
     since: f32,
     /// spin the front tile to here, then open it
@@ -45,8 +58,8 @@ impl Default for Orb {
             open: false,
             amt: Spring::new(0.0, 30.0, 10.5),
             a: Spring::new(0.0, 60.0, 15.0),
-            em: [Spring::new(0.0, 62.0, 11.5); 8],
-            kick: [Spring::new(0.0, 220.0, 8.0); 8],
+            em: [Spring::new(0.0, 62.0, 11.5); N],
+            kick: [Spring::new(0.0, 220.0, 8.0); N],
             since: 9.0,
             launch: None,
             front: 0,
@@ -80,7 +93,7 @@ impl Orb {
     }
     /// Spin app `i` to the front, then open it.
     pub fn launch(&mut self, i: usize) {
-        // the nearest target angle that puts i at the front: φ = i·45° + a ≡ 0
+        // the nearest target angle that puts i at the front: φ = i·STEP + a ≡ 0
         let base = -(i as f32) * STEP;
         let k = ((self.a.t - base) / TAU).round();
         self.a.t = base + k * TAU;
@@ -174,8 +187,8 @@ pub fn setup(
     dash_geo(&mut g, R - 44.0, 1.0, 3.0, 10.0);
     parts.push((g, Role::Dim, 0.55, 0.3));
     let mut g = Geo::new();
-    for i in 0..8 {
-        // pads at π − i·45°, measured clockwise from 12 o'clock, so i = 0 is at the front
+    for i in 0..N {
+        // pads at π − i·STEP, measured clockwise from 12 o'clock, so i = 0 is at the front
         let mid = std::f32::consts::PI - i as f32 * STEP;
         ring_geo(&mut g, R, 7.0, RingOpt { a0: mid - 4.0 * DEG, a1: mid + 4.0 * DEG, walls: 2, ..default() });
     }
@@ -237,6 +250,7 @@ fn tile_text(i: usize, now: Option<&TileState>) -> (String, String, String) {
         4 => ("live".into(), now.map(|n| n.docker.clone()).unwrap_or_else(|| "Docker".into()), now.map(|n| n.docker_detail.clone()).unwrap_or_else(|| "Start, stop, restart, logs".into())),
         5 => ("live".into(), "Ports and logs".into(), now.and_then(|n| n.ports).map(|p| format!("{p} listening · and their output")).unwrap_or_else(|| "What's listening, and its output".into())),
         6 => ("live".into(), "Files".into(), now.and_then(|n| n.files.clone()).unwrap_or_else(|| "Browse, preview, quick edit".into())),
+        // Music: only while `homepanels::SHOW_MUSIC` brings its tile back
         _ => ("soon".into(), "Music".into(), "Not built yet".into()),
     }
 }
@@ -340,10 +354,10 @@ pub fn update(
     let amt = orb.amount();
     ctl.orb = amt;
     // fan-out: front first, alternating neighbours, back last (.16 + k·.075 s); fold-in reversed (k·.035 s)
-    let front = (((-orb.a.x / STEP).round() as i32).rem_euclid(8)) as usize;
+    let front = (((-orb.a.x / STEP).round() as i32).rem_euclid(N as i32)) as usize;
     for (k, off) in FAN.iter().enumerate() {
-        let i = (front + off) % 8;
-        let (tgt, delay) = if orb.open { (1.0, 0.16 + k as f32 * 0.075) } else { (0.0, (7 - k) as f32 * 0.035) };
+        let i = (front + off) % N;
+        let (tgt, delay) = if orb.open { (1.0, 0.16 + k as f32 * 0.075) } else { (0.0, (N - 1 - k) as f32 * 0.035) };
         let delay = crate::motion::stagger(delay);
         if orb.since >= delay && orb.em[i].t != tgt {
             orb.em[i].t = tgt;
@@ -352,7 +366,7 @@ pub fn update(
             }
         }
     }
-    for i in 0..8 {
+    for i in 0..N {
         orb.em[i].step(dt);
         orb.kick[i].t = 0.0;
         orb.kick[i].step(dt);
@@ -476,5 +490,19 @@ pub fn keys(
             KeyCode::Escape if orb.open => orb.set(false, &mut sound),
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_fan_reaches_every_tile_once() {
+        let mut f = FAN.to_vec();
+        assert_eq!(&f[..3], &[0, 1, N - 1]);
+        f.sort();
+        assert_eq!(f, (0..N).collect::<Vec<_>>());
+        assert!((STEP * N as f32 - TAU).abs() < 1e-5);
     }
 }
