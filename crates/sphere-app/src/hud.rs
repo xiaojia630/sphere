@@ -138,18 +138,31 @@ fn build_clock_ui(commands: &mut Commands, root: Entity, f: &UiFonts) {
     commands.entity(body).add_children(&[t, d]);
 }
 
-/// Local time as "13:34" and "FRIDAY, OCTOBER 16, 2026", from the system clock and zone (`date`'s view of
-/// it, read once a minute).
+/// Local time as "13:34" and "FRIDAY, OCTOBER 16, 2026", from the system clock and zone (read once a minute, in-process: it used to
+/// start `date` on the main thread, which could hitch a frame).
 fn clock_strings() -> (String, String) {
-    let out = std::process::Command::new("date").arg("+%H:%M|%A, %B %-d, %Y").output();
-    match out {
-        Ok(o) if o.status.success() => {
-            let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
-            let (t, d) = s.split_once('|').unwrap_or((s.as_str(), ""));
-            (t.to_string(), d.to_uppercase())
-        }
-        _ => ("--:--".into(), String::new()),
+    extern "C" {
+        fn tzset();
     }
+    // SAFETY: tzset, time and localtime_r only write into the zeroed `tm` we give them (tzset first, so a changed zone is noticed, as each run of `date` did).
+    let tm = unsafe {
+        tzset();
+        let now = libc::time(std::ptr::null_mut());
+        let mut tm: libc::tm = std::mem::zeroed();
+        (!libc::localtime_r(&now, &mut tm).is_null()).then_some(tm)
+    };
+    tm.map_or_else(|| ("--:--".into(), String::new()), |tm| format_clock(&tm))
+}
+
+/// The two strings for a broken-down time, as `date "+%H:%M|%A, %B %-d, %Y"` printed them (the names are English: the app never sets a locale).
+fn format_clock(tm: &libc::tm) -> (String, String) {
+    let fmt = |f: &std::ffi::CStr| {
+        let mut buf = [0u8; 96];
+        // SAFETY: strftime writes at most `buf.len()` bytes and returns how many.
+        let n = unsafe { libc::strftime(buf.as_mut_ptr().cast(), buf.len(), f.as_ptr(), tm) };
+        String::from_utf8_lossy(&buf[..n]).into_owned()
+    };
+    (fmt(c"%H:%M"), fmt(c"%A, %B %-d, %Y").to_uppercase())
 }
 
 #[allow(clippy::type_complexity)]
@@ -629,4 +642,43 @@ fn unpad(data: &[u8], w: u32, h: u32) -> Vec<u8> {
         return data.to_vec();
     }
     (0..h as usize).flat_map(|y| data[y * padded..y * padded + row].iter().copied()).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A fixed UTC moment, broken down the way `clock_strings` formats the local one.
+    fn at(t: libc::time_t) -> (String, String) {
+        // SAFETY: gmtime_r only writes into the zeroed `tm` it is given.
+        let tm = unsafe {
+            let mut tm: libc::tm = std::mem::zeroed();
+            libc::gmtime_r(&t, &mut tm);
+            tm
+        };
+        format_clock(&tm)
+    }
+
+    #[test]
+    fn the_clock_reads_hours_and_minutes_and_an_upper_case_date() {
+        assert_eq!(at(1792416840), ("13:34".to_string(), "MONDAY, OCTOBER 19, 2026".to_string()));
+        // hours and minutes keep their zero, the day of the month doesn't
+        assert_eq!(at(1772600760), ("05:06".to_string(), "WEDNESDAY, MARCH 4, 2026".to_string()));
+    }
+
+    #[test]
+    fn the_clock_agrees_with_the_date_command_it_replaced() {
+        for _ in 0..3 {
+            let out = std::process::Command::new("date").env("LC_ALL", "C").arg("+%H:%M|%A, %B %-d, %Y").output().unwrap();
+            let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            let (t, d) = s.split_once('|').unwrap();
+            let now = clock_strings();
+            // the minute may have ticked between the two: look again
+            if now.0 == t {
+                assert_eq!(now.1, d.to_uppercase());
+                return;
+            }
+        }
+        panic!("the minute kept changing");
+    }
 }
