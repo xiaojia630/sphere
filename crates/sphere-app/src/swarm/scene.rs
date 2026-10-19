@@ -9,6 +9,7 @@ use crate::core::{CoreCtl, Decks, Sim, StageView};
 use crate::glow::{GlowMaterial, GlowSlots, Kind};
 use crate::motion::{self, Pace};
 use crate::util::*;
+use bevy::asset::RenderAssetUsages;
 use bevy::camera::visibility::NoFrustumCulling;
 use bevy::prelude::*;
 
@@ -332,7 +333,9 @@ impl Gfx<'_, '_, '_> {
     /// One glow part under `parent`: its mesh, a fresh material (colour from the theme role, alpha, no walls). Every
     /// part has a slot: its colour and alpha move with the satellite's colour and fade, which settle but never quite
     /// stop (the colour's lerp is not exact), so keeping them in the material would rebuild it again and again.
-    fn part(&mut self, parent: Entity, m: Mesh, kind: Kind, role: Role, alpha: f32, tf: Transform) -> (Entity, H) {
+    fn part(&mut self, parent: Entity, mut m: Mesh, kind: Kind, role: Role, alpha: f32, tf: Transform) -> (Entity, H) {
+        // the handle isn't kept, so nothing reads or rebuilds this mesh: no CPU copy once it's uploaded
+        m.asset_usage = RenderAssetUsages::RENDER_WORLD;
         let mut mat = GlowMaterial::new(kind, crate::theme::now_lin(role), alpha);
         mat.u.a.y = 0.0;
         self.gslots.attach(&mut mat);

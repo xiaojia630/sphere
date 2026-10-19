@@ -99,8 +99,13 @@ fn counts(world: &mut World) {
     let mut q = world.query::<&Camera>();
     let cams: Vec<bool> = q.iter(world).map(|c| c.is_active).collect();
     let meshes = world.resource::<Assets<Mesh>>();
-    let (mut mv, mut mbytes) = (0usize, 0usize);
+    let (mut mv, mut mbytes, mut gpu_only) = (0usize, 0usize, 0usize);
     for (_, m) in meshes.iter() {
+        // a RENDER_WORLD mesh has handed its vertices to the renderer: nothing to count, and the counters below panic
+        if m.try_attributes().is_err() {
+            gpu_only += 1;
+            continue;
+        }
         mv += m.count_vertices();
         mbytes += m.count_vertices() * m.get_vertex_size() as usize
             + m.indices().map(|i| i.len() * 4).unwrap_or(0);
@@ -128,7 +133,7 @@ fn counts(world: &mut World) {
     let mut nq = world.query::<&Node>();
     let nodes = nq.iter(world).count();
     eprintln!(
-        "stats: entities {ents} | ui nodes {nodes}, texts {texts} | cameras {} ({} active) | meshes {nm} ({mv} verts, {:.1} MB) | materials glow {glow}, panel {panel} | images {ni}: GPU-size {:.1} MB, CPU copies {:.1} MB",
+        "stats: entities {ents} | ui nodes {nodes}, texts {texts} | cameras {} ({} active) | meshes {nm} ({gpu_only} GPU-only; CPU copies {mv} verts, {:.1} MB) | materials glow {glow}, panel {panel} | images {ni}: GPU-size {:.1} MB, CPU copies {:.1} MB",
         cams.len(),
         cams.iter().filter(|a| **a).count(),
         mbytes as f64 / 1e6,
@@ -315,5 +320,31 @@ mod mac {
                 u.csw = ti.pti_csw as u32 as u64;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bevy::asset::RenderAssetUsages;
+    use bevy::mesh::PrimitiveTopology;
+
+    #[test]
+    fn counting_meshes_copes_with_ones_the_renderer_has_taken() {
+        let mut world = World::new();
+        world.init_resource::<Assets<Mesh>>();
+        world.init_resource::<Assets<Image>>();
+        world.init_resource::<Assets<crate::glow::GlowMaterial>>();
+        world.init_resource::<Assets<crate::panel::PanelMaterial>>();
+        let mut kept = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default());
+        kept.insert_attribute(Mesh::ATTRIBUTE_POSITION, vec![[0.0f32; 3]; 3]);
+        // what a RENDER_WORLD mesh looks like in the main world once it has been extracted: no vertices left
+        let mut taken = kept.clone();
+        taken.take_gpu_data().unwrap();
+        assert!(taken.try_attributes().is_err());
+        let mut meshes = world.resource_mut::<Assets<Mesh>>();
+        meshes.add(kept);
+        meshes.add(taken);
+        counts(&mut world);
     }
 }

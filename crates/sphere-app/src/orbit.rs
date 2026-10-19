@@ -130,7 +130,8 @@ fn beam_mesh() -> Mesh {
             at.push([0.0, 0.0, 0.0, kk]);
         }
     }
-    let mut m = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default());
+    // built once and never read back: no CPU copy once it's uploaded
+    let mut m = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::RENDER_WORLD);
     m.insert_attribute(Mesh::ATTRIBUTE_POSITION, pos);
     m.insert_attribute(ATTR_HOLO, at);
     m
@@ -180,7 +181,7 @@ pub fn setup(
     }
     parts.push((g, Role::Fill, 1.0, 0.5));
     for (g, role, a, wall) in parts {
-        let e = c.spawn((Mesh3d(meshes.add(g.into_mesh())), MeshMaterial3d(gmats.add(gm(role, a, wall))), Transform::default(), crate::core::GlowInfo { deck: crate::core::CORE, role, alpha: a, wall, tag: crate::core::Tag::Orb })).id();
+        let e = c.spawn((Mesh3d(meshes.add(g.into_gpu_mesh())), MeshMaterial3d(gmats.add(gm(role, a, wall))), Transform::default(), crate::core::GlowInfo { deck: crate::core::CORE, role, alpha: a, wall, tag: crate::core::Tag::Orb })).id();
         c.entity(track).add_child(e);
     }
     // the fixed front marker: an arc ±9° and two arrowheads at ±15°
@@ -195,7 +196,7 @@ pub fn setup(
         let b1 = pt(R + 7.0, front + s * 15.0 * DEG);
         g.tri(tip, b0, b1, 1.0);
     }
-    let e = c.spawn((Mesh3d(meshes.add(g.into_mesh())), MeshMaterial3d(gmats.add(gm(Role::Hot, 1.0, 0.3))), Transform::default(), crate::core::GlowInfo { deck: crate::core::CORE, role: Role::Hot, alpha: 1.0, wall: 0.3, tag: crate::core::Tag::Orb })).id();
+    let e = c.spawn((Mesh3d(meshes.add(g.into_gpu_mesh())), MeshMaterial3d(gmats.add(gm(Role::Hot, 1.0, 0.3))), Transform::default(), crate::core::GlowInfo { deck: crate::core::CORE, role: Role::Hot, alpha: 1.0, wall: 0.3, tag: crate::core::Tag::Orb })).id();
     c.entity(marker).add_child(e);
     // the tiles and their beams
     let bm = meshes.add(beam_mesh());

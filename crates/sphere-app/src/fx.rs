@@ -45,7 +45,7 @@ pub fn setup(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut mats:
     m.u.a.y = 0.0;
     // its colour and alpha change every frame while it plays (see `update`)
     slots.attach(&mut m);
-    let e = commands.spawn((Mesh3d(meshes.add(g.into_mesh())), MeshMaterial3d(mats.add(m)), Transform::from_xyz(0.0, 0.0, 120.0), Visibility::Hidden, Shock)).id();
+    let e = commands.spawn((Mesh3d(meshes.add(g.into_gpu_mesh())), MeshMaterial3d(mats.add(m)), Transform::from_xyz(0.0, 0.0, 120.0), Visibility::Hidden, Shock)).id();
     if let Ok(c) = core.single() {
         commands.entity(c).add_child(e);
     } else {

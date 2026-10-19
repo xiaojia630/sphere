@@ -321,7 +321,8 @@ pub fn setup_backdrop(
     mut mats: ResMut<Assets<GlowMaterial>>,
     cam: Query<Entity, With<CamCore>>,
 ) {
-    let mut m = Mesh::new(PrimitiveTopology::TriangleList, bevy::asset::RenderAssetUsages::default());
+    // only its transform and material change after this: no CPU copy once it's uploaded
+    let mut m = Mesh::new(PrimitiveTopology::TriangleList, bevy::asset::RenderAssetUsages::RENDER_WORLD);
     m.insert_attribute(Mesh::ATTRIBUTE_POSITION, vec![[-0.5f32, -0.5, 0.0], [0.5, -0.5, 0.0], [0.5, 0.5, 0.0], [-0.5, -0.5, 0.0], [0.5, 0.5, 0.0], [-0.5, 0.5, 0.0]]);
     m.insert_attribute(
         ATTR_HOLO,

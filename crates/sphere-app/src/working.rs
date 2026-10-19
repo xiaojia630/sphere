@@ -199,7 +199,7 @@ pub fn setup(
     let mut hm = GlowMaterial::new(Kind::Ring, crate::theme::now_lin(Role::Hot), 1.0);
     hm.u.a.y = 0.0;
     gslots.attach(&mut hm);
-    let head = c.spawn((Head, Mesh3d(meshes.add(g.into_mesh())), MeshMaterial3d(gmats.add(hm)), Transform::default())).id();
+    let head = c.spawn((Head, Mesh3d(meshes.add(g.into_gpu_mesh())), MeshMaterial3d(gmats.add(hm)), Transform::default())).id();
     c.entity(track).add_children(&[line, head]);
     // panels: run (left 54, top 54), output (right 1546, bottom 962), edit (right 1546, top 46)
     let mut mk = |w: f32, h: f32, home: Vec3, side: f32, k: u8| -> Entity {

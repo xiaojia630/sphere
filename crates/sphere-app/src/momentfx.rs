@@ -92,10 +92,10 @@ pub fn setup(
         let a = (45.0 + 90.0 * k as f32) * DEG;
         ring_geo(&mut g, 426.0 + 13.0, 26.0, RingOpt { a0: a - 0.35 * DEG, a1: a + 0.35 * DEG, k: 0.85, ..default() });
     }
-    let e = c.spawn((Mesh3d(meshes.add(g.into_mesh())), MeshMaterial3d(mat(&mut gmats, 0.0)), Transform::default())).id();
+    let e = c.spawn((Mesh3d(meshes.add(g.into_gpu_mesh())), MeshMaterial3d(mat(&mut gmats, 0.0)), Transform::default())).id();
     let mut g = Geo::new();
     dash_geo(&mut g, 457.0, 1.0, 10.0, 9.0);
-    let spin = c.spawn((HaloSpin, Mesh3d(meshes.add(g.into_mesh())), MeshMaterial3d(mat(&mut gmats, 0.0)), Transform::default())).id();
+    let spin = c.spawn((HaloSpin, Mesh3d(meshes.add(g.into_gpu_mesh())), MeshMaterial3d(mat(&mut gmats, 0.0)), Transform::default())).id();
     c.entity(halo).add_children(&[e, spin]);
     // tethers: world space, rebuilt every frame
     let tm = meshes.add(lines(vec![[0.0; 3], [0.0; 3]], vec![0.0, 0.0]));

@@ -410,7 +410,8 @@ fn ui_panel_at(commands: &mut Commands, atlas: &Atlas, w: f32, h: f32, x: u32, y
 
 pub fn panel_mesh(w: f32, h: f32, pad: f32) -> Mesh {
     let (hw, hh) = (w / 2.0 + pad, h / 2.0 + pad);
-    let mut m = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default());
+    // a panel only moves by its transform and material: no CPU copy once the quad is uploaded
+    let mut m = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::RENDER_WORLD);
     m.insert_attribute(Mesh::ATTRIBUTE_POSITION, vec![[-hw, -hh, 0.0], [hw, -hh, 0.0], [hw, hh, 0.0], [-hw, hh, 0.0]]);
     m.insert_attribute(Mesh::ATTRIBUTE_UV_0, vec![[0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]]);
     m.insert_indices(bevy::mesh::Indices::U32(vec![0, 1, 2, 0, 2, 3]));
