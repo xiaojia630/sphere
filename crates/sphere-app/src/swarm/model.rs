@@ -979,7 +979,8 @@ fn sync(svc: Res<crate::service::Service>, args: Res<crate::Args>, sim: Res<crat
 }
 
 pub fn build(app: &mut App) {
-    app.init_resource::<Events>().add_systems(Update, sync);
+    // the scene reads the model this frame, as it did when the executor happened to run this first
+    app.init_resource::<Events>().add_systems(Update, sync.before(super::scene::update));
 }
 
 #[cfg(test)]
