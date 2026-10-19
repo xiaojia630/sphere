@@ -21,6 +21,43 @@ pub enum Link {
     Down(String),
 }
 
+/// A response time as the panels say it: "<1 ms", "42 ms", "1.3 s".
+pub fn fmt_rtt(ms: f32) -> String {
+    if ms < 1.0 {
+        "<1 ms".to_string()
+    } else if ms < 1000.0 {
+        format!("{ms:.0} ms")
+    } else {
+        format!("{:.1} s", ms / 1000.0)
+    }
+}
+
+/// The link to sphered in words ("sphered connected · 4 ms"), for the Signal ring's tooltip and click.
+pub fn link_line(link: Option<&Link>, rtt_ms: Option<f32>, demo: bool) -> String {
+    if demo {
+        return "demo data, no sphered".to_string();
+    }
+    match link {
+        Some(Link::Connected) => match rtt_ms {
+            Some(ms) => format!("sphered connected · {}", fmt_rtt(ms)),
+            None => "sphered connected".to_string(),
+        },
+        Some(Link::Down(why)) if !why.is_empty() => format!("sphered down · {why}"),
+        Some(Link::Down(_)) => "sphered down".to_string(),
+        _ => "sphered connecting…".to_string(),
+    }
+}
+
+/// The word on the left edge after "SPHERE · CORE" (and "AGENT SWARM"): ONLINE, CONNECTING… or OFFLINE.
+pub fn edge_word(link: Option<&Link>, demo: bool) -> &'static str {
+    match link {
+        _ if demo => "ONLINE",
+        Some(Link::Connected) => "ONLINE",
+        Some(Link::Down(_)) => "OFFLINE",
+        _ => "CONNECTING…",
+    }
+}
+
 /// What the systems read. `version` bumps on every change, so systems can skip work when it is the same.
 #[derive(Default)]
 pub struct Shared {
@@ -966,5 +1003,30 @@ mod tests {
         let lag = serde_json::json!({"jsonrpc": "2.0", "error": {"code": -32000, "message": "too slow", "data": {"kind": "lagged"}}});
         assert_eq!(ends_with("lag", vec![lag], false).await, "resyncing: too slow");
         assert_eq!(ends_with("hangup", vec![], true).await, "sphered closed the connection");
+    }
+}
+
+#[cfg(test)]
+mod link_tests {
+    use super::*;
+
+    #[test]
+    fn edge_text_follows_the_link() {
+        assert_eq!(edge_word(Some(&Link::Connected), false), "ONLINE");
+        assert_eq!(edge_word(Some(&Link::Connecting), false), "CONNECTING…");
+        assert_eq!(edge_word(Some(&Link::Starting), false), "CONNECTING…");
+        assert_eq!(edge_word(None, false), "CONNECTING…");
+        assert_eq!(edge_word(Some(&Link::Down("x".into())), false), "OFFLINE");
+        assert_eq!(edge_word(None, true), "ONLINE");
+    }
+
+    #[test]
+    fn link_line_says_status_and_response_time() {
+        assert_eq!(link_line(Some(&Link::Connected), Some(4.2), false), "sphered connected · 4 ms");
+        assert_eq!(link_line(Some(&Link::Connected), Some(0.3), false), "sphered connected · <1 ms");
+        assert_eq!(link_line(Some(&Link::Connected), Some(1500.0), false), "sphered connected · 1.5 s");
+        assert_eq!(link_line(Some(&Link::Connected), None, false), "sphered connected");
+        assert_eq!(link_line(Some(&Link::Starting), None, false), "sphered connecting…");
+        assert_eq!(link_line(Some(&Link::Down(String::new())), None, false), "sphered down");
     }
 }

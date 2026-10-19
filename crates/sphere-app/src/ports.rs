@@ -57,6 +57,16 @@ pub struct PortsApp {
     version: u64,
 }
 
+impl PortsApp {
+    /// How many ports are listening, once a listing has come in (the Orbit tile's caption).
+    pub fn listening(&self) -> Option<usize> {
+        match &self.list {
+            Some(Ok(v)) => Some(v.len()),
+            _ => None,
+        }
+    }
+}
+
 impl Default for PortsApp {
     fn default() -> Self {
         let (tx, rx) = mpsc::channel();

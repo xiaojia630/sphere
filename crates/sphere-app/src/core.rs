@@ -935,6 +935,33 @@ fn write_spokes_geo(g: &mut Geo, spokes: &[(f32, f32, f32)], rw: f32, wl: f32) {
 
 // ---------------------------------------------------------------- per-frame update
 
+/// How hard the VOICE ring's spokes work: low and calm when silent, following the speech level while speaking.
+/// Screenshots and benches (no audio) keep the prototype's lively idle.
+pub fn spoke_energy(demo: bool, speaking: bool, level: f32) -> f32 {
+    if demo {
+        1.0
+    } else if speaking {
+        0.3 + level.clamp(0.0, 1.0) * 1.9
+    } else {
+        0.25
+    }
+}
+
+/// "Today · 3 agent runs · now 14:05" (the Timeline ring's tooltip); `now` is minutes since local midnight.
+pub fn timeline_line(runs: usize, now: f32) -> String {
+    let m = now.max(0.0) as u32 % 1440;
+    format!("{} · now {:02}:{:02}", today_line(runs), m / 60, m % 60)
+}
+
+/// "Today · 3 agent runs".
+pub fn today_line(runs: usize) -> String {
+    match runs {
+        0 => "Today · no agent runs yet".to_string(),
+        1 => "Today · 1 agent run".to_string(),
+        n => format!("Today · {n} agent runs"),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn update_core(
     sim: Res<Sim>,
@@ -948,6 +975,7 @@ pub fn update_core(
     mut last_ver: Local<u32>,
     mut last_min: Local<f32>,
     mut last_agents: Local<(u32, f32)>,
+    sound: Res<crate::sound::Sound>,
 ) {
     let dt = sim.dt;
     let t = sim.t;
@@ -1033,7 +1061,7 @@ pub fn update_core(
 
     // spokes
     let a = &mut *assets;
-    let idle_energy = 1.0;
+    let idle_energy = spoke_energy(sound.is_off(), sound.speaking(), sound.level());
     a.energy += (idle_energy - a.energy) * (dt * 4.0).min(1.0);
     let mut sum = 0.0;
     for (i, s) in a.spokes.iter_mut().enumerate() {
@@ -1248,6 +1276,22 @@ pub fn update_materials(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn timeline_tooltip_counts_runs_and_shows_the_time() {
+        assert_eq!(super::timeline_line(3, 14.0 * 60.0 + 5.4), "Today · 3 agent runs · now 14:05");
+        assert_eq!(super::timeline_line(1, 0.0), "Today · 1 agent run · now 00:00");
+        assert_eq!(super::timeline_line(0, 23.0 * 60.0 + 59.9), "Today · no agent runs yet · now 23:59");
+    }
+
+    #[test]
+    fn spokes_idle_low_and_follow_the_level() {
+        assert_eq!(super::spoke_energy(true, false, 0.0), 1.0);
+        let idle = super::spoke_energy(false, false, 0.7);
+        let loud = super::spoke_energy(false, true, 0.7);
+        let soft = super::spoke_energy(false, true, 0.1);
+        assert!(idle < 0.3 && soft < loud && loud > 1.0);
+    }
+
     use super::*;
 
     #[test]

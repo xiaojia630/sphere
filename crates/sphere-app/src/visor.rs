@@ -198,7 +198,7 @@ pub fn setup(mut commands: Commands, f: Res<UiFonts>, dock: Query<Entity, With<D
         c.entity(root.0).add_child(e);
     }
     // edge labels, rotated, at mid height
-    for (txt, left) in [("SPHERE · CORE ONLINE", true), (concat!("SPHERE ", env!("CARGO_PKG_VERSION"), " · CORE RINGS AFTER A.L.I.C.E. (MIT)"), false)] {
+    for (txt, left) in [("SPHERE · CORE CONNECTING…", true), (concat!("SPHERE ", env!("CARGO_PKG_VERSION"), " · CORE RINGS AFTER A.L.I.C.E. (MIT)"), false)] {
         let mut n = Node { position_type: PositionType::Absolute, top: percent(50), ..default() };
         if left {
             n.left = px(-60);
@@ -454,11 +454,28 @@ pub fn dock_groups(swarm: Res<crate::swarm::Swarm>, mut groups: ParamSet<(Query<
 }
 
 /// The left edge text reads "AGENT SWARM ONLINE" while the swarm is open.
-pub fn edge_text(swarm: Res<crate::swarm::Swarm>, mut q: Query<&mut Text, With<EdgeLeft>>) {
-    let want = if swarm.open { "SPHERE · AGENT SWARM ONLINE" } else { "SPHERE · CORE ONLINE" };
+pub fn edge_text(swarm: Res<crate::swarm::Swarm>, live: Res<crate::live::Live>, args: Res<crate::Args>, mut q: Query<&mut Text, With<EdgeLeft>>) {
+    let want = edge_line(swarm.open, crate::service::edge_word(live.link.as_ref(), args.offline()));
     for mut t in &mut q {
         if t.0 != want {
-            t.0 = want.into();
+            t.0 = want.clone();
         }
+    }
+}
+
+/// "SPHERE · CORE ONLINE" (or CONNECTING… / OFFLINE); "SPHERE · AGENT SWARM ONLINE" while the swarm is open.
+pub fn edge_line(swarm: bool, word: &str) -> String {
+    format!("SPHERE · {} {word}", if swarm { "AGENT SWARM" } else { "CORE" })
+}
+
+#[cfg(test)]
+mod edge_tests {
+    use super::*;
+
+    #[test]
+    fn edge_text_names_the_link_and_the_view() {
+        assert_eq!(edge_line(false, "ONLINE"), "SPHERE · CORE ONLINE");
+        assert_eq!(edge_line(false, "CONNECTING…"), "SPHERE · CORE CONNECTING…");
+        assert_eq!(edge_line(true, "OFFLINE"), "SPHERE · AGENT SWARM OFFLINE");
     }
 }
