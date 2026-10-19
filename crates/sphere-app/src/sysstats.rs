@@ -364,21 +364,22 @@ mod tests {
 
     #[test]
     fn a_burst_of_changes_settles_into_one() {
-        let pace = Pace { quiet: Duration::from_millis(150), cap: Duration::from_secs(2), ..FAST };
+        // quiet is far longer than the gaps, so a busy machine that wakes the feeder late still lands inside it
+        let pace = Pace { quiet: Duration::from_millis(500), cap: Duration::from_secs(4), ..FAST };
         let (tx, rx) = sync_channel(1);
-        // changes at 0, 50, 100 and 150 ms: settled 150 ms after the last, long before the cap
+        // changes at 0, 50, 100 and 150 ms: settled 500 ms after the last, long before the cap
         tx.send(()).unwrap();
         let feeder = std::thread::spawn(move || {
             for _ in 0..3 {
                 std::thread::sleep(Duration::from_millis(50));
                 let _ = tx.try_send(());
             }
-            std::thread::sleep(Duration::from_millis(400));
+            std::thread::sleep(Duration::from_millis(1200));
             tx
         });
         let t = Instant::now();
         assert!(settle(&rx, &pace));
-        assert!(t.elapsed() >= Duration::from_millis(290) && t.elapsed() < Duration::from_millis(1500), "settled after {:?}", t.elapsed());
+        assert!(t.elapsed() >= Duration::from_millis(640) && t.elapsed() < Duration::from_millis(3000), "settled after {:?}", t.elapsed());
         // the stream ends: whatever was still waiting counts once more, then it is over
         let tx = feeder.join().unwrap();
         tx.send(()).unwrap();
