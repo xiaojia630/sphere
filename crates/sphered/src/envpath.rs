@@ -98,6 +98,22 @@ pub fn is_bare(path: &str) -> bool {
         .all(|d| matches!(d, "/usr/bin" | "/bin" | "/usr/sbin" | "/sbin"))
 }
 
+/// The full path of `cmd` found on `path` (a command with a `/` in it is taken as it is). sphere-host looks a bare
+/// name up on its own PATH, and the app may have started the host with Finder's bare one, so sphered hands it
+/// the full path.
+pub fn which(cmd: &str, path: &str) -> Option<std::path::PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+    if cmd.contains('/') {
+        return Some(cmd.into());
+    }
+    path.split(':')
+        .filter(|d| !d.is_empty())
+        .map(|d| Path::new(d).join(cmd))
+        .find(|p| {
+            std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+        })
+}
+
 /// Sets this process's PATH to the merged one. Call it first thing in `main`, before any thread starts.
 pub fn fix_path() -> String {
     let current = std::env::var("PATH").unwrap_or_default();
@@ -152,6 +168,25 @@ mod tests {
             p,
             "/usr/bin:/bin:/usr/sbin:/sbin:/Users/me/.local/bin:/opt/homebrew/bin"
         );
+    }
+
+    #[test]
+    fn the_agent_is_found_by_its_full_path() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        let bin = d.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let exe = bin.join("claude");
+        std::fs::write(&exe, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = format!("/usr/bin:{}", bin.display());
+        assert_eq!(which("claude", &path), Some(exe.clone()));
+        // a file that isn't executable, or a missing one, isn't it
+        std::fs::write(bin.join("notes"), "x").unwrap();
+        assert_eq!(which("notes", &path), None);
+        assert_eq!(which("nope-not-here", &path), None);
+        // a path is taken as it is
+        assert_eq!(which("/opt/x/claude", &path), Some("/opt/x/claude".into()));
     }
 
     #[test]
