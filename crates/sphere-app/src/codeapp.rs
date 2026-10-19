@@ -8,7 +8,7 @@
 //! It also opens a folder (`code <path>`, O in Files and Git): the folder's files on the left, the selected file or its
 //! uncommitted diff in the middle, the repo's changes, its tests and the editors on the right. Keys there: J K (or the
 //! arrows) move through the tree, Enter opens or closes a folder, PgUp PgDn scroll, H L hunks, [ ] changed files, E
-//! edits in Helix (a terminal tab), Z opens Zed (Shift+Z or F: the folder), R runs the tests, Esc closes.
+//! edits in Helix (a terminal tab), Z opens Zed (F or Shift+Z: the folder), R runs the tests, Esc closes.
 use crate::core::CoreCtl;
 use crate::fonts::UiFonts;
 use crate::panel::*;
@@ -426,7 +426,7 @@ fn action_buttons(folder: bool) -> Vec<(&'static str, &'static str, KeyCode, Opt
         vec![
             ("EDIT IN HELIX", "E", KeyCode::KeyE, None, Role::Hot, true),
             ("OPEN IN ZED", "Z", KeyCode::KeyZ, None, Role::Hot, false),
-            ("OPEN FOLDER IN ZED", "⇧Z", KeyCode::KeyF, None, Role::Hot, false),
+            ("OPEN FOLDER IN ZED", "F", KeyCode::KeyF, None, Role::Hot, false),
             ("RUN TESTS", "R", KeyCode::KeyR, None, Role::Hot, false),
             ("CLOSE", "ESC", KeyCode::Escape, None, Role::Dim, false),
         ]
@@ -2067,8 +2067,8 @@ fn draw_folder_strip(c: &mut Commands, ui: &Ui, root: Entity, dir: &Path, app: &
     c.entity(chip).add_children(&[dot, col]);
     let sp = c.spawn(Node { flex_grow: 1.0, ..default() }).id();
     let legend = c.spawn(Node { flex_direction: FlexDirection::Column, row_gap: px(4), align_items: AlignItems::FlexEnd, ..default() }).id();
-    let l1 = ui.text(c, "J K FILE   ↵ OPEN / FOLD   PGUP PGDN SCROLL   H L HUNK   [ ] CHANGED FILE", &ui.f.ui600, 10.0, 1.6, ui.dim);
-    let l2 = ui.text(c, "E HELIX   Z ZED   ⇧Z FOLDER IN ZED   R TESTS   ESC CLOSE", &ui.f.ui600, 10.0, 1.6, ui.dim);
+    let l1 = ui.text(c, "J K FILE   ENTER OPEN / FOLD   PGUP PGDN SCROLL   H L HUNK   [ ] CHANGED FILE", &ui.f.ui600, 10.0, 1.6, ui.dim);
+    let l2 = ui.text(c, "E HELIX   Z ZED   F FOLDER IN ZED   R TESTS   ESC CLOSE", &ui.f.ui600, 10.0, 1.6, ui.dim);
     c.entity(legend).add_children(&[l1, l2]);
     c.entity(r).add_children(&[lab, chip, sp, legend]);
 }
@@ -2417,7 +2417,7 @@ mod tests {
             assert!(!folder.contains(&agent_only), "{agent_only}");
         }
         assert!(action_buttons(true).iter().all(|b| b.3.is_none() && b.0 != "ASK FOR CHANGE"));
-        assert_eq!(folder, ["E", "Z", "⇧Z", "R", "ESC"]);
+        assert_eq!(folder, ["E", "Z", "F", "R", "ESC"]);
         let agent: Vec<_> = action_buttons(false).iter().map(|b| b.1).collect();
         assert_eq!(agent, ["M", "P", "E", "Z", "D"]);
     }
