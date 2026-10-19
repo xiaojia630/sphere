@@ -10,5 +10,13 @@ It is built on and includes these libraries, under their own licenses (MIT and/o
   Bevy, alacritty_terminal (Alacritty), portable-pty (WezTerm), rodio, hound, and the other crates listed in
   Cargo.lock.
 
+Sphere's voice (crates/sphere-voice):
+  Kokoro-82M by hexgrad (Apache-2.0); crates/sphere-voice/assets/bm_george.f32 is its bm_george voice tensor.
+  The int8 ONNX export of Kokoro from kokoro-onnx by thewh1teagle (MIT), downloaded at first use.
+  misaki by hexgrad (Apache-2.0): its British lexicons (gb_gold.json, gb_silver.json) are downloaded at first use,
+  and crates/sphere-voice/src/g2p.rs ports parts of its English G2P rules.
+  ONNX Runtime by Microsoft (MIT), linked through the ort crate (MIT OR Apache-2.0).
+  espeak-ng (GPL-3.0) is never linked or included; when installed, it is run as a separate program.
+
 Fonts in assets/fonts are under the SIL Open Font License 1.1 (licence texts alongside them):
   Michroma, Rajdhani, JetBrains Mono.

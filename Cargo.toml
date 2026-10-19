@@ -7,6 +7,7 @@ members = [
     "crates/sphere-client",
     "crates/sphere-cli",
     "crates/fake-claude",
+    "crates/sphere-voice",
     "crates/sphere-app",
 ]
 
@@ -38,6 +39,7 @@ sphere-proto = { path = "crates/sphere-proto" }
 sphere-host = { path = "crates/sphere-host" }
 sphere-client = { path = "crates/sphere-client" }
 sphered = { path = "crates/sphered" }
+sphere-voice = { path = "crates/sphere-voice" }
 
 [profile.dev]
 opt-level = 1

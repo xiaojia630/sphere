@@ -1,14 +1,17 @@
 //! Sphere's UI sounds and voice. The 22 sounds are the prototype's own synthesis, rendered to WAV
 //! (assets/sounds/README.md) and embedded in the binary. Any system calls `Sound::play` (or `play_q`, which
 //! stays quiet when another sound just played); `flush` starts them. M mutes (saved); muting also stops speech.
-//! Speech goes through macOS `say` with the voice the prototype picks on a Mac (Daniel, en-GB).
+//! Speech is Kokoro's British George (crates/sphere-voice), loaded on its own thread a moment after the window is
+//! up; until it is ready, or if it can't load, speech goes through macOS `say` with the prototype's voice (Daniel,
+//! en-GB). `SPHERE_VOICE=system` keeps the `say` voice.
 //!
 //! Playback runs on its own thread: it opens the audio device and decodes the sounds once, after the window is up,
-//! so neither delays the first frame nor costs the frame a sound plays in.
+//! so neither delays the first frame nor costs the frame a sound plays in. Speech plays through the same device as
+//! it is synthesised, a sentence at a time.
 use bevy::prelude::*;
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 macro_rules! sounds {
     ($($n:ident),*) => {
@@ -18,16 +21,34 @@ macro_rules! sounds {
 }
 sounds!(hover, tick, click, toggle, progress, toast, open, close, whoosh, collapse, expand, theme, wake, listen, think, confirm, discard, error, done, boot, grab, drop);
 
+/// What the playback thread is asked to do.
+enum Play {
+    /// a sound, its gain and pitch
+    Sfx(usize, f32, f32),
+    /// speech for utterance `gen`
+    Speech(sphere_voice::Chunk),
+    /// stop speaking; only utterance `gen` and later may play
+    Hush(u64),
+}
+
+/// The voice starts loading this long after the app starts, so the first frames have the CPU.
+const VOICE_DELAY: Duration = Duration::from_millis(1500);
+
 #[derive(Resource)]
 pub struct Sound {
-    tx: Option<mpsc::Sender<(usize, f32, f32)>>,
+    tx: Option<mpsc::Sender<Play>>,
     queue: Vec<(usize, f32, f32)>,
     last: Vec<Option<Instant>>,
     any_last: Option<Instant>,
     pub muted: bool,
     /// no audio device in screenshots and benches
     off: bool,
-    voice: Option<Child>,
+    /// Kokoro, once started
+    voice: Option<sphere_voice::Speaker>,
+    /// when to start the voice (None: never, or already started)
+    voice_at: Option<Instant>,
+    /// the `say` fallback
+    say: Option<Child>,
 }
 
 impl Sound {
@@ -81,18 +102,30 @@ impl Sound {
     /// Speaks `text` (cutting off anything still being said). Markdown and code are cleaned like the prototype's.
     pub fn speak(&mut self, text: &str) {
         self.stop_speaking();
-        if self.muted || self.off || !cfg!(target_os = "macos") {
+        if self.muted || self.off {
             return;
         }
         let t = clean_for_speech(text);
         if t.is_empty() {
             return;
         }
-        self.voice = Command::new("say").args(["-v", "Daniel", "-r", "180", "--", &t]).stdout(Stdio::null()).stderr(Stdio::null()).spawn().ok();
+        if let (Some(v), Some(tx)) = (&self.voice, &self.tx) {
+            if let Some(id) = v.speak(&t) {
+                let _ = tx.send(Play::Hush(id));
+                return;
+            }
+        }
+        if !cfg!(target_os = "macos") {
+            return;
+        }
+        self.say = Command::new("say").args(["-v", "Daniel", "-r", "180", "--", &t]).stdout(Stdio::null()).stderr(Stdio::null()).spawn().ok();
     }
 
     pub fn stop_speaking(&mut self) {
-        if let Some(mut c) = self.voice.take() {
+        if let (Some(v), Some(tx)) = (&self.voice, &self.tx) {
+            let _ = tx.send(Play::Hush(v.stop()));
+        }
+        if let Some(mut c) = self.say.take() {
             let _ = c.kill();
             let _ = c.wait();
         }
@@ -154,22 +187,49 @@ fn save_muted(m: bool) {
     let _ = std::fs::write(f, if m { "1" } else { "0" });
 }
 
-/// The playback thread: decoded sounds, mixed into the default output device.
-fn start_audio() -> mpsc::Sender<(usize, f32, f32)> {
-    let (tx, rx) = mpsc::channel::<(usize, f32, f32)>();
+/// The playback thread: decoded sounds, mixed into the default output device, and a queue for speech.
+fn start_audio() -> mpsc::Sender<Play> {
+    let (tx, rx) = mpsc::channel::<Play>();
     let _ = std::thread::Builder::new().name("sphere-audio".into()).spawn(move || {
         use rodio::Source;
         let Ok(mut sink) = rodio::DeviceSinkBuilder::open_default_sink() else { return };
         sink.log_on_drop(false);
         let decoded: Vec<Option<(u16, u32, Vec<f32>)>> = DATA.iter().map(|b| decode(b)).collect();
-        while let Ok((i, gain, pitch)) = rx.recv() {
-            let Some((ch, rate, data)) = &decoded[i] else { continue };
-            let (Some(ch), Some(rate)) = (std::num::NonZero::new(*ch), std::num::NonZero::new(*rate)) else { continue };
-            let src = rodio::buffer::SamplesBuffer::new(ch, rate, data.clone()).speed(2f32.powf(pitch / 12.0)).amplify(gain);
-            sink.mixer().add(src);
+        let mut speech = rodio::Player::connect_new(sink.mixer());
+        let mut speaking = 0u64;
+        while let Ok(m) = rx.recv() {
+            match m {
+                Play::Sfx(i, gain, pitch) => {
+                    let Some((ch, rate, data)) = &decoded[i] else { continue };
+                    let (Some(ch), Some(rate)) = (std::num::NonZero::new(*ch), std::num::NonZero::new(*rate)) else { continue };
+                    let src = rodio::buffer::SamplesBuffer::new(ch, rate, data.clone()).speed(2f32.powf(pitch / 12.0)).amplify(gain);
+                    sink.mixer().add(src);
+                }
+                Play::Hush(gen) => {
+                    // a fresh queue: dropping the old one stops whatever it was saying
+                    speaking = gen;
+                    if !speech.empty() {
+                        speech = rodio::Player::connect_new(sink.mixer());
+                    }
+                }
+                Play::Speech(c) => {
+                    if c.gen == speaking && !c.samples.is_empty() {
+                        let (Some(ch), Some(rate)) = (std::num::NonZero::new(1), std::num::NonZero::new(sphere_voice::SAMPLE_RATE)) else { continue };
+                        speech.append(rodio::buffer::SamplesBuffer::new(ch, rate, c.samples));
+                    }
+                }
+            }
         }
     });
     tx
+}
+
+/// Starts Kokoro on its own thread, its speech going to the playback thread.
+fn start_voice(tx: &mpsc::Sender<Play>) -> sphere_voice::Speaker {
+    let tx = tx.clone();
+    sphere_voice::Speaker::start(sphere_voice::data_dir(), move |c| {
+        let _ = tx.send(Play::Speech(c));
+    })
 }
 
 /// 16-bit PCM WAV to interleaved f32 samples.
@@ -182,6 +242,7 @@ fn decode(bytes: &[u8]) -> Option<(u16, u32, Vec<f32>)> {
 
 pub fn setup(mut commands: Commands, args: Res<crate::Args>) {
     let muted = std::fs::read_to_string(muted_file()).map(|s| s.trim() == "1").unwrap_or(false);
+    let system_voice = std::env::var("SPHERE_VOICE").is_ok_and(|v| v == "system");
     commands.insert_resource(Sound {
         tx: if args.offline() { None } else { Some(start_audio()) },
         queue: Vec::new(),
@@ -190,18 +251,24 @@ pub fn setup(mut commands: Commands, args: Res<crate::Args>) {
         muted,
         off: args.offline(),
         voice: None,
+        voice_at: (!args.offline() && !system_voice).then(|| Instant::now() + VOICE_DELAY),
+        say: None,
     });
 }
 
 #[cfg(test)]
 impl Default for Sound {
     fn default() -> Self {
-        Sound { tx: None, queue: Vec::new(), last: vec![None; NAMES.len()], any_last: None, muted: false, off: true, voice: None }
+        Sound { tx: None, queue: Vec::new(), last: vec![None; NAMES.len()], any_last: None, muted: false, off: true, voice: None, voice_at: None, say: None }
     }
 }
 
-/// Hands the queued sounds to the playback thread.
+/// Hands the queued sounds to the playback thread (and starts the voice once the app has settled).
 pub fn flush(mut s: ResMut<Sound>) {
+    if s.voice_at.is_some_and(|t| Instant::now() >= t) {
+        s.voice_at = None;
+        s.voice = s.tx.as_ref().map(start_voice);
+    }
     if s.queue.is_empty() {
         return;
     }
@@ -210,8 +277,8 @@ pub fn flush(mut s: ResMut<Sound>) {
         return;
     }
     if let Some(tx) = &s.tx {
-        for item in q {
-            let _ = tx.send(item);
+        for (i, gain, pitch) in q {
+            let _ = tx.send(Play::Sfx(i, gain, pitch));
         }
     }
 }

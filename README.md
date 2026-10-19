@@ -118,6 +118,13 @@ Sphere is built on [Bevy](https://bevy.org), [Alacritty](https://github.com/alac
 [WezTerm](https://github.com/wezterm/wezterm)'s `portable-pty` and [rodio](https://github.com/RustAudio/rodio).
 It is set in Michroma, Rajdhani and JetBrains Mono (SIL OFL).
 
+Sphere's voice is [Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M) by hexgrad (Apache-2.0) with its `bm_george`
+voice, run through [ONNX Runtime](https://onnxruntime.ai) (MIT) via [`ort`](https://github.com/pykeio/ort) (MIT/Apache-2.0).
+The model file is [kokoro-onnx](https://github.com/thewh1teagle/kokoro-onnx)'s int8 export (MIT), downloaded on first
+use; phonemes come from [misaki](https://github.com/hexgrad/misaki)'s British lexicons (Apache-2.0). If
+[espeak-ng](https://github.com/espeak-ng/espeak-ng) is installed, it is run as a separate program for words the
+lexicons don't know; it is not linked or included.
+
 Sphere is licensed under Apache-2.0; see [LICENSE](LICENSE) and [NOTICE](NOTICE). Contributions are welcome: see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ---

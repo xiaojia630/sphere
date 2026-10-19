@@ -29,6 +29,7 @@ hound = "=3.5.1"
 sphere-proto.workspace = true
 sphere-client.workspace = true
 sphere-host.workspace = true
+sphere-voice.workspace = true
 tokio.workspace = true
 serde_json.workspace = true
 libc.workspace = true
