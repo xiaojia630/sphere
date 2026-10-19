@@ -18,6 +18,7 @@ mod gitapp;
 mod gitdata;
 mod glow;
 mod hud;
+mod lean;
 mod live;
 mod moment;
 mod momentfx;
@@ -44,6 +45,7 @@ mod working;
 use bevy::{
     camera::{visibility::RenderLayers, CameraOutputMode, ClearColorConfig},
     core_pipeline::tonemapping::{DebandDither, Tonemapping},
+    light::cluster::ClusterConfig,
     post_process::bloom::{Bloom, BloomCompositeMode},
     prelude::*,
     window::{ExitCondition, PresentMode, PrimaryWindow},
@@ -251,6 +253,7 @@ fn main() {
     if let Some(r) = app.get_sub_app_mut(bevy::render::RenderApp) {
         r.add_systems(bevy::render::Render, render_thread_qos);
     }
+    app.add_plugins(lean::LeanPlugin);
     app.run();
 }
 
@@ -258,7 +261,7 @@ fn main() {
 /// `SPHERE_PIPELINED=0` (for measuring) renders each frame on the main thread after its update, instead of on the
 /// render thread while the next frame updates.
 fn default_plugins(args: &Args) -> impl PluginGroup {
-    let g = if args.headless() {
+    let g = lean::trim(if args.headless() {
         DefaultPlugins
             .set(task_pools())
             .set(WindowPlugin { primary_window: None, exit_condition: ExitCondition::DontExit, ..default() })
@@ -276,7 +279,7 @@ fn default_plugins(args: &Args) -> impl PluginGroup {
             close_when_requested: false,
             ..default()
         })
-    };
+    });
     if std::env::var("SPHERE_PIPELINED").is_ok_and(|v| v == "0") {
         g.disable::<bevy::render::pipelined_rendering::PipelinedRenderingPlugin>()
     } else {
@@ -285,24 +288,21 @@ fn default_plugins(args: &Args) -> impl PluginGroup {
 }
 
 /// Worker threads run at user-interactive QoS, so macOS keeps them on performance cores and doesn't park them
-/// mid-frame (at the default QoS frames hitched by ~14 ms a few times a second). `SPHERE_THREADS=n` (for
-/// measuring) sets how many run systems; 0 runs them on the thread that runs the schedule.
+/// mid-frame (at the default QoS frames hitched by ~14 ms a few times a second). Schedules run their systems on
+/// their own thread (see `lean`), so the compute pool only helps the few engine loops that split work: one thread.
+/// Shader pipelines compile on the async pool at start. `SPHERE_THREADS=n` (for measuring) sets the compute pool;
+/// never 0, which Bevy's transform propagation can't handle.
 fn task_pools() -> TaskPoolPlugin {
     use bevy::app::TaskPoolThreadAssignmentPolicy as P;
     let hook: Option<std::sync::Arc<dyn Fn() + Send + Sync>> = Some(std::sync::Arc::new(interactive_qos));
     let pol = |min: usize, max: usize, percent: f32| P { min_threads: min, max_threads: max, percent, on_thread_spawn: hook.clone(), on_thread_destroy: None };
-    let compute = match std::env::var("SPHERE_THREADS").ok().and_then(|v| v.parse().ok()) {
-        Some(n) => pol(n, n, 1.0),
+    let compute = match std::env::var("SPHERE_THREADS").ok().and_then(|v| v.parse::<usize>().ok()) {
+        Some(n) => pol(n.max(1), n.max(1), 1.0),
+        None if lean::on() => pol(1, 1, 1.0),
         None => pol(1, usize::MAX, 1.0),
     };
-    TaskPoolPlugin {
-        task_pool_options: TaskPoolOptions {
-            io: pol(1, 4, 0.25),
-            async_compute: pol(1, 4, 0.25),
-            compute,
-            ..default()
-        },
-    }
+    let (io, async_compute) = if lean::on() { (pol(1, 1, 0.25), pol(1, 2, 0.25)) } else { (pol(1, 4, 0.25), pol(1, 4, 0.25)) };
+    TaskPoolPlugin { task_pool_options: TaskPoolOptions { io, async_compute, compute, ..default() } }
 }
 
 /// Marks the calling thread user-interactive (macOS); a no-op elsewhere.
@@ -404,6 +404,8 @@ fn setup_cameras(mut commands: Commands, args: Res<Args>, off: Res<Offscreen>) {
         Tonemapping::None,
         DebandDither::Disabled,
         Bloom { intensity: 0.22, low_frequency_boost: 0.7, composite_mode: BloomCompositeMode::Additive, ..Bloom::NATURAL },
+        // no lights (see `no_gpu_clustering`): one light cluster per view instead of ~4096 sorted every frame
+        ClusterConfig::Single,
         proj.clone(),
         msaa,
         target_for(&off),
@@ -427,6 +429,7 @@ fn setup_cameras(mut commands: Commands, args: Res<Args>, off: Res<Offscreen>) {
         bevy::camera::Hdr,
         Tonemapping::None,
         DebandDither::Disabled,
+        ClusterConfig::Single,
         proj,
         msaa,
         target_for(&off),
