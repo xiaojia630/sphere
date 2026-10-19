@@ -193,7 +193,7 @@ pub fn keys(
                     match target {
                         BarTarget::Task(task, title) if !t.is_empty() => {
                             svc.send(Cmd::Send { task, text: t.to_string() });
-                            toasts.push(format!("Asked {title} for a change"));
+                            toasts.push(format!("Sent to {title}"));
                             sound.play("confirm");
                         }
                         other if !t.is_empty() || matches!(other, BarTarget::Commit(_, _, true)) => bar.out = Some((other, t.to_string())),
@@ -464,7 +464,7 @@ pub fn draw(
         for (mut t, mut c) in &mut q.p0() {
             if bar.text.is_empty() && (!bar.open || bar.target.is_some()) {
                 t.0 = match &bar.target {
-                    Some(BarTarget::Task(_, title)) if bar.open => format!("Ask “{title}” for a change  ·  Enter sends, Esc cancels"),
+                    Some(BarTarget::Task(_, title)) if bar.open => format!("Follow up with “{title}”  ·  Enter sends, Esc cancels"),
                     Some(BarTarget::Commit(_, branch, true)) if bar.open => format!("Amend {branch}  ·  Enter keeps the message, or type a new one  ·  Esc cancels"),
                     Some(BarTarget::Commit(_, branch, false)) if bar.open => format!("Commit message for {branch}  ·  Enter commits, Esc cancels"),
                     Some(BarTarget::Branch(_)) if bar.open => "Switch to branch…  ·  Enter switches, Esc cancels".to_string(),
