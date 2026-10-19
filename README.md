@@ -262,4 +262,6 @@ Flags: `--demo` (sample agents, no service), `--code`, `--git`, `--app container
 
 `--shot` and `--record` render offscreen and need no window. `--bench`, `--shot` and `--record` use the demo data unless `--live` is given.
 
+The agent, review and ops clips above come from `scripts/readme-demo/run.sh`: a home of its own with a small Rust repo, its own sphered whose agent is fake-claude adding a `--json` flag, and stand-in `docker` and `lsof` with a sample compose project. Nothing of yours is touched. For example `scripts/readme-demo/run.sh /tmp/demo --task -- target/release/sphere-app --live` (after `cargo build -p sphered -p sphere-host -p fake-claude -p sphere-cli`).
+
 Linux: needs X11 dev libs by default (`--features wayland` for Wayland). The hotkey and notifications are macOS only for now. No GPU (CI, containers): `scripts/shot-swiftshader.sh --shot out.png --frames 120 --no-msaa` uses a software Vulkan driver.
