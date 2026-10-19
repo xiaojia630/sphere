@@ -6,8 +6,12 @@ use crate::util::*;
 use bevy::prelude::*;
 use bevy::text::LineHeight;
 
-/// The eight apps, in rolodex and orbit order. Terminal and Agents open real panels; the rest come later.
-pub const APPS: [(&str, bool); 8] = [
+/// Music isn't built yet, so it is hidden from the rolodex, the orbit and the bar; true brings its "soon" tile back.
+pub const SHOW_MUSIC: bool = false;
+
+/// Every app, in rolodex and orbit order (`false`: not built yet, it says it comes later). Music is last, so hiding
+/// it leaves the others' indices as they are.
+const ALL_APPS: [(&str, bool); 8] = [
     ("Terminal", true),
     ("Agents", true),
     ("Code", true),
@@ -17,6 +21,9 @@ pub const APPS: [(&str, bool); 8] = [
     ("Files", true),
     ("Music", false),
 ];
+
+/// The apps that show, in rolodex and orbit order.
+pub const APPS: &[(&str, bool)] = if SHOW_MUSIC { &ALL_APPS } else { ALL_APPS.split_at(7).0 };
 
 /// Where panel `i` of the boot order appears (0.42 s + i · 0.09 s): brand, system, apps, telemetry, clock,
 /// rail, agents, say.
@@ -190,7 +197,7 @@ pub fn setup(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut atlas
     let bl = c.spawn((Node { position_type: PositionType::Absolute, left: px(0), top: px(-1), bottom: px(-1), width: px(9), border: UiRect { left: px(1), top: px(1), bottom: px(1), ..default() }, ..default() }, BorderColor::all(hot))).id();
     let br = c.spawn((Node { position_type: PositionType::Absolute, right: px(0), top: px(-1), bottom: px(-1), width: px(9), border: UiRect { right: px(1), top: px(1), bottom: px(1), ..default() }, ..default() }, BorderColor::all(hot))).id();
     c.entity(band).add_children(&[bl, br]);
-    let list = c.spawn((Node { position_type: PositionType::Absolute, left: px(0), right: px(0), top: px(136.0 - 8.0 * 34.0), flex_direction: FlexDirection::Column, ..default() }, RoloList)).id();
+    let list = c.spawn((Node { position_type: PositionType::Absolute, left: px(0), right: px(0), top: px(136.0 - APPS.len() as f32 * 34.0), flex_direction: FlexDirection::Column, ..default() }, RoloList)).id();
     // three copies, so the drum wraps: the selected row is always in the middle copy
     for k in 0..APPS.len() * 3 {
         let i = k % APPS.len();
@@ -469,10 +476,10 @@ pub fn rolo_row_at(y: f32, sel: usize) -> Option<usize> {
 
 /// How bright row `k` of the drum is with row `mid` selected: the window fades its top and bottom quarter, and
 /// the bottom row as far from the selection as half the drum is hidden (it is the same app as the top row,
-/// which would otherwise show twice).
+/// which would otherwise show twice); with an odd number of apps the top row past half the drum is hidden too.
 fn rolo_fade(k: usize, mid: usize, n: usize) -> f32 {
     let d = k.abs_diff(mid);
-    if k > mid && d * 2 >= n {
+    if (k > mid && d * 2 >= n) || (k < mid && d * 2 > n) {
         0.0
     } else if d <= 2 {
         1.0
@@ -547,13 +554,17 @@ mod tests {
             assert_eq!(rolo_row_at(band - ROLO_ROW, sel), Some((sel + APPS.len() - 1) % APPS.len()));
             assert_eq!(rolo_row_at(band + 2.0 * ROLO_ROW, sel), Some((sel + 2) % APPS.len()));
         }
-        // with Terminal selected (as the home starts), Containers is the row at the top, Git & PRs at the bottom
-        assert_eq!(APPS[rolo_row_at(ROLO_WIN_TOP + 5.0, 0).unwrap()].0, "Containers");
+        // with Terminal selected (as the home starts), Containers is the top row shown, Git & PRs the bottom one
+        let up = (APPS.len() / 2) as f32;
+        assert_eq!(APPS[rolo_row_at(band - up * ROLO_ROW, 0).unwrap()].0, "Containers");
         assert_eq!(APPS[rolo_row_at(band + 3.0 * ROLO_ROW, 0).unwrap()].0, "Git & PRs");
-        // the heading, the hint under the window, and the hidden bottom row aren't rows
+        // the heading, the hint under the window, and the hidden rows past half the drum aren't rows
         assert_eq!(rolo_row_at(4.0, 0), None);
         assert_eq!(rolo_row_at(ROLO_WIN_TOP + ROLO_WIN_H + 4.0, 0), None);
         assert_eq!(rolo_row_at(band + 4.0 * ROLO_ROW, 0), None);
+        if APPS.len() % 2 == 1 {
+            assert_eq!(rolo_row_at(band - (up + 1.0) * ROLO_ROW, 0), None);
+        }
     }
 
     #[test]
@@ -570,5 +581,15 @@ mod tests {
             assert_eq!(shown.len(), n, "every app shows with {} selected: {shown:?}", app.0);
             assert_eq!(rolo_fade(mid, mid, n), 1.0);
         }
+    }
+
+    #[test]
+    fn music_hides_behind_its_switch() {
+        assert_eq!(APPS.iter().any(|a| a.0 == "Music"), SHOW_MUSIC);
+        // the others keep their places: the app indices (Code 2, Files 6, ...) don't move
+        assert_eq!(APPS[2].0, "Code");
+        assert_eq!(APPS[3].0, "Git & PRs");
+        assert_eq!(APPS[6].0, "Files");
+        assert_eq!(&APPS[..7], &ALL_APPS[..7]);
     }
 }
