@@ -598,6 +598,11 @@ impl Manager {
             self.cfg.socket_path().to_string_lossy().to_string(),
         );
         env.insert("SPHERE_TASK".to_string(), task.to_string());
+        // sphere-host may have been started with a bare PATH (it outlives sphered): the agent gets ours, which
+        // has the user's login-shell PATH (see `envpath`), to find `claude` and the tools it runs
+        if let Ok(path) = std::env::var("PATH") {
+            env.insert("PATH".to_string(), path);
+        }
         let spawned = self
             .host
             .spawn(SpawnParams {
