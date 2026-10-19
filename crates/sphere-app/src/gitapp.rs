@@ -2,7 +2,8 @@
 //! working tree with staging, a commit box, branches and the remote, over the agents' strip. Everything is read
 //! and done with git in the background. Keys: [ ] repo, Tab the list J K move in (files, branches, graph),
 //! Enter stage or unstage the file / switch to the branch, S stage, U unstage, A stage all, X unstage all,
-//! C commit (with M toggling amend), B switch branch, F fetch, L pull, P push, V graph/list, Esc closes.
+//! C commit (with M toggling amend), B switch branch, F fetch, L pull, P push, V graph/list, R pull requests
+//! (then J K pick one, Enter or O opens it on GitHub, C checks it out, M twice merges it), Esc closes.
 use crate::appframe::{clip, Click, Ui};
 use crate::gitdata::clip_start;
 use crate::cmdbar::{BarTarget, CmdBar};
@@ -10,6 +11,7 @@ use crate::core::CoreCtl;
 use crate::fonts::UiFonts;
 use crate::gitdata::{self, Change, Op, Repo, RepoCard};
 use crate::panel::*;
+use crate::prs::{self, Detail, Pr, PrList, Tone};
 use crate::service::Service;
 use crate::util::*;
 use bevy::prelude::*;
@@ -30,6 +32,10 @@ const REPOS_MAX: usize = 12;
 const BRANCH_PICK: usize = 1000;
 const GRAPH_PICK: usize = 2000;
 const STAGE_ALT: usize = 1000;
+const PR_PICK: usize = 3000;
+const PR_ROWS: usize = 7;
+/// Pull requests are read again this often while the app is open.
+const PR_EVERY: f32 = 30.0;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Pane {
@@ -78,6 +84,7 @@ enum Zone {
     Files,
     Branches,
     Graph,
+    Prs,
 }
 
 /// The first repo card shown, so the selected repo is among the REPOS on screen.
@@ -121,6 +128,18 @@ pub struct GitApp {
     flat: bool,
     yaw: f32,
     busy: bool,
+    /// the graph and commit panes show the repo's pull requests instead (R)
+    prs_view: bool,
+    prs: Option<PrList>,
+    prs_for: Option<PathBuf>,
+    prs_t: f32,
+    prs_rx: Option<Mutex<mpsc::Receiver<(PathBuf, PrList)>>>,
+    pcur: usize,
+    detail: Option<Detail>,
+    detail_for: String,
+    detail_rx: Option<Mutex<mpsc::Receiver<Detail>>>,
+    /// an armed merge: (PR number, when M was first pressed)
+    arm: Option<(u64, f32)>,
     notes: (mpsc::Sender<Note>, Mutex<mpsc::Receiver<Note>>),
     version: u64,
 }
@@ -152,6 +171,16 @@ impl Default for GitApp {
             flat: false,
             yaw: 22.0,
             busy: false,
+            prs_view: false,
+            prs: None,
+            prs_for: None,
+            prs_t: -99.0,
+            prs_rx: None,
+            pcur: 0,
+            detail: None,
+            detail_for: String::new(),
+            detail_rx: None,
+            arm: None,
             notes: (tx, Mutex::new(rx)),
             version: 0,
         }
@@ -162,6 +191,7 @@ impl GitApp {
     pub fn open(&mut self) {
         self.open = true;
         self.load_t = -99.0;
+        self.prs_t = -99.0;
         // look for repos again (agents may have started in new ones), but keep showing the last read until the
         // new one is in, so the app opens on its content instead of "Reading…"
         self.rediscover = true;
@@ -178,6 +208,7 @@ impl GitApp {
             self.zone = Zone::Files;
             self.preview.clear();
             self.load_t = -99.0;
+            self.prs_t = -99.0;
             self.version += 1;
         }
     }
@@ -187,6 +218,7 @@ impl GitApp {
             (Some(r), Zone::Files) => r.staged.len() + r.unstaged.len(),
             (Some(r), Zone::Branches) => r.branches.len(),
             (Some(r), Zone::Graph) => r.graph.len(),
+            (_, Zone::Prs) => self.pr_list().len(),
             _ => 0,
         }
     }
@@ -199,6 +231,7 @@ impl GitApp {
         match self.zone {
             Zone::Files => self.cursor = (self.cursor as i32 + d).clamp(0, n as i32 - 1) as usize,
             Zone::Branches => self.bcur = (self.bcur as i32 + d).clamp(0, n as i32 - 1) as usize,
+            Zone::Prs => self.pcur = (self.pcur as i32 + d).clamp(0, n as i32 - 1) as usize,
             Zone::Graph => {
                 // connector rows between commits have nothing to select
                 let Some(r) = &self.repo else { return };
@@ -222,6 +255,7 @@ impl GitApp {
         let flat = self.flat;
         self.zone = match self.zone {
             Zone::Files => Zone::Branches,
+            Zone::Branches if self.prs_view => Zone::Prs,
             Zone::Branches if flat => Zone::Graph,
             _ => Zone::Files,
         };
@@ -230,6 +264,31 @@ impl GitApp {
     pub fn close(&mut self) {
         self.open = false;
         self.version += 1;
+    }
+    fn pr_list(&self) -> &[Pr] {
+        match &self.prs {
+            Some(PrList::Prs(v)) => v,
+            _ => &[],
+        }
+    }
+    fn pr(&self) -> Option<&Pr> {
+        self.pr_list().get(self.pcur)
+    }
+    /// Switches between the graph and the pull requests.
+    fn toggle_prs(&mut self) {
+        self.prs_view = !self.prs_view;
+        self.zone = if self.prs_view { Zone::Prs } else if self.zone == Zone::Prs { Zone::Files } else { self.zone };
+        self.arm = None;
+        self.version += 1;
+    }
+    /// Runs `f` in the background; its outcome comes back as a toast and the repo is read again.
+    fn act_with(&mut self, dir: PathBuf, f: impl FnOnce(&std::path::Path) -> Note + Send + 'static) {
+        self.busy = true;
+        self.version += 1;
+        let tx = self.notes.0.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(f(&dir));
+        });
     }
     fn changes(&self) -> Vec<(&Change, bool)> {
         match &self.repo {
@@ -306,11 +365,12 @@ enum Scroll {
     Key(KeyCode),
 }
 
-fn scroll_target(pane: Option<u8>, down: bool) -> Option<Scroll> {
+fn scroll_target(pane: Option<u8>, down: bool, prs_view: bool) -> Option<Scroll> {
     let k = if down { KeyCode::KeyJ } else { KeyCode::KeyK };
     match Pane::all().get(pane? as usize)? {
         Pane::Repo(_) => Some(Scroll::Key(if down { KeyCode::BracketRight } else { KeyCode::BracketLeft })),
         Pane::Branches => Some(Scroll::Zone(Zone::Branches, k)),
+        Pane::Graph | Pane::Commit if prs_view => Some(Scroll::Zone(Zone::Prs, k)),
         Pane::Graph | Pane::Commit => Some(Scroll::Zone(Zone::Graph, k)),
         Pane::Status => Some(Scroll::Zone(Zone::Files, k)),
         _ => None,
@@ -325,6 +385,7 @@ pub fn keys(
     mut app: ResMut<GitApp>,
     mut sound: ResMut<crate::sound::Sound>,
     mut toasts: ResMut<crate::live::Toasts>,
+    sim: Res<crate::core::Sim>,
     (mut clicks, mut scrolls): (ResMut<crate::appframe::AppClicks>, ResMut<crate::appframe::AppScrolls>),
     mut cmd_was: Local<bool>,
 ) {
@@ -347,7 +408,7 @@ pub fn keys(
     codes.append(&mut app.pending);
     // the wheel moves the cursor of the zone under it
     for (pane, n) in scrolls.take(1) {
-        if let Some(t) = scroll_target(pane, n > 0) {
+        if let Some(t) = scroll_target(pane, n > 0, app.prs_view) {
             let (zone, key) = match t {
                 Scroll::Zone(z, k) => (Some(z), k),
                 Scroll::Key(k) => (None, k),
@@ -362,6 +423,12 @@ pub fn keys(
     for c in clicks.take(1) {
         match c {
             Click::Key(k) => codes.push(k),
+            Click::Pick(i) if i >= PR_PICK => {
+                app.zone = Zone::Prs;
+                app.pcur = (i - PR_PICK).min(app.len_of(Zone::Prs).saturating_sub(1));
+                app.arm = None;
+                app.version += 1;
+            }
             Click::Pick(i) if i >= GRAPH_PICK => {
                 app.zone = Zone::Graph;
                 app.gcur = (i - GRAPH_PICK).min(app.len_of(Zone::Graph).saturating_sub(1));
@@ -402,7 +469,53 @@ pub fn keys(
             toasts.push_quiet("Still working on the last action");
             continue;
         }
+        if app.busy && app.prs_view && matches!(key, KeyCode::KeyC | KeyCode::KeyM | KeyCode::KeyO) {
+            toasts.push_quiet("Still working on the last action");
+            continue;
+        }
         match key {
+            KeyCode::Escape if app.prs_view => {
+                app.toggle_prs();
+                sound.play("toggle");
+            }
+            KeyCode::KeyR => {
+                app.toggle_prs();
+                sound.play("toggle");
+            }
+            KeyCode::Enter | KeyCode::KeyO if app.prs_view => match (app.pr().map(|p| p.number), app.dir()) {
+                (Some(n), Some(d)) => {
+                    app.act_with(d, move |d| prs::open_web(d, n, &prs::run_gh));
+                    sound.play("confirm");
+                }
+                _ => toasts.push_quiet("No pull request selected"),
+            },
+            KeyCode::KeyC if app.prs_view => match (app.pr().map(|p| p.number), app.dir()) {
+                (Some(n), Some(d)) => {
+                    let dirty = app.repo.as_ref().map(|r| r.staged.len() + r.unstaged.len()).unwrap_or(0);
+                    if dirty > 0 {
+                        toasts.push(format!("Commit or stash your {dirty} uncommitted change{} before checking out a pull request", if dirty == 1 { "" } else { "s" }));
+                    } else {
+                        app.act_with(d, move |d| prs::checkout(d, n, &prs::run_gh));
+                        sound.play("whoosh");
+                    }
+                }
+                _ => toasts.push_quiet("No pull request selected"),
+            },
+            KeyCode::KeyM if app.prs_view => match (app.pr().map(|p| p.number), app.dir()) {
+                (Some(n), Some(d)) => match prs::press_merge(&mut app.arm, n, sim.t) {
+                    prs::MergePress::Armed => {
+                        toasts.push(format!("Press M again to merge #{n}"));
+                        app.version += 1;
+                        sound.play("open");
+                    }
+                    prs::MergePress::Merge => {
+                        app.version += 1;
+                        app.act_with(d, move |d| prs::merge(d, n, &prs::run_gh));
+                        sound.play("progress");
+                    }
+                },
+                _ => toasts.push_quiet("No pull request selected"),
+            },
             KeyCode::Escape => {
                 app.close();
                 sound.play_with("collapse", 0.7, 0.0);
@@ -450,7 +563,7 @@ pub fn keys(
                         None => {}
                     }
                 }
-                Zone::Graph => {}
+                Zone::Graph | Zone::Prs => {}
             },
             KeyCode::KeyS => match sel {
                 Some((p, _, false)) => {
@@ -634,6 +747,7 @@ pub fn update(sim: Res<crate::core::Sim>, mut atlases: ResMut<AppAtlases>, mut a
                             't' => Some(KeyCode::Tab),
                             'e' => Some(KeyCode::Enter),
                             'v' => Some(KeyCode::KeyV),
+                            'r' => Some(KeyCode::KeyR),
                             ']' => Some(KeyCode::BracketRight),
                             '[' => Some(KeyCode::BracketLeft),
                             ',' => Some(KeyCode::Comma),
@@ -677,6 +791,7 @@ pub fn update(sim: Res<crate::core::Sim>, mut atlases: ResMut<AppAtlases>, mut a
             }
         }
     }
+    pr_update(&mut app, sim.t);
     // read the repos on open, after an action, and every 4 s (you may change things elsewhere)
     if app.loading || sim.t - app.load_t < 4.0 {
         return;
@@ -721,6 +836,73 @@ pub fn update(sim: Res<crate::core::Sim>, mut atlases: ResMut<AppAtlases>, mut a
             .collect();
         let _ = tx.send((repos, sel, repo, cards));
     });
+}
+
+/// Pull requests: read in the background on open, on a repo change and every `PR_EVERY` s; the selected one's
+/// diff and checks are read when the pane shows it; an armed merge lapses.
+fn pr_update(app: &mut GitApp, now: f32) {
+    if prs::arm_expired(&app.arm, now) {
+        app.arm = None;
+        app.version += 1;
+    }
+    let cur = app.dir();
+    if app.prs_for != cur {
+        app.prs_for = cur.clone();
+        app.prs = None;
+        app.detail = None;
+        app.detail_for.clear();
+        app.pcur = 0;
+        app.prs_rx = None;
+        app.prs_t = -99.0;
+        *prs::SUMMARY.lock().unwrap() = None;
+        app.version += 1;
+    }
+    let got = app.prs_rx.as_ref().and_then(|r| r.lock().ok()?.try_recv().ok());
+    if let Some((dir, list)) = got {
+        app.prs_rx = None;
+        if Some(&dir) == cur.as_ref() {
+            let keep = app.pr().map(|p| p.number);
+            app.prs = Some(list);
+            app.pcur = keep.and_then(|n| app.pr_list().iter().position(|p| p.number == n)).unwrap_or(0).min(app.pr_list().len().saturating_sub(1));
+            *prs::SUMMARY.lock().unwrap() = match &app.prs {
+                Some(PrList::Prs(v)) => Some(prs::summarize(v)),
+                _ => None,
+            };
+            app.version += 1;
+        }
+    }
+    if let Some(d) = cur.clone().filter(|_| app.prs_rx.is_none() && now - app.prs_t >= PR_EVERY) {
+        app.prs_t = now;
+        let (tx, rx) = mpsc::channel();
+        app.prs_rx = Some(Mutex::new(rx));
+        std::thread::spawn(move || {
+            let list = prs::list(&d, &prs::run_gh);
+            let _ = tx.send((d, list));
+        });
+    }
+    let got = app.detail_rx.as_ref().and_then(|r| r.lock().ok()?.try_recv().ok());
+    if let Some(d) = got {
+        app.detail_rx = None;
+        if app.pr().is_some_and(|p| p.number == d.number) {
+            app.detail = Some(d);
+            app.version += 1;
+        }
+    }
+    // the selected pull request's files and checks (read again when it changes on GitHub)
+    if app.prs_view {
+        if let (Some(p), Some(dir)) = (app.pr(), cur) {
+            let key = format!("{}:{}:{}", p.number, p.updated, app.prs_t);
+            let n = p.number;
+            if app.detail_for != key && app.detail_rx.is_none() {
+                app.detail_for = key;
+                let (tx, rx) = mpsc::channel();
+                app.detail_rx = Some(Mutex::new(rx));
+                std::thread::spawn(move || {
+                    let _ = tx.send(prs::detail(&dir, n, &prs::run_gh));
+                });
+            }
+        }
+    }
 }
 
 #[allow(clippy::type_complexity)]
@@ -779,7 +961,7 @@ pub fn draw(mut commands: Commands, app: Res<GitApp>, svc: Res<Service>, roots: 
     for i in 0..REPOS {
         draw_card(c, &ui, root(Pane::Repo(i as u8)), app.cards.get(first + i), first + i == app.sel, first + i);
     }
-    draw_strip(c, &ui, root(Pane::Strip), &agents, &merged);
+    draw_strip(c, &ui, root(Pane::Strip), &agents, &merged, app.prs_view);
     let empty_panes = |c: &mut Commands, except_graph: bool| {
         for p in [Pane::Branches, Pane::Commit, Pane::Status, Pane::Remote].into_iter().chain((!except_graph).then_some(Pane::Graph)) {
             let b = ui.body(c, root(p));
@@ -804,12 +986,17 @@ pub fn draw(mut commands: Commands, app: Res<GitApp>, svc: Res<Service>, roots: 
         return;
     }
     draw_branches(c, &ui, root(Pane::Branches), r, app.bcur, app.zone == Zone::Branches);
-    if app.flat {
-        draw_graph(c, &ui, root(Pane::Graph), r, app.gcur, app.zone == Zone::Graph);
+    if app.prs_view {
+        draw_prs(c, &ui, root(Pane::Graph), &app);
+        draw_pr_detail(c, &ui, root(Pane::Commit), &app);
     } else {
-        draw_graph3d(c, &ui, root(Pane::Graph), r, app.yaw);
+        if app.flat {
+            draw_graph(c, &ui, root(Pane::Graph), r, app.gcur, app.zone == Zone::Graph);
+        } else {
+            draw_graph3d(c, &ui, root(Pane::Graph), r, app.yaw);
+        }
+        draw_commit(c, &ui, root(Pane::Commit), r, app.amend, app.busy);
     }
-    draw_commit(c, &ui, root(Pane::Commit), r, app.amend, app.busy);
     draw_status(c, &ui, root(Pane::Status), r, app.cursor, app.zone == Zone::Files, &app.preview);
     draw_remote(c, &ui, root(Pane::Remote), r, app.busy);
 }
@@ -824,7 +1011,7 @@ fn draw_top(c: &mut Commands, ui: &Ui, root: Entity, app: &GitApp) {
     }
     let sub = ui.text(c, names.join(" · "), &ui.f.ui500, 11.0, 2.6, ui.dim);
     let sp = c.spawn(Node { flex_grow: 1.0, ..default() }).id();
-    let credit = ui.text(c, "git UI after gitui (MIT) · git", &ui.f.ui500, 10.5, 1.0, ui.dim);
+    let credit = ui.text(c, "git UI after gitui (MIT) · git · gh", &ui.f.ui500, 10.5, 1.0, ui.dim);
     let esc = c.spawn((Node { padding: UiRect { left: px(6), right: px(6), top: px(3), bottom: px(2) }, border: UiRect::all(px(1)), ..default() }, BorderColor::all(with_alpha(ui.line, 0.55)), Click::Key(KeyCode::Escape))).id();
     let et = ui.text(c, "ESC", &ui.f.ui700, 10.0, 1.6, ui.hot);
     c.entity(esc).add_child(et);
@@ -919,6 +1106,8 @@ fn draw_graph(c: &mut Commands, ui: &Ui, root: Entity, r: &Repo, cursor: usize, 
     let ct = ui.text(c, "V GRAPH", &ui.f.ui700, 9.5, 1.4, ui.line);
     c.entity(chip).add_child(ct);
     c.entity(b).add_child(chip);
+    let kc = key_chip(c, ui, "R PRS", KeyCode::KeyR, 240.0);
+    c.entity(b).add_child(kc);
     if n == 0 {
         let t = ui.text(c, "No commits yet", &ui.f.ui500, 13.0, 0.4, ui.dim);
         c.entity(list).add_child(t);
@@ -1041,13 +1230,197 @@ fn draw_graph3d(c: &mut Commands, ui: &Ui, root: Entity, r: &Repo, yaw_deg: f32)
         c.entity(area).add_child(chip);
     }
     let foot = c.spawn(Node { position_type: PositionType::Absolute, left: px(16), bottom: px(10), column_gap: px(14), ..default() }).id();
-    for (label, key) in [("‹ TURN ,", KeyCode::Comma), ("TURN . ›", KeyCode::Period), ("V LIST", KeyCode::KeyV)] {
+    for (label, key) in [("‹ TURN ,", KeyCode::Comma), ("TURN . ›", KeyCode::Period), ("V LIST", KeyCode::KeyV), ("R PRS", KeyCode::KeyR)] {
         let part = c.spawn((Node { padding: UiRect::axes(px(4), px(2)), ..default() }, Click::Key(key))).id();
         let ft = ui.text(c, label, &ui.f.ui600, 9.5, 2.0, ui.dim);
         c.entity(part).add_child(ft);
         c.entity(foot).add_child(part);
     }
     c.entity(area).add_child(foot);
+}
+
+/// A small bordered key hint in a pane's top right, `right` px from the edge.
+fn key_chip(c: &mut Commands, ui: &Ui, label: &str, key: KeyCode, right: f32) -> Entity {
+    let chip = c.spawn((Node { position_type: PositionType::Absolute, right: px(right), top: px(10), padding: UiRect { left: px(6), right: px(6), top: px(2), bottom: px(1) }, border: UiRect::all(px(1)), ..default() }, BorderColor::all(with_alpha(ui.line, 0.45)), Click::Key(key))).id();
+    let ct = ui.text(c, label, &ui.f.ui700, 9.5, 1.4, ui.line);
+    c.entity(chip).add_child(ct);
+    chip
+}
+
+fn tone_color(ui: &Ui, t: Tone) -> Color {
+    match t {
+        Tone::Ok => role_color(Role::Ok),
+        Tone::Bad => role_color(Role::Bad),
+        Tone::Acc => role_color(Role::Acc),
+        Tone::Dim => ui.dim,
+    }
+}
+
+/// A bordered word in a tone's colour.
+fn tone_chip(c: &mut Commands, ui: &Ui, s: &str, t: Tone) -> Entity {
+    let col = tone_color(ui, t);
+    let chip = c.spawn((Node { padding: UiRect { left: px(5), right: px(5), top: px(1), bottom: px(0) }, border: UiRect::all(px(1)), flex_shrink: 0.0, ..default() }, BorderColor::all(with_alpha(col, 0.6)))).id();
+    let t = ui.text(c, s, &ui.f.ui700, 9.5, 1.3, col);
+    c.entity(chip).add_child(t);
+    chip
+}
+
+/// The repo's open pull requests, in the graph's place (R).
+fn draw_prs(c: &mut Commands, ui: &Ui, root: Entity, app: &GitApp) {
+    let b = ui.body(c, root);
+    let list = app.pr_list();
+    let n = list.len();
+    let first = first_row(app.pcur, n, PR_ROWS);
+    let right = if n > PR_ROWS { format!("{}–{} of {n}", first + 1, (first + PR_ROWS).min(n)) } else { format!("{n} open") };
+    let h = ui.header(c, "Pull requests", &right, ui.dim);
+    let col = c.spawn(Node { flex_direction: FlexDirection::Column, row_gap: px(4), padding: UiRect { left: px(12), right: px(16), top: px(8), ..default() }, ..default() }).id();
+    c.entity(b).add_children(&[h, col]);
+    let kc = key_chip(c, ui, "R GRAPH", KeyCode::KeyR, 150.0);
+    c.entity(b).add_child(kc);
+    let say = |c: &mut Commands, s: &str, colr: Color| {
+        let t = c.spawn((Text::new(clip(s, 80)), font(&ui.f.ui500, 13.0, 0.4), TextColor(colr), Node { margin: UiRect { left: px(6), top: px(10), ..default() }, ..default() })).id();
+        c.entity(col).add_child(t);
+    };
+    match &app.prs {
+        None => say(c, "Reading pull requests…", ui.dim),
+        Some(PrList::Note(s)) => {
+            let bad = s != prs::NO_PRS;
+            say(c, s, if bad { role_color(Role::Acc) } else { ui.dim });
+        }
+        Some(PrList::Prs(_)) => {}
+    }
+    let active = app.zone == Zone::Prs;
+    for (i, p) in list.iter().enumerate().skip(first).take(PR_ROWS) {
+        let sel = i == app.pcur;
+        let row = c
+            .spawn((
+                Node { flex_direction: FlexDirection::Column, row_gap: px(2), padding: UiRect { left: px(8), top: px(3), bottom: px(3), right: px(4) }, border: UiRect::left(px(if sel { 2.0 } else { 0.0 })), flex_shrink: 0.0, ..default() },
+                BorderColor::all(if active { role_color(Role::Acc) } else { with_alpha(ui.hot, 0.4) }),
+                BackgroundColor(if sel { with_alpha(ui.line, if active { 0.10 } else { 0.05 }) } else { Color::NONE }),
+                Click::Pick(PR_PICK + i),
+            ))
+            .id();
+        let l1 = ui.row(c, 8.0);
+        let num = ui.text(c, format!("#{}", p.number), &ui.f.mono, 12.0, 0.0, ui.dim);
+        let title = c.spawn((Text::new(clip(&p.title, 58)), font(&ui.f.ui500, 13.0, 0.3), TextColor(if sel { ui.hot } else { ui.line }), TextLayout { linebreak: LineBreak::NoWrap, ..default() }, Node { flex_grow: 1.0, flex_shrink: 1.0, overflow: Overflow::clip(), ..default() })).id();
+        c.entity(l1).add_children(&[num, title]);
+        if p.draft {
+            let d = tone_chip(c, ui, "DRAFT", Tone::Dim);
+            c.entity(l1).add_child(d);
+        }
+        let (cl, ct) = p.checks.label();
+        let chk = tone_chip(c, ui, &cl, ct);
+        let rv = tone_chip(c, ui, p.review.label(), p.review.tone());
+        let ch = ui.text(c, format!("+{} −{}", p.additions, p.deletions), &ui.f.mono, 11.0, 0.0, ui.dim);
+        c.entity(l1).add_children(&[chk, rv, ch]);
+        let l2 = ui.row(c, 8.0);
+        let sub = ui.text(c, clip(&format!("{} → {}  ·  {}  ·  {}", clip_start(&p.head, 30), clip_start(&p.base, 14), clip(&p.author, 16), age(&p.updated)), 90), &ui.f.mono, 10.5, 0.0, ui.dim);
+        c.entity(l2).add_child(sub);
+        c.entity(row).add_children(&[l1, l2]);
+        c.entity(col).add_child(row);
+    }
+}
+
+/// "3d ago" from an ISO timestamp, against the clock.
+fn age(iso: &str) -> String {
+    let secs = prs::iso_secs(iso).map(|t| std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0) - t);
+    match secs {
+        Some(s) if s < 90 => "just now".into(),
+        Some(s) if s < 5400 => format!("{}m ago", s / 60),
+        Some(s) if s < 129_600 => format!("{}h ago", s / 3600),
+        Some(s) => format!("{}d ago", s / 86400),
+        None => String::new(),
+    }
+}
+
+/// The selected pull request: its checks and its diff (files, then the first lines of the first change).
+fn draw_pr_detail(c: &mut Commands, ui: &Ui, root: Entity, app: &GitApp) {
+    let b = ui.body(c, root);
+    let Some(p) = app.pr() else {
+        let h = ui.header(c, "Pull request", "", ui.dim);
+        c.entity(b).add_child(h);
+        return;
+    };
+    let armed = app.arm.is_some_and(|(n, _)| n == p.number);
+    let h = ui.header(c, &format!("#{} · {}", p.number, clip(&p.title, 60)), if armed { "PRESS M AGAIN TO MERGE" } else { "" }, role_color(Role::Bad));
+    let inner = c.spawn(Node { flex_direction: FlexDirection::Row, column_gap: px(18), padding: UiRect { left: px(16), right: px(16), top: px(10), bottom: px(6) }, flex_grow: 1.0, overflow: Overflow::clip(), ..default() }).id();
+    c.entity(b).add_children(&[h, inner]);
+    let d = app.detail.as_ref().filter(|d| d.number == p.number);
+    let left = c.spawn(Node { flex_direction: FlexDirection::Column, row_gap: px(3), width: px(230), flex_shrink: 0.0, ..default() }).id();
+    let right = c.spawn(Node { flex_direction: FlexDirection::Column, row_gap: px(2), flex_grow: 1.0, flex_shrink: 1.0, overflow: Overflow::clip(), ..default() }).id();
+    c.entity(inner).add_children(&[left, right]);
+    let (cl, ct) = p.checks.label();
+    let lh = ui.text(c, format!("CHECKS  {}", cl), &ui.f.ui600, 10.5, 2.0, tone_color(ui, ct));
+    c.entity(left).add_child(lh);
+    match d {
+        None => {
+            let t = ui.text(c, "Reading…", &ui.f.ui500, 12.0, 0.4, ui.dim);
+            c.entity(left).add_child(t);
+        }
+        Some(d) => {
+            if d.checks.is_empty() {
+                let t = ui.text(c, "No checks reported", &ui.f.ui500, 12.0, 0.4, ui.dim);
+                c.entity(left).add_child(t);
+            }
+            for (name, state, tone) in d.checks.iter().take(6) {
+                let r = ui.row(c, 6.0);
+                let dot = c.spawn((Node { width: px(6), height: px(6), flex_shrink: 0.0, ..default() }, BackgroundColor(tone_color(ui, *tone)))).id();
+                let t = ui.text(c, clip(name, 22), &ui.f.mono, 11.0, 0.0, ui.line);
+                let st = ui.text(c, state.clone(), &ui.f.ui600, 9.5, 1.0, tone_color(ui, *tone));
+                c.entity(r).add_children(&[dot, t, st]);
+                c.entity(left).add_child(r);
+            }
+            if d.checks.len() > 6 {
+                let t = ui.text(c, format!("+{} more", d.checks.len() - 6), &ui.f.ui500, 11.0, 0.4, ui.dim);
+                c.entity(left).add_child(t);
+            }
+        }
+    }
+    let nfiles = d.map(|d| d.files.len()).unwrap_or(0);
+    let rh = ui.text(c, format!("DIFF  {} → {}  ·  {nfiles} FILE{}  +{} −{}", clip_start(&p.head, 24).to_uppercase(), clip_start(&p.base, 12).to_uppercase(), if nfiles == 1 { "" } else { "S" }, p.additions, p.deletions), &ui.f.ui600, 10.5, 1.6, ui.hot);
+    c.entity(right).add_child(rh);
+    if let Some(d) = d {
+        if let Some(e) = &d.error {
+            let t = ui.text(c, clip(e, 70), &ui.f.ui500, 12.0, 0.4, role_color(Role::Bad));
+            c.entity(right).add_child(t);
+        }
+        for f in d.files.iter().take(4) {
+            let r = ui.row(c, 8.0);
+            let st = ui.text(c, f.status.letter(), &ui.f.mono, 11.5, 0.0, role_color(match f.status { crate::review::Status::Added => Role::Ok, crate::review::Status::Deleted => Role::Bad, _ => Role::Acc }));
+            let pt = c.spawn((Text::new(clip_start(&f.path, 52)), font(&ui.f.mono, 11.5, 0.0), TextColor(ui.line), TextLayout { linebreak: LineBreak::NoWrap, ..default() }, Node { flex_grow: 1.0, flex_shrink: 1.0, overflow: Overflow::clip(), ..default() })).id();
+            let n = ui.text(c, if let Some(note) = &f.note { clip(note, 12) } else { format!("+{} −{}", f.added, f.removed) }, &ui.f.mono, 11.0, 0.0, ui.dim);
+            c.entity(r).add_children(&[st, pt, n]);
+            c.entity(right).add_child(r);
+        }
+        if d.files.len() > 4 {
+            let t = ui.text(c, format!("+{} more files", d.files.len() - 4), &ui.f.ui500, 11.0, 0.4, ui.dim);
+            c.entity(right).add_child(t);
+        }
+        // the first lines of the first change
+        if let Some(h) = d.files.first().and_then(|f| f.hunks.first()) {
+            let pv = c.spawn((Node { flex_direction: FlexDirection::Column, margin: UiRect::top(px(4)), padding: UiRect::top(px(4)), border: UiRect::top(px(1)), overflow: Overflow::clip(), flex_shrink: 0.0, ..default() }, BorderColor::all(with_alpha(ui.line, 0.2)))).id();
+            for l in h.lines.iter().take(4) {
+                let (mark, colr, bg) = match l.kind {
+                    crate::review::LineKind::Add => ('+', role_color(Role::Ok), with_alpha(role_color(Role::Ok), 0.08)),
+                    crate::review::LineKind::Del => ('-', role_color(Role::Bad), with_alpha(role_color(Role::Bad), 0.10)),
+                    crate::review::LineKind::Context => (' ', ui.line, Color::NONE),
+                };
+                let t = c.spawn((Text::new(clip(&format!("{mark}{}", l.text), 80)), font(&ui.f.mono, 11.0, 0.0), TextColor(colr), LineHeight::Px(14.0), BackgroundColor(bg), TextLayout { linebreak: LineBreak::NoWrap, ..default() })).id();
+                c.entity(pv).add_child(t);
+            }
+            c.entity(right).add_child(pv);
+        }
+    }
+    // the actions, as buttons for the keys
+    let acts = c.spawn(Node { position_type: PositionType::Absolute, right: px(16), bottom: px(10), column_gap: px(8), ..default() }).id();
+    for (label, key, hot) in [("ENTER  OPEN ON GITHUB", KeyCode::Enter, false), ("C  CHECK OUT", KeyCode::KeyC, false), (if armed { "M  MERGE NOW" } else { "M  MERGE" }, KeyCode::KeyM, armed)] {
+        let colr = if hot { role_color(Role::Bad) } else { ui.line };
+        let btn = c.spawn((Node { padding: UiRect { left: px(8), right: px(8), top: px(4), bottom: px(3) }, border: UiRect::all(px(1)), ..default() }, BorderColor::all(with_alpha(colr, 0.6)), BackgroundColor(if hot { with_alpha(colr, 0.15) } else { with_alpha(ui.line, 0.05) }), Click::Key(key))).id();
+        let t = ui.text(c, label, &ui.f.ui700, 10.0, 1.4, colr);
+        c.entity(btn).add_child(t);
+        c.entity(acts).add_child(btn);
+    }
+    c.entity(b).add_child(acts);
 }
 
 fn draw_commit(c: &mut Commands, ui: &Ui, root: Entity, r: &Repo, amend: bool, busy: bool) {
@@ -1206,7 +1579,7 @@ fn draw_remote(c: &mut Commands, ui: &Ui, root: Entity, r: &Repo, busy: bool) {
     c.entity(inner).add_children(&[row, info]);
 }
 
-fn draw_strip(c: &mut Commands, ui: &Ui, root: Entity, agents: &[TaskView], merged: &std::collections::HashSet<String>) {
+fn draw_strip(c: &mut Commands, ui: &Ui, root: Entity, agents: &[TaskView], merged: &std::collections::HashSet<String>, prs_view: bool) {
     let r = c.spawn(Node { width: percent(100), height: percent(100), flex_direction: FlexDirection::Row, align_items: AlignItems::Center, column_gap: px(12), padding: UiRect { left: px(16), right: px(14), ..default() }, ..default() }).id();
     c.entity(root).add_child(r);
     let lab = ui.text(c, "AGENTS", &ui.f.ui600, 10.5, 3.2, ui.dim);
@@ -1230,8 +1603,13 @@ fn draw_strip(c: &mut Commands, ui: &Ui, root: Entity, agents: &[TaskView], merg
     }
     let sp = c.spawn(Node { flex_grow: 1.0, ..default() }).id();
     let legend = c.spawn(Node { flex_direction: FlexDirection::Column, row_gap: px(4), align_items: AlignItems::FlexEnd, ..default() }).id();
-    let l1 = ui.text(c, "J K MOVE   TAB LIST   ENTER STAGE / SWITCH   S U STAGE   A X ALL   C COMMIT   M AMEND", &ui.f.ui600, 10.0, 1.6, ui.dim);
-    let l2 = ui.text(c, "B BRANCH   F FETCH   L PULL   P PUSH   V GRAPH   [ ] REPO   ESC CLOSE", &ui.f.ui600, 10.0, 1.6, ui.dim);
+    let (t1, t2) = if prs_view {
+        ("J K MOVE   ENTER OPEN ON GITHUB   O OPEN   C CHECK OUT   M M SQUASH MERGE", "R GRAPH   F FETCH   L PULL   P PUSH   [ ] REPO   ESC BACK")
+    } else {
+        ("J K MOVE   TAB LIST   ENTER STAGE / SWITCH   S U STAGE   A X ALL   C COMMIT   M AMEND", "B BRANCH   F FETCH   L PULL   P PUSH   V GRAPH   R PRS   [ ] REPO   ESC CLOSE")
+    };
+    let l1 = ui.text(c, t1, &ui.f.ui600, 10.0, 1.6, ui.dim);
+    let l2 = ui.text(c, t2, &ui.f.ui600, 10.0, 1.6, ui.dim);
     c.entity(legend).add_children(&[l1, l2]);
     c.entity(r).add_children(&[sp, legend]);
 }
@@ -1252,12 +1630,12 @@ mod tests {
     #[test]
     fn wheel_targets_per_pane() {
         let i = |p: Pane| Pane::all().iter().position(|x| *x == p).map(|i| i as u8);
-        assert_eq!(scroll_target(i(Pane::Graph), true), Some(Scroll::Zone(Zone::Graph, KeyCode::KeyJ)));
-        assert_eq!(scroll_target(i(Pane::Commit), false), Some(Scroll::Zone(Zone::Graph, KeyCode::KeyK)));
-        assert_eq!(scroll_target(i(Pane::Branches), true), Some(Scroll::Zone(Zone::Branches, KeyCode::KeyJ)));
-        assert_eq!(scroll_target(i(Pane::Status), false), Some(Scroll::Zone(Zone::Files, KeyCode::KeyK)));
-        assert_eq!(scroll_target(i(Pane::Repo(1)), true), Some(Scroll::Key(KeyCode::BracketRight)));
-        assert_eq!(scroll_target(i(Pane::Remote), true), None);
+        assert_eq!(scroll_target(i(Pane::Graph), true, false), Some(Scroll::Zone(Zone::Graph, KeyCode::KeyJ)));
+        assert_eq!(scroll_target(i(Pane::Commit), false, false), Some(Scroll::Zone(Zone::Graph, KeyCode::KeyK)));
+        assert_eq!(scroll_target(i(Pane::Branches), true, false), Some(Scroll::Zone(Zone::Branches, KeyCode::KeyJ)));
+        assert_eq!(scroll_target(i(Pane::Status), false, false), Some(Scroll::Zone(Zone::Files, KeyCode::KeyK)));
+        assert_eq!(scroll_target(i(Pane::Repo(1)), true, false), Some(Scroll::Key(KeyCode::BracketRight)));
+        assert_eq!(scroll_target(i(Pane::Remote), true, false), None);
     }
     use crate::gitdata::{Branch, GraphRow};
 
