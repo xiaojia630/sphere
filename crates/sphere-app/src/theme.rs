@@ -275,7 +275,10 @@ fn save(id: ThemeId) {
     let _ = std::fs::write(f, id.key());
 }
 
-/// Eases the live palette toward the theme (the prototype's 1 - e^(-4.5 dt) per frame).
+/// Eases the live palette toward the theme (the prototype's 1 - e^(-4.5 dt) per frame). Settled, nothing moves and
+/// the version stays put: easing a colour toward itself isn't exact in floats (a * (1 - k) + a * k can be off by
+/// a bit), so "moved" is measured after the snap to the target, or every frame looked like a theme change and
+/// re-made every panel material and open app's text.
 pub fn animate(time: Res<Time<Real>>, mut theme: ResMut<Theme>) {
     let kk = 1.0 - (-4.5 * time.delta_secs().min(1.0 / 30.0)).exp();
     let mut l = live();
@@ -283,8 +286,9 @@ pub fn animate(time: Res<Time<Real>>, mut theme: ResMut<Theme>) {
     let mut moved = 0.0f32;
     let mut step = |a: &mut Vec3, b: Vec3| {
         let n = a.lerp(b, kk);
+        let n = if (b - n).abs().max_element() < 0.002 { b } else { n };
         moved = moved.max((n - *a).abs().max_element());
-        *a = if (b - n).abs().max_element() < 0.002 { b } else { n };
+        *a = n;
     };
     for i in 0..8 {
         step(&mut l.roles[i], t.roles[i]);
@@ -296,11 +300,38 @@ pub fn animate(time: Res<Time<Real>>, mut theme: ResMut<Theme>) {
     }
     step(&mut l.tint, t.tint);
     let (b, f) = (lerp(l.bloom, t.bloom, kk), lerp(l.fx, t.fx, kk));
+    let b = if (t.bloom - b).abs() < 0.002 { t.bloom } else { b };
+    let f = if (t.fx - f).abs() < 0.002 { t.fx } else { f };
     moved = moved.max((b - l.bloom).abs()).max((f - l.fx).abs());
-    l.bloom = if (t.bloom - b).abs() < 0.002 { t.bloom } else { b };
-    l.fx = if (t.fx - f).abs() < 0.002 { t.fx } else { f };
+    l.bloom = b;
+    l.fx = f;
     if moved > 0.0 {
         *LIVE.write().unwrap() = Some(l);
         theme.version += 1;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_settled_theme_stops_counting_as_a_change() {
+        let mut w = World::new();
+        let start = std::time::Instant::now();
+        let mut time = Time::<Real>::new(start);
+        time.update_with_instant(start + std::time::Duration::from_micros(8333));
+        w.insert_resource(time);
+        w.insert_resource(Theme::new(ThemeId::Balanced));
+        let mut s = Schedule::default();
+        s.add_systems(animate);
+        for _ in 0..600 {
+            s.run(&mut w);
+        }
+        let v = w.resource::<Theme>().version;
+        for _ in 0..120 {
+            s.run(&mut w);
+        }
+        assert_eq!(w.resource::<Theme>().version, v);
     }
 }
