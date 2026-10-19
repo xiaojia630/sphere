@@ -1,7 +1,7 @@
 # Agent swarm: implementation spec (extracted from swarm-proto.html)
 
-Source: `/private/tmp/claude-501/-Users-mac-Projects/08596ae7-5ad2-45b6-a2fb-439192544d43/scratchpad/swarm-proto.html` (4703 lines). "L1234" = prototype line number. Numbers and strings are verbatim. Units: "stage px" = the 1600x1000 stage; "world units" = three.js units where 1 stage px = 1 world unit at z=0 (stageToWorld: `x = sx - 800, y = 500 - sy`, L3002).
-Screenshots for comparison: `proto-overview.png`, `proto-hover.png`, `proto-focus.png`, `proto-needs.png`, `proto-ready-focus.png`, `proto-conflict.png`, `proto-merge.png` (same folder). `window.__swarm` (L4695) was used to reach states.
+Source: the approved "Agent swarm" design prototype (a single HTML/three.js page, 4703 lines). "L1234" = prototype line number. Numbers and strings are verbatim. Units: "stage px" = the 1600x1000 stage; "world units" = three.js units where 1 stage px = 1 world unit at z=0 (stageToWorld: `x = sx - 800, y = 500 - sy`, L3002).
+Screenshots for comparison: `proto-overview.jpg`, `proto-hover.jpg`, `proto-focus.jpg`, `proto-needs.jpg`, `proto-ready-focus.jpg`, `proto-conflict.jpg`, `proto-merge.jpg` (same folder; `sbs-*.jpg` put the native view beside them, `live-*.jpg` are from a run on fake agents). `window.__swarm` (L4695) was used to reach states.
 
 Prototype tech: three.js 0.160, CSS3DRenderer for all panels/labels (DOM planes in the 3D scene), UnrealBloom (strength theme `bloom` .6 balanced), additive blending everywhere (`ADD` = transparent, depthWrite false, depthTest false, additive; L2530). Camera: PerspectiveCamera fov 40, near 10, far 40000 (L2604). `view.D` = distance such that the stage fits; camera at (view.px, baseY+view.py, D*zoom).
 
