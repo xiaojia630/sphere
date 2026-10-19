@@ -133,6 +133,9 @@ pub fn prepare(
         branch = format!("{base_name}-{n}");
         n += 1;
     }
+    // forget worktrees whose folders are gone: task ids start again with a fresh database, and git refuses a
+    // path that is still registered to a deleted worktree
+    let _ = git(&top, &["worktree", "prune"]);
     git(
         &top,
         &[
@@ -295,6 +298,21 @@ mod tests {
         let b = prepare(&wt, &repo, "t2", "Fix login", false).unwrap();
         assert_eq!(b.branch.as_deref(), Some("sphere/fix-login-2"));
         assert_eq!(a.base, b.base);
+    }
+
+    #[test]
+    fn reuses_the_path_of_a_worktree_whose_folder_was_deleted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("myrepo");
+        init_repo(&repo);
+        let wt = tmp.path().join("worktrees");
+        let a = prepare(&wt, &repo, "t1", "Fix login", false).unwrap();
+        std::fs::remove_dir_all(&a.workdir).unwrap();
+        // a fresh database hands out t1 again
+        let b = prepare(&wt, &repo, "t1", "Fix login", false).unwrap();
+        assert_eq!(b.workdir, a.workdir);
+        assert_eq!(b.branch.as_deref(), Some("sphere/fix-login-2"));
+        assert!(b.workdir.join("README.md").exists());
     }
 
     #[test]
