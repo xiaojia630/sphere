@@ -338,6 +338,30 @@ pub fn draw_rolodex(
     }
 }
 
+/// Where the drum's window starts in the Apps panel (below the "APPS" heading and its gap), its height, where the
+/// selection band sits in it and how tall a row is, in panel px.
+const ROLO_WIN_TOP: f32 = 13.2 + 8.0;
+const ROLO_WIN_H: f32 = 306.0;
+const ROLO_BAND: f32 = 136.0;
+const ROLO_ROW: f32 = 34.0;
+
+/// The app whose row is at `y` (panel px, from the panel's top) with `sel` selected: the band's row is `sel`,
+/// the rows above and below are its neighbours round the drum. None outside the window or on a hidden row.
+pub fn rolo_row_at(y: f32, sel: usize) -> Option<usize> {
+    let n = APPS.len();
+    let wy = y - ROLO_WIN_TOP;
+    if !(0.0..ROLO_WIN_H).contains(&wy) {
+        return None;
+    }
+    let d = ((wy - ROLO_BAND) / ROLO_ROW).floor() as i32;
+    let mid = n + sel;
+    let k = mid as i32 + d;
+    if k < 0 || rolo_fade(k as usize, mid, n) <= 0.0 {
+        return None;
+    }
+    Some((sel as i32 + d).rem_euclid(n as i32) as usize)
+}
+
 /// How bright row `k` of the drum is with row `mid` selected: the window fades its top and bottom quarter, and
 /// the bottom row as far from the selection as half the drum is hidden (it is the same app as the top row,
 /// which would otherwise show twice).
@@ -408,6 +432,24 @@ pub fn draw_say(time: Res<Time<Real>>, mut say: ResMut<Say>, swarm: Res<crate::s
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_click_picks_the_row_under_it() {
+        let band = ROLO_WIN_TOP + ROLO_BAND + ROLO_ROW / 2.0;
+        // the band is the selection; a row above is the one before it round the drum, a row below the next
+        for sel in 0..APPS.len() {
+            assert_eq!(rolo_row_at(band, sel), Some(sel));
+            assert_eq!(rolo_row_at(band - ROLO_ROW, sel), Some((sel + APPS.len() - 1) % APPS.len()));
+            assert_eq!(rolo_row_at(band + 2.0 * ROLO_ROW, sel), Some((sel + 2) % APPS.len()));
+        }
+        // with Terminal selected (as the home starts), Containers is the row at the top, Git & PRs at the bottom
+        assert_eq!(APPS[rolo_row_at(ROLO_WIN_TOP + 5.0, 0).unwrap()].0, "Containers");
+        assert_eq!(APPS[rolo_row_at(band + 3.0 * ROLO_ROW, 0).unwrap()].0, "Git & PRs");
+        // the heading, the hint under the window, and the hidden bottom row aren't rows
+        assert_eq!(rolo_row_at(4.0, 0), None);
+        assert_eq!(rolo_row_at(ROLO_WIN_TOP + ROLO_WIN_H + 4.0, 0), None);
+        assert_eq!(rolo_row_at(band + 4.0 * ROLO_ROW, 0), None);
+    }
 
     #[test]
     fn the_rolodex_shows_each_app_once() {

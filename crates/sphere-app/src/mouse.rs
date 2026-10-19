@@ -305,11 +305,8 @@ pub fn update(
                     };
                     if let (Some(e), true) = (app_pane, (pos - p0).length() <= 4.0) {
                         // an app's pane: the click goes to what's under it, now (apps have no double-click)
-                        if let (Ok(ray), Ok((_, p, gt, _))) = (cam.0.viewport_to_world(cam.1, pos), panels.p0().get(e)) {
-                            if let Some(d) = ray.intersect_plane(gt.translation(), InfinitePlane3d::new(gt.back())) {
-                                let local = gt.affine().inverse().transform_point3(ray.get_point(d));
-                                pclicks.0.push((e, Vec2::new(local.x + p.w / 2.0, p.h / 2.0 - local.y)));
-                            }
+                        if let Some(at) = panel_point(cam, &panels.p0(), e, pos) {
+                            pclicks.0.push((e, at));
                         }
                     } else if swarm.open {
                         // the swarm takes the clicks (`swarm::input`): none of the home's single and double clicks
@@ -328,7 +325,11 @@ pub fn update(
                             // these panels have no double-click: open now instead of waiting to rule one out
                             ms.last_click = None;
                             ms.pending_click = None;
-                            single_click(hit, pos, &panels.p0(), &mut rolo, &mut open, &mut sound, &mut toasts, &mut acts);
+                            let at = match hit {
+                                Hit::Panel(e, _) => panel_point(cam, &panels.p0(), e, pos),
+                                _ => None,
+                            };
+                            single_click(hit, at, &mut rolo, &mut open, &mut sound, &mut toasts);
                         } else if dbl {
                             ms.last_click = None;
                             ms.pending_click = None;
@@ -354,7 +355,7 @@ pub fn update(
     if let Some((h, t0)) = ms.pending_click {
         if now - t0 > 0.26 {
             ms.pending_click = None;
-            single_click(h, pos, &panels.p0(), &mut rolo, &mut open, &mut sound, &mut toasts, &mut acts);
+            single_click(h, None, &mut rolo, &mut open, &mut sound, &mut toasts);
         }
     }
 }
@@ -374,21 +375,26 @@ fn double_click(hit: Hit, decks: &mut Decks, acts: &mut Acts, sound: &mut crate:
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn single_click(
-    hit: Hit,
-    pos: Vec2,
-    panels: &PanelPick,
-    rolo: &mut crate::homepanels::Rolodex,
-    open: &mut crate::apps::Open,
-    sound: &mut crate::sound::Sound,
-    toasts: &mut crate::live::Toasts,
-    acts: &mut Acts,
-) {
-    let _ = (pos, panels, acts);
+/// Where the pointer at `pos` meets panel `e`, in panel px from its top-left.
+fn panel_point(cam: (&Camera, &GlobalTransform), panels: &PanelPick, e: Entity, pos: Vec2) -> Option<Vec2> {
+    let ray = cam.0.viewport_to_world(cam.1, pos).ok()?;
+    let (_, p, gt, _) = panels.get(e).ok()?;
+    let d = ray.intersect_plane(gt.translation(), InfinitePlane3d::new(gt.back()))?;
+    let local = gt.affine().inverse().transform_point3(ray.get_point(d));
+    Some(Vec2::new(local.x + p.w / 2.0, p.h / 2.0 - local.y))
+}
+
+/// `at` is where on the panel it was clicked (panel px), when known.
+fn single_click(hit: Hit, at: Option<Vec2>, rolo: &mut crate::homepanels::Rolodex, open: &mut crate::apps::Open, sound: &mut crate::sound::Sound, toasts: &mut crate::live::Toasts) {
     match hit {
         Hit::Panel(_, PanelId::Apps) => {
-            // the selected row opens; the rolodex window is clicked as a whole
+            // the row under the pointer turns to the band and opens; the heading and the hint open the selected one
+            if let Some(i) = at.and_then(|a| crate::homepanels::rolo_row_at(a.y, rolo.sel)) {
+                if i != rolo.sel {
+                    rolo.sel = i;
+                    rolo.version += 1;
+                }
+            }
             open.app(rolo.sel, toasts);
             sound.play_q("click", 90);
         }
