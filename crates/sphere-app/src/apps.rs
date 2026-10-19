@@ -16,10 +16,16 @@ pub struct Open {
     pub swarm: bool,
     /// the swarm's "Open in Code": the Code app opens on this task
     pub code_task: Option<String>,
+    /// "code <path>", or O in Files and Git: the Code app opens on this folder
+    pub code_dir: Option<std::path::PathBuf>,
     /// the command bar's words while the swarm is open (next, merge, stop, a number, back), for `swarm::input`
     pub swarm_cmds: Vec<crate::swarm::input::SwarmCmd>,
 }
 
+/// The Code app's tile.
+pub const CODE: usize = 2;
+/// The Files app's tile.
+pub const FILES: usize = 6;
 /// The System app has no tile: it opens from the bar ("system", "top").
 const SYSTEM: usize = 100;
 
@@ -34,9 +40,17 @@ impl Open {
     pub fn system(&mut self) {
         self.pending = Some(SYSTEM);
     }
+    /// Opens the Code app on a folder (and remembers it as the last repo when it is one, so `code .` finds it again).
+    pub fn code_folder(&mut self, dir: std::path::PathBuf) {
+        if dir.join(".git").exists() {
+            crate::cmdbar::remember(&dir.to_string_lossy());
+        }
+        self.code_dir = Some(dir);
+        self.pending = Some(CODE);
+    }
 }
 
-#[allow(clippy::type_complexity)]
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
 pub fn apply(
     mut open: ResMut<Open>,
     mut focus: ResMut<Focus>,
@@ -45,7 +59,18 @@ pub fn apply(
     mut sound: ResMut<crate::sound::Sound>,
     mut orb: ResMut<crate::orbit::Orb>,
     mut swarm: ResMut<crate::swarm::Swarm>,
+    terms: Option<ResMut<crate::term::Terms>>,
 ) {
+    // Helix quit: the app it was opened from shows again, as you left it
+    if let Some(a) = terms.and_then(|mut t| t.returned.take()) {
+        if a == CODE && !code.open {
+            code.reshow();
+        } else if a == FILES && !files.open {
+            files.open();
+        }
+        focus.terminal = false;
+        sound.play_with("open", 0.8, 0.0);
+    }
     if let Some(o) = open.toggle_orbit.take() {
         orb.set(o, &mut sound);
     }
@@ -81,9 +106,13 @@ pub fn apply(
     match i {
         0 => focus.terminal = true,
         2 => {
-            code.open();
-            if let Some(t) = open.code_task.take() {
-                code.select_task(Some(t));
+            if let Some(d) = open.code_dir.take() {
+                code.open_folder(d);
+            } else {
+                code.open();
+                if let Some(t) = open.code_task.take() {
+                    code.select_task(Some(t));
+                }
             }
         }
         3 => git.open(),

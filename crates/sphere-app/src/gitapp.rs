@@ -396,6 +396,7 @@ pub fn keys(
     sim: Res<crate::core::Sim>,
     (mut clicks, mut scrolls): (ResMut<crate::appframe::AppClicks>, ResMut<crate::appframe::AppScrolls>),
     mut cmd_was: Local<bool>,
+    mut open: ResMut<crate::apps::Open>,
 ) {
     let mut focus = focus;
     let mods = keys.any_pressed([KeyCode::SuperLeft, KeyCode::SuperRight, KeyCode::ControlLeft, KeyCode::ControlRight, KeyCode::AltLeft, KeyCode::AltRight]);
@@ -644,6 +645,13 @@ pub fn keys(
                 app.act(Op::Fetch);
                 sound.play("progress");
             }
+            KeyCode::KeyO => match app.dir() {
+                Some(dir) => {
+                    open.code_folder(dir);
+                    sound.play("open");
+                }
+                None => toasts.push("No repo to open"),
+            },
             KeyCode::KeyL => {
                 app.act(Op::Pull);
                 sound.play("progress");
@@ -1615,7 +1623,7 @@ fn draw_strip(c: &mut Commands, ui: &Ui, root: Entity, agents: &[TaskView], merg
     let (t1, t2) = if prs_view {
         ("J K MOVE   ENTER OPEN ON GITHUB   O OPEN   C CHECK OUT   M M SQUASH MERGE", "R GRAPH   F FETCH   L PULL   P PUSH   [ ] REPO   ESC BACK")
     } else {
-        ("J K MOVE   TAB LIST   ENTER STAGE / SWITCH   S U STAGE   A X ALL   C COMMIT   M AMEND", "B BRANCH   F FETCH   L PULL   P PUSH   V GRAPH   R PRS   [ ] REPO   ESC CLOSE")
+        ("J K MOVE   TAB LIST   ENTER STAGE / SWITCH   S U STAGE   A X ALL   C COMMIT   M AMEND", "B BRANCH   F FETCH   L PULL   P PUSH   V GRAPH   R PRS   O CODE   [ ] REPO   ESC CLOSE")
     };
     let l1 = ui.text(c, t1, &ui.f.ui600, 10.0, 1.6, ui.dim);
     let l2 = ui.text(c, t2, &ui.f.ui600, 10.0, 1.6, ui.dim);
