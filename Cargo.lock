@@ -2389,7 +2389,7 @@ dependencies = [
 
 [[package]]
 name = "fake-claude"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "libc",
  "serde_json",
@@ -4810,7 +4810,7 @@ dependencies = [
 
 [[package]]
 name = "sphere-app"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "alacritty_terminal",
  "bevy",
@@ -4834,7 +4834,7 @@ dependencies = [
 
 [[package]]
 name = "sphere-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -4848,7 +4848,7 @@ dependencies = [
 
 [[package]]
 name = "sphere-client"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -4859,7 +4859,7 @@ dependencies = [
 
 [[package]]
 name = "sphere-host"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -4875,7 +4875,7 @@ dependencies = [
 
 [[package]]
 name = "sphere-proto"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -4884,7 +4884,7 @@ dependencies = [
 
 [[package]]
 name = "sphered"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
