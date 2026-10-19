@@ -465,6 +465,10 @@ pub fn keys(
                     toasts.push("The agent is still working: wait for it, or stop it first");
                     continue;
                 }
+                if act != Act::Discard && (crate::live::answered(&t) || (!t.in_place && t.branch.is_none())) {
+                    toasts.push("Answered · nothing to merge: the agent changed no files");
+                    continue;
+                }
                 if t.workdir.as_deref().is_none_or(|w| !std::path::Path::new(w).is_dir()) {
                     toasts.push("The worktree is gone: nothing to act on");
                     continue;
@@ -832,10 +836,10 @@ pub fn draw(mut commands: Commands, app: Res<CodeApp>, svc: Res<Service>, roots:
         return;
     };
     draw_task(c, &ui, root(Pane::Task), &t, &run, app.review.as_ref());
-    draw_tree(c, &ui, root(Pane::Tree), &app);
+    draw_tree(c, &ui, root(Pane::Tree), &app, crate::live::answered(&t));
     draw_diff(c, &ui, root(Pane::Diff), &app, &run);
     draw_tests(c, &ui, root(Pane::Tests), &t, app.tests.as_ref());
-    draw_acts(c, &ui, root(Pane::Acts), &app);
+    draw_acts(c, &ui, root(Pane::Acts), &app, crate::live::answered(&t));
 }
 
 fn draw_top(c: &mut Commands, ui: &Ui, root: Entity, t: Option<&TaskView>) {
@@ -946,7 +950,7 @@ fn bar_blocks(c: &mut Commands, ui: &Ui, add: usize, del: usize) -> Entity {
     row
 }
 
-fn draw_tree(c: &mut Commands, ui: &Ui, root: Entity, app: &CodeApp) {
+fn draw_tree(c: &mut Commands, ui: &Ui, root: Entity, app: &CodeApp, answered: bool) {
     let b = ui.body(c, root);
     let r = app.review.as_ref();
     let sum = match r {
@@ -969,7 +973,7 @@ fn draw_tree(c: &mut Commands, ui: &Ui, root: Entity, app: &CodeApp) {
         return;
     }
     if r.files.is_empty() {
-        let s = if r.merged { format!("Merged into {}: nothing left to review", r.base) } else { format!("No changes yet against {}", r.base) };
+        let s = if answered { "Answered · nothing to merge".to_string() } else if r.merged { format!("Merged into {}: nothing left to review", r.base) } else { format!("No changes yet against {}", r.base) };
         note(c, s, ui.dim);
         return;
     }
@@ -1226,7 +1230,7 @@ fn draw_tests(c: &mut Commands, ui: &Ui, root: Entity, t: &TaskView, run: Option
     c.entity(inner).add_children(&[sp, foot]);
 }
 
-fn draw_acts(c: &mut Commands, ui: &Ui, root: Entity, app: &CodeApp) {
+fn draw_acts(c: &mut Commands, ui: &Ui, root: Entity, app: &CodeApp, answered: bool) {
     let b = ui.body(c, root);
     let (a, d) = app.review.as_ref().map(|r| (r.added(), r.removed())).unwrap_or((0, 0));
     let tests = match &app.tests {
@@ -1252,7 +1256,14 @@ fn draw_acts(c: &mut Commands, ui: &Ui, root: Entity, app: &CodeApp) {
         ("OPEN IN ZED", "Z", None, Role::Hot, false),
         ("DISCARD", "D", Some(Act::Discard), Role::Bad, false),
     ];
+    if answered {
+        let n = ui.text(c, "Answered · nothing to merge", &ui.f.ui500, 12.0, 0.5, ui.dim);
+        c.entity(inner).add_child(n);
+    }
     for (label, key, act, role, filled) in buttons {
+        if answered && matches!(act, Some(Act::Merge | Act::Pr)) {
+            continue;
+        }
         let is_armed = act.is_some() && act == armed;
         // armed: amber (red for discard) until you press again
         let col = if is_armed && role != Role::Bad { role_color(Role::Acc) } else { role_color(role) };

@@ -229,7 +229,8 @@ pub fn pick<'a>(w: &Working, tasks: &'a [TaskView]) -> Option<&'a TaskView> {
 pub fn keys(
     mut ev: MessageReader<bevy::input::keyboard::KeyboardInput>,
     keys: Res<ButtonInput<KeyCode>>,
-    focus: Res<Focus>,
+    mut focus: ResMut<Focus>,
+    mut bar: ResMut<crate::cmdbar::CmdBar>,
     moment: Res<crate::moment::Moment>,
     mut w: ResMut<Working>,
     svc: Res<Service>,
@@ -275,6 +276,18 @@ pub fn keys(
                         toasts.push_quiet("Interrupted · the agent stops this turn and waits");
                     }
                     None => toasts.push("Nothing running to interrupt"),
+                }
+            }
+            KeyCode::KeyF if w.open => {
+                let t = pick(&w, &svc.shared.lock().unwrap().tasks).map(|t| (t.id.clone(), t.title.clone(), t.state));
+                match t {
+                    Some((_, _, TaskState::Queued)) => toasts.push("Still queued: it can be followed up once it starts"),
+                    Some((_, _, TaskState::Stopped)) => toasts.push("Stopped: start a new task instead"),
+                    Some((id, title, _)) => {
+                        w.task = Some(id.clone());
+                        bar.ask(id, title, &mut focus);
+                    }
+                    None => toasts.push("No agent on screen to follow up"),
                 }
             }
             _ => {}
@@ -696,7 +709,7 @@ fn build_run(c: &mut Commands, root: Entity, f: &UiFonts, t: &TaskView, run: &Ru
         c.entity(b).add_children(&[fl, fs]);
     }
     let keys = c.spawn((Node { padding: UiRect { top: px(10), ..default() }, border: UiRect { top: px(1), ..default() }, ..default() }, BorderColor::all(with_alpha(line, 0.13)))).id();
-    let kt = c.spawn((Text::new("P INTERRUPT   ·   T OUTPUT   ·   W OR ESC HOME"), font(&f.ui700, 9.5, 1.9), TextColor(dim), LineHeight::Px(10.0))).id();
+    let kt = c.spawn((Text::new("F FOLLOW UP   ·   P INTERRUPT   ·   T OUTPUT   ·   W OR ESC HOME"), font(&f.ui700, 9.5, 1.9), TextColor(dim), LineHeight::Px(10.0))).id();
     c.entity(keys).add_child(kt);
     c.entity(b).add_child(keys);
 }
@@ -713,6 +726,7 @@ fn build_out(c: &mut Commands, root: Entity, f: &UiFonts, t: &TaskView, run: &Ru
     let sq = c.spawn((Node { width: px(6), height: px(6), ..default() }, BackgroundColor(if live { role_color(Role::Fill) } else { role_color(Role::Dim) }))).id();
     let tt = c.spawn((Text::new("OUTPUT"), font(&f.ui600, 12.0, 3.84), TextColor(hot), LineHeight::Px(14.4))).id();
     let st = match t.state {
+        TaskState::Done if t.files.is_empty() => "ANSWERED",
         TaskState::Done => "EXITED 0",
         TaskState::Failed => "FAILED",
         TaskState::Stopped => "STOPPED",
