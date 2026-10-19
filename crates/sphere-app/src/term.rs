@@ -113,6 +113,8 @@ pub struct Terminal {
     inner: Mutex<Inner>,
     pub dirty: bool,
     pub exited: bool,
+    /// The app to show again when this tab's program exits (a Helix edit from Code or Files).
+    pub back_to: Option<usize>,
     /// The program's name for the header (`zsh`, `bash`).
     pub name: String,
 }
@@ -129,6 +131,8 @@ pub struct Terms {
     pub demo: bool,
     /// Tabs being connected off the main thread at start (sphere-host may need starting); shown as connecting.
     pub pending: Option<Mutex<mpsc::Receiver<Vec<Terminal>>>>,
+    /// The app a closed tab hands back to (its `back_to`), for `apps::apply`.
+    pub returned: Option<usize>,
 }
 
 impl Terms {
@@ -264,6 +268,7 @@ impl Terminal {
             inner: Mutex::new(Inner { term, parser: Processor::new(), rx, writer, _master: Some(pair.master), child: Some(child), host: None }),
             dirty: true,
             exited: false,
+            back_to: None,
             name,
         })
     }
@@ -293,6 +298,7 @@ impl Terminal {
             inner: Mutex::new(Inner { term, parser: Processor::new(), rx, writer, _master: None, child: None, host: Some(h) }),
             dirty: true,
             exited: false,
+            back_to: None,
             name,
         })
     }
@@ -319,6 +325,9 @@ pub fn pump(mut terms: ResMut<Terms>) {
         pump_one(t);
     }
     if let Some(i) = terms.tabs.iter().position(|t| t.exited) {
+        if let Some(a) = terms.tabs[i].back_to {
+            terms.returned = Some(a);
+        }
         terms.close(i);
     }
 }
