@@ -1,0 +1,10 @@
+// A session taken over into Sphere: reports its arguments, waits for a message
+// and echoes it. Idle takeovers get no first message, so it waits.
+{"op":"init"}
+{"op":"say_args"}
+{"op":"wait_user"}
+{"op":"say_user","prefix":"first message: "}
+{"op":"result","text":"done","cost":0.01}
+{"op":"wait_user"}
+{"op":"say_user","prefix":"then: "}
+{"op":"result","text":"done again","cost":0.01}

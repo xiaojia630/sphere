@@ -350,6 +350,7 @@ pub fn event_lines(e: &Event, st: &Style) -> Vec<String> {
             one(format!("{}: {}", st.red("failed"), clip(message, 300)))
         }
         EventBody::Warning { message } => one(format!("warning: {message}")),
+        EventBody::TakenOver { from } => one(format!("taken over from {from}")),
     }
 }
 

@@ -50,6 +50,8 @@ pub struct MouseState {
     pub dragging: bool,
     /// the Agent swarm is open: it takes the clicks and the hover (the core still turns when dragged)
     pub swarm: bool,
+    /// the take-over card's box on screen: the canvas leaves the pointer over it alone
+    pub block: Option<Rect>,
 }
 
 pub fn setup(mut cursor: Query<&mut CursorOptions, With<PrimaryWindow>>, args: Res<crate::Args>) {
@@ -164,7 +166,15 @@ pub fn update(
     };
     ms.pos = Some(pos);
     ms.swarm = swarm.open;
-    let hit = if ms.drag == Drag::None { pick(w, pos, cam, &panels.p0(), &tiles, &decks, &gts) } else { ms.hit.unwrap_or(Hit::None) };
+    let hit = if ms.drag == Drag::None {
+        if ms.block.is_some_and(|r| r.contains(pos)) {
+            Hit::Visor
+        } else {
+            pick(w, pos, cam, &panels.p0(), &tiles, &decks, &gts)
+        }
+    } else {
+        ms.hit.unwrap_or(Hit::None)
+    };
     if ms.hit != Some(hit) && matches!(hit, Hit::Ring(_)) && !swarm.open {
         sound.play("hover");
     }
@@ -405,7 +415,11 @@ fn single_click(hit: Hit, at: Option<Vec2>, rolo: &mut crate::homepanels::Rolode
             sound.play_q("click", 90);
         }
         Hit::Panel(_, PanelId::Terminal) => open.app(0, toasts),
-        Hit::Panel(_, PanelId::Agents) => open.app(1, toasts),
+        // a row of "elsewhere" opens its card (`takeover::commands` finds which), anywhere else the Working view
+        Hit::Panel(_, PanelId::Agents) => match at {
+            Some(a) => open.agents_click = Some(a),
+            None => open.app(1, toasts),
+        },
         Hit::Ring(crate::core::AGENTS) => open.app(1, toasts),
         _ => {}
     }

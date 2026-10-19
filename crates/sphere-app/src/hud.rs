@@ -28,6 +28,7 @@ pub fn setup_panels(
     mut fonts_a: ResMut<Assets<Font>>,
     mut pmats: ResMut<Assets<PanelMaterial>>,
     agents: Res<Agents>,
+    outside: Res<crate::takeover::Outside>,
     decks: Res<Decks>,
     args: Res<Args>,
 ) {
@@ -38,7 +39,7 @@ pub fn setup_panels(
     // ---- Agents panel: right column, bottom aligned like the prototype (x 1546, y 962)
     let (aw, ah) = (356.0, 351.0);
     let ui = spawn_ui_panel(&mut commands, &mut atlas, aw, ah);
-    build_agents_ui(&mut commands, ui.root, &f, &agents, 0.0);
+    build_agents_ui(&mut commands, ui.root, &f, &agents, &outside, 0.0);
     let home = stage_to_world(1546.0 - aw / 2.0, 962.0 - ah / 2.0);
     spawn_panel_quad(
         &mut commands,

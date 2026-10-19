@@ -413,6 +413,11 @@ fn main() {
                 .unwrap_or_else(|| r#"{"loggedIn":true,"authMethod":"fake"}"#.into());
             return print!("{text}");
         }
+        // Stands in for a person's terminal session: just stays alive.
+        _ if args.raw.iter().any(|a| a == "--idle-forever") => loop {
+            std::thread::sleep(Duration::from_secs(3600));
+        },
+        Some("stop") => return,
         _ => {}
     }
     let Some(path) = args.fixture.clone() else {

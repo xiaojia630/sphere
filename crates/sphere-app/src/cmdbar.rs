@@ -262,6 +262,10 @@ pub(crate) fn home_command(t: &str, acts: &mut crate::home::Acts, open: &mut cra
         toasts.push(format!("Motion · {}", if m == Motion::Fast { "Fast" } else { "Cinematic" }));
         return true;
     }
+    if let Some(w) = crate::takeover::parse_words(&l) {
+        open.takeover = Some(w);
+        return true;
+    }
     if starts(&["swarm", "agents swarm", "agent swarm", "all agents"]) {
         open.swarm = true;
         return true;

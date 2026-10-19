@@ -67,6 +67,12 @@ pub struct TaskView {
     /// Cumulative cost last reported by the current agent process.
     #[serde(default)]
     pub last_total_cost: f64,
+    /// How many agent processes this task has started.
+    #[serde(default)]
+    pub starts: u32,
+    /// Where the session ran before it was taken over into Sphere.
+    #[serde(default)]
+    pub taken_over_from: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -254,6 +260,8 @@ impl Views {
                         allow_rewrites: *allow_rewrites,
                         resume_session: resume_session.clone(),
                         last_total_cost: 0.0,
+                        starts: 0,
+                        taken_over_from: None,
                     },
                 );
                 return;
@@ -331,8 +339,16 @@ impl Views {
                 t.pid = Some(*pid);
                 t.state = TaskState::Working;
                 t.last_total_cost = 0.0;
-                t.status = "Working".into();
+                if t.starts == 0 && t.prompt.trim().is_empty() {
+                    // Resumed with no message: it waits for the user's.
+                    t.state = TaskState::Done;
+                    t.status = "Waiting for your message".into();
+                } else {
+                    t.status = "Working".into();
+                }
+                t.starts += 1;
             }
+            EventBody::TakenOver { from } => t.taken_over_from = Some(from.clone()),
             EventBody::AgentExited { .. } => {
                 t.child = None;
                 t.pid = None;

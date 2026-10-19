@@ -738,7 +738,7 @@ pub struct AgentsRoot;
 #[derive(Component)]
 pub struct Blink;
 
-pub fn build_agents_ui(commands: &mut Commands, root: Entity, f: &UiFonts, agents: &Agents, sim_t: f32) {
+pub fn build_agents_ui(commands: &mut Commands, root: Entity, f: &UiFonts, agents: &Agents, outside: &crate::takeover::Outside, sim_t: f32) {
     let line = role_color(Role::Line);
     let hot = role_color(Role::Hot);
     let dim = role_color(Role::Dim);
@@ -807,7 +807,8 @@ pub fn build_agents_ui(commands: &mut Commands, root: Entity, f: &UiFonts, agent
             .id();
         commands.entity(list).add_child(e);
     }
-    let (rows, more) = agent_rows(agents.list.len());
+    let (ew_rows, ew_more) = elsewhere_rows_with(outside.list.len(), agents.list.len());
+    let (rows, more) = agent_rows_in(agents.list.len(), elsewhere_height(ew_rows, ew_more));
     for a in agents.list.iter().take(rows) {
         let (name_c, op) = match a.state {
             AState::Needs => (acc, 1.0),
@@ -904,34 +905,125 @@ pub fn build_agents_ui(commands: &mut Commands, root: Entity, f: &UiFonts, agent
             .id();
         commands.entity(list).add_child(m);
     }
+    if ew_rows > 0 {
+        build_elsewhere(commands, list, f, outside, ew_rows, ew_more);
+    }
+}
+
+/// Room in the Agents panel for rows (its height less the padding and the header), the height of one agent's row,
+/// and of the "elsewhere" part: its heading, each session's two lines, and the "+N more" line.
+const ROWS_ROOM: f32 = 292.0;
+const AGENT_ROW_H: f32 = 70.0;
+const ELSE_HEAD_H: f32 = 24.0;
+const ELSE_ROW_H: f32 = 36.0;
+const ELSE_MORE_H: f32 = 18.0;
+
+/// How many sessions running elsewhere the panel lists (three at most) and how many it leaves to a "+N more".
+pub fn elsewhere_rows(n: usize) -> (usize, usize) {
+    (n.min(3), n.saturating_sub(3))
+}
+
+/// The same, leaving room for at least two of Sphere's own agents (elsewhere keeps one row and a "+N more").
+pub fn elsewhere_rows_with(n: usize, own: usize) -> (usize, usize) {
+    let (max, _) = elsewhere_rows(n);
+    let want = own.min(2);
+    let r = (1..=max).rev().find(|&r| agent_rows_in(own, elsewhere_height(r, n - r)).0 >= want).unwrap_or(max.min(1));
+    (r, n - r)
+}
+
+fn elsewhere_height(rows: usize, more: usize) -> f32 {
+    if rows == 0 {
+        0.0
+    } else {
+        ELSE_HEAD_H + rows as f32 * ELSE_ROW_H + if more > 0 { ELSE_MORE_H } else { 0.0 }
+    }
+}
+
+/// Sphere's own agents first; then, dimmer, what runs elsewhere: title and state, then folder and where.
+fn build_elsewhere(commands: &mut Commands, list: Entity, f: &UiFonts, outside: &crate::takeover::Outside, rows: usize, more: usize) {
+    use crate::takeover::{repo_name, state_label, title_of, where_label, ElsewhereRow};
+    let line = role_color(Role::Line);
+    let dim = role_color(Role::Dim);
+    let acc = role_color(Role::Acc);
+    let head = commands
+        .spawn((Node { margin: UiRect { top: px(8), ..default() }, padding: UiRect { top: px(7), bottom: px(3), ..default() }, border: UiRect { top: px(1), ..default() }, ..default() }, BorderColor::all(with_alpha(line, 0.13))))
+        .id();
+    let ht = commands.spawn((Text::new("ELSEWHERE"), font(&f.ui700, 9.5, 3.0), TextColor(dim), LineHeight::Px(12.0))).id();
+    commands.entity(head).add_child(ht);
+    commands.entity(list).add_child(head);
+    for (i, s) in outside.list.iter().enumerate().take(rows) {
+        let waiting = s.state == "waiting";
+        let row = commands
+            .spawn((
+                ElsewhereRow(i),
+                Node { flex_direction: FlexDirection::Column, row_gap: px(1), padding: UiRect { left: px(8), right: px(8), top: px(3), bottom: px(3) }, margin: UiRect::horizontal(px(-8)), ..default() },
+            ))
+            .id();
+        let top = commands.spawn(Node { flex_direction: FlexDirection::Row, justify_content: JustifyContent::SpaceBetween, align_items: AlignItems::Center, column_gap: px(10), ..default() }).id();
+        let name_c = if waiting { acc } else { line };
+        let name = commands
+            .spawn((
+                Text::new(crate::appframe::clip(&title_of(s), 26).to_uppercase()),
+                font(&f.ui600, 12.0, 1.7),
+                TextColor(with_alpha(name_c, if waiting { 1.0 } else { 0.62 })),
+                LineHeight::Px(14.0),
+                TextLayout { linebreak: LineBreak::NoWrap, ..default() },
+            ))
+            .id();
+        let st = commands
+            .spawn((Text::new(state_label(&s.state).to_uppercase()), font(&f.ui700, 9.5, 1.9), TextColor(if waiting { acc } else { with_alpha(dim, 0.9) }), LineHeight::Px(10.0), TextLayout { linebreak: LineBreak::NoWrap, ..default() }))
+            .id();
+        commands.entity(top).add_children(&[name, st]);
+        let folder = repo_name(s.cwd.as_deref());
+        let meta = if folder.is_empty() { where_label(&s.where_) } else { format!("{folder} · {}", where_label(&s.where_)) };
+        let m = commands.spawn((Text::new(meta), font(&f.ui500, 12.0, 0.96), TextColor(with_alpha(line, 0.5)), LineHeight::Px(14.0), TextLayout { linebreak: LineBreak::NoWrap, ..default() })).id();
+        commands.entity(row).add_children(&[top, m]);
+        commands.entity(list).add_child(row);
+    }
+    if more > 0 {
+        let m = commands
+            .spawn((Text::new(format!("+{more} MORE ELSEWHERE")), font(&f.ui600, 10.0, 2.0), TextColor(with_alpha(dim, 0.8)), LineHeight::Px(12.0), Node { margin: UiRect { top: px(4), ..default() }, ..default() }))
+            .id();
+        commands.entity(list).add_child(m);
+    }
 }
 
 /// The Agents panel fits four rows: with more agents than that it shows three and a "+N more" line.
+#[cfg(test)]
 pub fn agent_rows(n: usize) -> (usize, usize) {
-    if n <= 4 {
+    agent_rows_in(n, 0.0)
+}
+
+/// The same with `extra` px of the panel taken by the sessions running elsewhere: fewer rows fit, and the rest are
+/// counted in a "+N more" line that takes the place of one row.
+pub fn agent_rows_in(n: usize, extra: f32) -> (usize, usize) {
+    let fit = ((ROWS_ROOM - extra) / AGENT_ROW_H).floor().max(0.0) as usize;
+    if n <= fit {
         (n, 0)
     } else {
-        (3, n - 3)
+        let show = fit.saturating_sub(1);
+        (show, n - show)
     }
 }
 
 pub fn rebuild_agents_ui(
     mut commands: Commands,
     agents: Res<Agents>,
+    outside: Res<crate::takeover::Outside>,
     f: Res<UiFonts>,
     roots: Query<(Entity, &ChildOf), With<AgentsRoot>>,
     sim: Res<Sim>,
-    mut last: Local<u32>,
+    mut last: Local<(u32, u64)>,
 ) {
-    if *last == agents.version {
+    if *last == (agents.version, outside.version) {
         return;
     }
     for (body, parent) in &roots {
         let root = parent.parent();
         commands.entity(body).despawn();
-        build_agents_ui(&mut commands, root, &f, &agents, sim.t);
+        build_agents_ui(&mut commands, root, &f, &agents, &outside, sim.t);
     }
-    *last = agents.version;
+    *last = (agents.version, outside.version);
 }
 
 pub fn blink_system(sim: Res<Sim>, mut q: Query<&mut BackgroundColor, With<Blink>>) {
