@@ -5,7 +5,7 @@
 use super::{hash, mesh, pick_angle, ring_local, Gfx, Scene, SceneOut, NRING, NSAT, REPOS, H};
 use crate::core::Sim;
 use crate::fonts::UiFonts;
-use crate::glow::{GlowMaterial, Kind};
+use crate::glow::{GlowMaterial, GlowSlots, Kind};
 use crate::panel::{font, with_alpha};
 use crate::swarm::Swarm;
 use crate::takeover::{key_of, match_repo, repo_name, state_label, title_of, where_label, Outside, TakeOver};
@@ -59,8 +59,8 @@ pub fn build(app: &mut App) {
         .add_systems(Update, (update, hover, click, ui).chain().after(super::update));
 }
 
-fn setup(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut mats: ResMut<Assets<GlowMaterial>>, scene: Res<Scene>) {
-    let mut g = Gfx { c: &mut commands, meshes: &mut meshes, mats: &mut mats };
+fn setup(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut mats: ResMut<Assets<GlowMaterial>>, mut gslots: ResMut<GlowSlots>, scene: Res<Scene>) {
+    let mut g = Gfx { c: &mut commands, meshes: &mut meshes, mats: &mut mats, gslots: &mut gslots };
     let mut slots = Vec::new();
     for _ in 0..NG {
         let root = g.c.spawn((Transform::default(), Visibility::Hidden)).id();
@@ -129,6 +129,7 @@ fn update(
     mut tfs: Query<&mut Transform>,
     mut vis: Query<&mut Visibility>,
     mut mats: ResMut<Assets<GlowMaterial>>,
+    mut gslots: ResMut<GlowSlots>,
     mut meshes: ResMut<Assets<Mesh>>,
 ) {
     let amt = clamp(swarm.amt.x, 0.0, 1.0);
@@ -240,12 +241,12 @@ fn update(
             let waiting = sess.is_some_and(|x| x.state == "waiting");
             let col = if waiting { acc } else { line };
             let (inner, outer) = (s.inner.clone(), s.outer.clone());
-            super::upd(&mut mats, &inner, |u| {
+            gslots.update(&mut mats, &inner, |u| {
                 u.color = col;
                 u.a.x = if waiting { 1.0 } else { 0.8 } + hv * 0.2;
                 u.b.x = fade;
             });
-            super::upd(&mut mats, &outer, |u| {
+            gslots.update(&mut mats, &outer, |u| {
                 u.color = if waiting { acc } else { dimc };
                 u.a.x = 0.42 + hv * 0.3;
                 u.b.x = fade;
@@ -268,7 +269,7 @@ fn update(
     let ring_on = gh.ring_vis > 0.01 && gh.ring_for.is_some();
     super::show(&mut vis, gh.ring_e, ring_on);
     let (rm, rv) = (gh.ring_m.clone(), gh.ring_vis * amt);
-    super::upd(&mut mats, &rm, |u| {
+    gslots.update(&mut mats, &rm, |u| {
         u.color = line;
         u.a.x = 0.16;
         u.b.x = rv;

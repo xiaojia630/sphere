@@ -42,8 +42,16 @@ impl Geo {
     pub fn is_empty(&self) -> bool {
         self.p.is_empty()
     }
+    /// Keeps a CPU copy after upload: for a mesh that is rebuilt later (`*mesh = ...`).
     pub fn into_mesh(self) -> Mesh {
-        let mut m = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default());
+        self.mesh(RenderAssetUsages::default())
+    }
+    /// For a mesh nothing reads or rewrites once it has spawned: the CPU copy is freed as soon as the renderer has it.
+    pub fn into_gpu_mesh(self) -> Mesh {
+        self.mesh(RenderAssetUsages::RENDER_WORLD)
+    }
+    fn mesh(self, usage: RenderAssetUsages) -> Mesh {
+        let mut m = Mesh::new(PrimitiveTopology::TriangleList, usage);
         if self.p.is_empty() {
             // an empty mesh still needs its attributes so the pipeline layout matches
             m.insert_attribute(Mesh::ATTRIBUTE_POSITION, vec![[0.0f32; 3]; 3]);
@@ -176,5 +184,29 @@ pub fn arcs_geo(g: &mut Geo, r: f32, segs: usize, w: f32, gap_deg: f32) {
                 ..Default::default()
             },
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn some_ring() -> Geo {
+        let mut g = Geo::new();
+        ring(&mut g, 100.0, 2.0);
+        g
+    }
+
+    #[test]
+    fn only_the_gpu_mesh_gives_up_its_cpu_copy() {
+        // `into_mesh` is for meshes rebuilt later with `*mesh = ...`: it has to keep its vertices in the main world
+        let kept = some_ring().into_mesh();
+        assert_eq!(kept.asset_usage, RenderAssetUsages::default());
+        let gpu = some_ring().into_gpu_mesh();
+        assert_eq!(gpu.asset_usage, RenderAssetUsages::RENDER_WORLD);
+        // the same vertices either way, and an empty one still gets its placeholder triangle
+        assert!(kept.count_vertices() > 0 && kept.count_vertices() == gpu.count_vertices());
+        let empty = Geo::new().into_gpu_mesh();
+        assert_eq!((empty.asset_usage, empty.count_vertices()), (RenderAssetUsages::RENDER_WORLD, 3));
     }
 }

@@ -410,7 +410,8 @@ fn ui_panel_at(commands: &mut Commands, atlas: &Atlas, w: f32, h: f32, x: u32, y
 
 pub fn panel_mesh(w: f32, h: f32, pad: f32) -> Mesh {
     let (hw, hh) = (w / 2.0 + pad, h / 2.0 + pad);
-    let mut m = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default());
+    // a panel only moves by its transform and material: no CPU copy once the quad is uploaded
+    let mut m = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::RENDER_WORLD);
     m.insert_attribute(Mesh::ATTRIBUTE_POSITION, vec![[-hw, -hh, 0.0], [hw, -hh, 0.0], [hw, hh, 0.0], [-hw, hh, 0.0]]);
     m.insert_attribute(Mesh::ATTRIBUTE_UV_0, vec![[0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]]);
     m.insert_indices(bevy::mesh::Indices::U32(vec![0, 1, 2, 0, 2, 3]));
@@ -738,14 +739,147 @@ pub struct AgentsRoot;
 #[derive(Component)]
 pub struct Blink;
 
+/// What one agent row looks like, as the values its UI components hold. Everything `build_agents_ui` draws of an
+/// agent comes from here, so a row already on screen is brought up to date by comparing two looks and editing what
+/// differs, instead of being built again.
+#[derive(Clone, Debug, PartialEq)]
+struct RowLook {
+    name: String,
+    name_color: Color,
+    chip: &'static str,
+    chip_fg: Color,
+    chip_bg: Color,
+    chip_border: Color,
+    /// the chip's blinking LED (while the agent works)
+    led: bool,
+    /// the 18 segments of the bar
+    segs: [Color; 18],
+    pct: String,
+    pct_color: Color,
+    step: String,
+    step_color: Color,
+}
+
+fn row_look(a: &Agent) -> RowLook {
+    let (line, hot, fill, acc) = (role_color(Role::Line), role_color(Role::Hot), role_color(Role::Fill), role_color(Role::Acc));
+    let (ok, bad) = (role_color(Role::Ok), role_color(Role::Bad));
+    let g1 = with_alpha(line, 0.72);
+    let (name_c, op) = match a.state {
+        AState::Needs => (acc, 1.0),
+        AState::Done | AState::Failed => (hot, 0.6),
+        _ => (hot, 1.0),
+    };
+    let (chip, chip_fg, chip_bg, chip_border) = match a.state {
+        AState::Working => ("WORKING", line, Color::NONE, g1),
+        AState::Needs => ("NEEDS YOU", Color::BLACK, acc, acc),
+        AState::Done => (a.chip.unwrap_or("DONE"), ok, Color::NONE, with_alpha(ok, 0.7)),
+        AState::Failed => (a.chip.unwrap_or("FAILED"), bad, Color::NONE, with_alpha(bad, 0.7)),
+    };
+    // bar: 18 segments + percent
+    let frac = if a.state == AState::Working { a.p } else { 1.0 };
+    let on = (frac * 18.0).round() as usize;
+    let on_c = if a.state == AState::Done { ok } else { fill };
+    let segs = std::array::from_fn(|i| if i < on { with_alpha(on_c, op) } else { with_alpha(line, 0.13 * op) });
+    let pct = match (&a.figure, a.state) {
+        (Some(f), _) => f.clone(),
+        (None, AState::Working) => format!("{}%", (a.p * 100.0).round() as i32),
+        (None, AState::Needs) => "WAIT".to_string(),
+        (None, AState::Done) => "OK".to_string(),
+        (None, AState::Failed) => "--".to_string(),
+    };
+    let pct_c = if a.state == AState::Done { ok } else { hot };
+    RowLook {
+        name: a.name.to_uppercase(),
+        name_color: with_alpha(name_c, op),
+        chip,
+        chip_fg: with_alpha(chip_fg, op),
+        chip_bg: with_alpha(chip_bg, op),
+        chip_border: with_alpha(chip_border, op),
+        led: a.state == AState::Working,
+        segs,
+        pct,
+        pct_color: with_alpha(pct_c, op),
+        step: a.step.clone(),
+        step_color: with_alpha(line, op),
+    }
+}
+
+/// Which parts of an agent row differ between two looks: the edits a row on screen needs.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct RowDelta {
+    name: bool,
+    name_color: bool,
+    chip: bool,
+    chip_fg: bool,
+    chip_bg: bool,
+    chip_border: bool,
+    led: bool,
+    /// bit i: segment i
+    segs: u32,
+    pct: bool,
+    pct_color: bool,
+    step: bool,
+    step_color: bool,
+}
+
+impl RowDelta {
+    fn between(old: &RowLook, new: &RowLook) -> RowDelta {
+        RowDelta {
+            name: old.name != new.name,
+            name_color: old.name_color != new.name_color,
+            chip: old.chip != new.chip,
+            chip_fg: old.chip_fg != new.chip_fg,
+            chip_bg: old.chip_bg != new.chip_bg,
+            chip_border: old.chip_border != new.chip_border,
+            led: old.led != new.led,
+            segs: (0..18).filter(|&i| old.segs[i] != new.segs[i]).fold(0, |m, i| m | (1 << i)),
+            pct: old.pct != new.pct,
+            pct_color: old.pct_color != new.pct_color,
+            step: old.step != new.step,
+            step_color: old.step_color != new.step_color,
+        }
+    }
+    fn is_empty(&self) -> bool {
+        *self == RowDelta::default()
+    }
+}
+
+/// The entities of one agent row on screen, and the look they were last given.
+struct ShownRow {
+    look: RowLook,
+    name: Entity,
+    chip: Entity,
+    led: Option<Entity>,
+    chip_text: Entity,
+    segs: [Entity; 18],
+    pct: Entity,
+    step: Entity,
+}
+
+/// The Agents panel on screen: its entities and what they show. A change in the agents edits those entities in place;
+/// the panel is built again only when its shape changes (the empty note, the number of rows, the "+N more" line).
+#[derive(Component)]
+pub struct AgentsShown {
+    summary: Entity,
+    empty: bool,
+    rows: Vec<ShownRow>,
+    /// the "+N MORE" line and its N
+    more: Option<(Entity, usize)>,
+}
+
+/// How many rows the panel shows of `agents` and how many more it counts, then the same for the sessions running
+/// elsewhere: what `build_agents_ui` builds.
+fn shape(agents: &Agents, outside: &crate::takeover::Outside) -> ((usize, usize), (usize, usize)) {
+    let ew = elsewhere_rows_with(outside.list.len(), agents.total);
+    let (rows, more) = agent_rows_in(agents.total, elsewhere_height(ew.0, ew.1));
+    ((rows.min(agents.list.len()), more), ew)
+}
+
 pub fn build_agents_ui(commands: &mut Commands, root: Entity, f: &UiFonts, agents: &Agents, outside: &crate::takeover::Outside, sim_t: f32) {
     let line = role_color(Role::Line);
     let hot = role_color(Role::Hot);
     let dim = role_color(Role::Dim);
     let fill = role_color(Role::Fill);
-    let acc = role_color(Role::Acc);
-    let ok = role_color(Role::Ok);
-    let bad = role_color(Role::Bad);
     let g1 = with_alpha(line, 0.72);
     let _ = sim_t;
     let body = commands
@@ -795,7 +929,8 @@ pub fn build_agents_ui(commands: &mut Commands, root: Entity, f: &UiFonts, agent
     // rows
     let list = commands.spawn(Node { flex_direction: FlexDirection::Column, row_gap: px(2), ..default() }).id();
     commands.entity(body).add_child(list);
-    if agents.list.is_empty() {
+    let empty = agents.list.is_empty();
+    if empty {
         let e = commands
             .spawn((
                 Text::new("No agents running. Type a task in the bar below."),
@@ -807,14 +942,10 @@ pub fn build_agents_ui(commands: &mut Commands, root: Entity, f: &UiFonts, agent
             .id();
         commands.entity(list).add_child(e);
     }
-    let (ew_rows, ew_more) = elsewhere_rows_with(outside.list.len(), agents.list.len());
-    let (rows, more) = agent_rows_in(agents.list.len(), elsewhere_height(ew_rows, ew_more));
+    let ((rows, more), (ew_rows, ew_more)) = shape(agents, outside);
+    let mut shown = Vec::new();
     for a in agents.list.iter().take(rows) {
-        let (name_c, op) = match a.state {
-            AState::Needs => (acc, 1.0),
-            AState::Done | AState::Failed => (hot, 0.6),
-            _ => (hot, 1.0),
-        };
+        let look = row_look(a);
         let row = commands
             .spawn(Node {
                 flex_direction: FlexDirection::Column,
@@ -830,14 +961,8 @@ pub fn build_agents_ui(commands: &mut Commands, root: Entity, f: &UiFonts, agent
             .spawn(Node { flex_direction: FlexDirection::Row, justify_content: JustifyContent::SpaceBetween, align_items: AlignItems::Center, column_gap: px(10), ..default() })
             .id();
         let name = commands
-            .spawn((Text::new(a.name.to_uppercase()), font(&f.ui600, 13.5, 1.89), TextColor(with_alpha(name_c, op)), LineHeight::Px(17.55)))
+            .spawn((Text::new(look.name.clone()), font(&f.ui600, 13.5, 1.89), TextColor(look.name_color), LineHeight::Px(17.55)))
             .id();
-        let (chip_txt, chip_fg, chip_bg, chip_border) = match a.state {
-            AState::Working => ("WORKING", line, Color::NONE, g1),
-            AState::Needs => ("NEEDS YOU", Color::BLACK, acc, acc),
-            AState::Done => (a.chip.unwrap_or("DONE"), ok, Color::NONE, with_alpha(ok, 0.7)),
-            AState::Failed => (a.chip.unwrap_or("FAILED"), bad, Color::NONE, with_alpha(bad, 0.7)),
-        };
         let chip = commands
             .spawn((
                 Node {
@@ -848,52 +973,42 @@ pub fn build_agents_ui(commands: &mut Commands, root: Entity, f: &UiFonts, agent
                     border: UiRect::all(px(1)),
                     ..default()
                 },
-                BackgroundColor(with_alpha(chip_bg, op)),
-                BorderColor::all(with_alpha(chip_border, op)),
+                BackgroundColor(look.chip_bg),
+                BorderColor::all(look.chip_border),
             ))
             .id();
-        if a.state == AState::Working {
-            let led = commands.spawn((Node { width: px(5), height: px(5), ..default() }, BackgroundColor(fill), Blink)).id();
+        let led = look.led.then(|| {
+            let led = commands.spawn(led_bundle()).id();
             commands.entity(chip).add_child(led);
-        }
-        let ct = commands.spawn((Text::new(chip_txt), font(&f.ui700, 10.0, 2.0), TextColor(with_alpha(chip_fg, op)), LineHeight::Px(10.0))).id();
+            led
+        });
+        let ct = commands.spawn((Text::new(look.chip), font(&f.ui700, 10.0, 2.0), TextColor(look.chip_fg), LineHeight::Px(10.0))).id();
         commands.entity(chip).add_child(ct);
         commands.entity(top).add_children(&[name, chip]);
-        // bar: 18 segments + percent
         let bar = commands
             .spawn(Node { flex_direction: FlexDirection::Row, align_items: AlignItems::Center, column_gap: px(10), height: px(12), ..default() })
             .id();
         let track = commands.spawn(Node { flex_grow: 1.0, height: px(5), flex_direction: FlexDirection::Row, column_gap: px(2), ..default() }).id();
-        let frac = if a.state == AState::Working { a.p } else { 1.0 };
-        let on = (frac * 18.0).round() as usize;
-        let on_c = if a.state == AState::Done { ok } else { fill };
-        for i in 0..18 {
-            let c = if i < on { with_alpha(on_c, op) } else { with_alpha(line, 0.13 * op) };
-            let seg = commands.spawn((Node { flex_grow: 1.0, height: px(5), ..default() }, BackgroundColor(c))).id();
+        let segs = std::array::from_fn(|i| {
+            let seg = commands.spawn((Node { flex_grow: 1.0, height: px(5), ..default() }, BackgroundColor(look.segs[i]))).id();
             commands.entity(track).add_child(seg);
-        }
-        let pct_txt = match (&a.figure, a.state) {
-            (Some(f), _) => f.clone(),
-            (None, AState::Working) => format!("{}%", (a.p * 100.0).round() as i32),
-            (None, AState::Needs) => "WAIT".to_string(),
-            (None, AState::Done) => "OK".to_string(),
-            (None, AState::Failed) => "--".to_string(),
-        };
-        let pct_c = if a.state == AState::Done { ok } else { hot };
+            seg
+        });
         let pct = commands
             .spawn((
                 Node { min_width: px(36), justify_content: JustifyContent::FlexEnd, ..default() },
             ))
             .id();
-        let pt = commands.spawn((Text::new(pct_txt), font(&f.mono, 11.5, 2.24), TextColor(with_alpha(pct_c, op)), LineHeight::Px(11.5))).id();
+        let pt = commands.spawn((Text::new(look.pct.clone()), font(&f.mono, 11.5, 2.24), TextColor(look.pct_color), LineHeight::Px(11.5))).id();
         commands.entity(pct).add_child(pt);
         commands.entity(bar).add_children(&[track, pct]);
         let step = commands
-            .spawn((Text::new(a.step.clone()), font(&f.ui500, 13.0, 1.04), TextColor(with_alpha(line, op)), LineHeight::Px(16.9)))
+            .spawn((Text::new(look.step.clone()), font(&f.ui500, 13.0, 1.04), TextColor(look.step_color), LineHeight::Px(16.9)))
             .id();
         commands.entity(row).add_children(&[top, bar, step]);
+        shown.push(ShownRow { look, name, chip, led, chip_text: ct, segs, pct: pt, step });
     }
-    if more > 0 {
+    let more_line = (more > 0).then(|| {
         let m = commands
             .spawn((
                 Text::new(format!("+{more} MORE")),
@@ -904,10 +1019,17 @@ pub fn build_agents_ui(commands: &mut Commands, root: Entity, f: &UiFonts, agent
             ))
             .id();
         commands.entity(list).add_child(m);
-    }
+        (m, more)
+    });
     if ew_rows > 0 {
         build_elsewhere(commands, list, f, outside, ew_rows, ew_more);
     }
+    commands.entity(body).insert(AgentsShown { summary: t2, empty, rows: shown, more: more_line });
+}
+
+/// The chip's blinking LED (`blink_system` sets its colour).
+fn led_bundle() -> impl Bundle {
+    (Node { width: px(5), height: px(5), ..default() }, BackgroundColor(role_color(Role::Fill)), Blink)
 }
 
 /// Room in the Agents panel for rows (its height less the padding and the header), the height of one agent's row,
@@ -1007,24 +1129,118 @@ pub fn agent_rows_in(n: usize, extra: f32) -> (usize, usize) {
     }
 }
 
+/// Sets a text only if it differs: an assignment alone marks it changed, which re-shapes the text and redraws the panel.
+fn set_text(q: &mut Query<&mut Text>, e: Entity, s: &str) {
+    if let Ok(mut t) = q.get_mut(e) {
+        if t.0 != s {
+            t.0 = s.to_string();
+        }
+    }
+}
+
+/// Keeps the Agents panel up to date with the agents. A change in an agent's step, state, figure or bar edits the
+/// texts, colours and bar segments of its row where they stand (only the ones whose value differs, so the panel
+/// redraws only for a real change). The panel is built again when its shape changes (the empty note, the number of
+/// rows, the "+N more" line) and when the sessions running elsewhere change.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn rebuild_agents_ui(
     mut commands: Commands,
     agents: Res<Agents>,
     outside: Res<crate::takeover::Outside>,
     f: Res<UiFonts>,
-    roots: Query<(Entity, &ChildOf), With<AgentsRoot>>,
+    mut roots: Query<(Entity, &ChildOf, &mut AgentsShown), With<AgentsRoot>>,
+    mut texts: Query<&mut Text>,
+    mut text_colors: Query<&mut TextColor>,
+    mut fills: Query<&mut BackgroundColor>,
+    mut borders: Query<&mut BorderColor>,
     sim: Res<Sim>,
     mut last: Local<(u32, u64)>,
 ) {
     if *last == (agents.version, outside.version) {
         return;
     }
-    for (body, parent) in &roots {
-        let root = parent.parent();
-        commands.entity(body).despawn();
-        build_agents_ui(&mut commands, root, &f, &agents, &outside, sim.t);
-    }
+    let elsewhere = last.1 != outside.version;
     *last = (agents.version, outside.version);
+    let ((rows, more), _) = shape(&agents, &outside);
+    let summary = agents.summary().to_uppercase();
+    for (body, parent, mut shown) in &mut roots {
+        if elsewhere || shown.empty != agents.list.is_empty() || shown.rows.len() != rows || shown.more.is_some() != (more > 0) {
+            let root = parent.parent();
+            commands.entity(body).despawn();
+            build_agents_ui(&mut commands, root, &f, &agents, &outside, sim.t);
+            continue;
+        }
+        set_text(&mut texts, shown.summary, &summary);
+        for (a, r) in agents.list.iter().zip(shown.rows.iter_mut()) {
+            let new = row_look(a);
+            let d = RowDelta::between(&r.look, &new);
+            if d.is_empty() {
+                continue;
+            }
+            if d.name {
+                set_text(&mut texts, r.name, &new.name);
+            }
+            if d.name_color {
+                if let Ok(mut c) = text_colors.get_mut(r.name) {
+                    c.set_if_neq(TextColor(new.name_color));
+                }
+            }
+            if d.chip {
+                set_text(&mut texts, r.chip_text, new.chip);
+            }
+            if d.chip_fg {
+                if let Ok(mut c) = text_colors.get_mut(r.chip_text) {
+                    c.set_if_neq(TextColor(new.chip_fg));
+                }
+            }
+            if d.chip_bg {
+                if let Ok(mut c) = fills.get_mut(r.chip) {
+                    c.set_if_neq(BackgroundColor(new.chip_bg));
+                }
+            }
+            if d.chip_border {
+                if let Ok(mut c) = borders.get_mut(r.chip) {
+                    c.set_if_neq(BorderColor::all(new.chip_border));
+                }
+            }
+            if d.led {
+                match r.led.take() {
+                    Some(led) => commands.entity(led).despawn(),
+                    None => {
+                        let led = commands.spawn(led_bundle()).id();
+                        commands.entity(r.chip).insert_children(0, &[led]);
+                        r.led = Some(led);
+                    }
+                }
+            }
+            for i in (0..18).filter(|&i| (d.segs >> i) & 1 == 1) {
+                if let Ok(mut c) = fills.get_mut(r.segs[i]) {
+                    c.set_if_neq(BackgroundColor(new.segs[i]));
+                }
+            }
+            if d.pct {
+                set_text(&mut texts, r.pct, &new.pct);
+            }
+            if d.pct_color {
+                if let Ok(mut c) = text_colors.get_mut(r.pct) {
+                    c.set_if_neq(TextColor(new.pct_color));
+                }
+            }
+            if d.step {
+                set_text(&mut texts, r.step, &new.step);
+            }
+            if d.step_color {
+                if let Ok(mut c) = text_colors.get_mut(r.step) {
+                    c.set_if_neq(TextColor(new.step_color));
+                }
+            }
+            r.look = new;
+        }
+        if let Some((line, n)) = shown.more.as_mut().filter(|(_, n)| *n != more) {
+            set_text(&mut texts, *line, &format!("+{more} MORE"));
+            *n = more;
+        }
+    }
 }
 
 pub fn blink_system(sim: Res<Sim>, mut q: Query<&mut BackgroundColor, With<Blink>>) {
@@ -1096,5 +1312,496 @@ pub fn gate_panel_cameras(
         if cam.is_active != on {
             cam.is_active = on;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bevy::ecs::system::RunSystemOnce;
+
+    fn agent(name: &str, state: AState, p: f32, step: &str) -> Agent {
+        Agent { name: name.into(), state, p, step: step.into(), rate: 0.0, figure: None, chip: None }
+    }
+
+    fn look(a: &Agent) -> RowLook {
+        row_look(a)
+    }
+
+    // ---- the diff of two looks
+
+    #[test]
+    fn a_row_differs_only_where_its_agent_does() {
+        let a = agent("Fix login", AState::Working, 0.5, "Running tests, step 3");
+        assert!(RowDelta::between(&look(&a), &look(&a)).is_empty());
+        // the words of the step
+        let b = Agent { step: "Editing the test, step 4".into(), ..a.clone() };
+        assert_eq!(RowDelta::between(&look(&a), &look(&b)), RowDelta { step: true, ..RowDelta::default() });
+        // the name
+        let b = Agent { name: "Fix signup".into(), ..a.clone() };
+        assert_eq!(RowDelta::between(&look(&a), &look(&b)), RowDelta { name: true, ..RowDelta::default() });
+        // the bar fills: 0.5 shows 9 of 18 segments and 0.6 shows 11, so segments 9 and 10 turn on; the percent changes with it
+        let b = Agent { p: 0.6, ..a.clone() };
+        assert_eq!(RowDelta::between(&look(&a), &look(&b)), RowDelta { segs: (1 << 9) | (1 << 10), pct: true, ..RowDelta::default() });
+        // a bit more progress that doesn't turn a segment on still moves the percent
+        let b = Agent { p: 0.51, ..a.clone() };
+        assert_eq!(RowDelta::between(&look(&a), &look(&b)), RowDelta { pct: true, ..RowDelta::default() });
+        // with a figure (the step count) the percent isn't shown: a bar move alone changes the segments
+        let c = Agent { figure: Some("3".into()), ..a.clone() };
+        let d = Agent { p: 0.6, ..c.clone() };
+        assert_eq!(RowDelta::between(&look(&c), &look(&d)), RowDelta { segs: (1 << 9) | (1 << 10), ..RowDelta::default() });
+    }
+
+    #[test]
+    fn finishing_changes_the_chip_the_bar_the_led_and_the_colours() {
+        let a = agent("Fix login", AState::Working, 0.5, "Running tests");
+        let b = Agent { state: AState::Done, ..a.clone() };
+        let d = RowDelta::between(&look(&a), &look(&b));
+        assert!(d.led && d.chip && d.chip_fg && d.chip_border && d.name_color && d.step_color && d.pct && d.pct_color);
+        assert_eq!(d.segs, (1 << 18) - 1, "every segment: a done bar is full and green");
+        assert!(!d.chip_bg && !d.name && !d.step);
+        // failed and stopped differ in the chip's word only
+        let failed = Agent { state: AState::Failed, chip: Some("FAILED"), ..a.clone() };
+        let stopped = Agent { chip: Some("STOPPED"), ..failed.clone() };
+        assert_eq!(RowDelta::between(&look(&failed), &look(&stopped)), RowDelta { chip: true, ..RowDelta::default() });
+    }
+
+    #[test]
+    fn the_panel_shows_what_fits_and_counts_the_rest() {
+        let with = |n: usize| {
+            let mut a = Agents::empty();
+            let list: Vec<Agent> = (0..n).map(|i| agent(&format!("a{i}"), AState::Working, 0.5, "x")).collect();
+            a.set_roster(Roster::of(&list));
+            shape(&a, &crate::takeover::Outside::default()).0
+        };
+        assert_eq!([with(0), with(3), with(4), with(5), with(12)], [(0, 0), (3, 0), (4, 0), (3, 2), (3, 9)]);
+    }
+
+    // ---- the panel in a world, against the old builder
+
+    fn legacy_build_agents_ui(commands: &mut Commands, root: Entity, f: &UiFonts, full: &[Agent], summary: String) {
+        let line = role_color(Role::Line);
+        let hot = role_color(Role::Hot);
+        let dim = role_color(Role::Dim);
+        let fill = role_color(Role::Fill);
+        let acc = role_color(Role::Acc);
+        let ok = role_color(Role::Ok);
+        let bad = role_color(Role::Bad);
+        let g1 = with_alpha(line, 0.72);
+        let body = commands
+            .spawn((
+                AgentsRoot,
+                Node {
+                    width: percent(100),
+                    height: percent(100),
+                    flex_direction: FlexDirection::Column,
+                    padding: UiRect { left: px(18), right: px(18), top: px(14), bottom: px(16) },
+                    row_gap: px(4),
+                    ..default()
+                },
+            ))
+            .id();
+        commands.entity(root).add_child(body);
+        // header
+        let hdr = commands
+            .spawn((
+                Node {
+                    flex_direction: FlexDirection::Row,
+                    align_items: AlignItems::Center,
+                    column_gap: px(9),
+                    padding: UiRect { bottom: px(8), ..default() },
+                    margin: UiRect { bottom: px(6), ..default() },
+                    border: UiRect { bottom: px(1), ..default() },
+                    ..default()
+                },
+                BorderColor::all(g1),
+            ))
+            .id();
+        commands.entity(body).add_child(hdr);
+        let sq = commands.spawn((Node { width: px(6), height: px(6), ..default() }, BackgroundColor(fill))).id();
+        let t1 = commands
+            .spawn((Text::new("AGENTS"), font(&f.ui600, 12.0, 3.84), TextColor(hot), LineHeight::Px(14.4)))
+            .id();
+        let t2 = commands
+            .spawn((
+                Text::new(summary),
+                font(&f.ui500, 12.0, 2.16),
+                TextColor(dim),
+                LineHeight::Px(14.4),
+                Node { margin: UiRect { left: auto(), ..default() }, ..default() },
+            ))
+            .id();
+        commands.entity(hdr).add_children(&[sq, t1, t2]);
+        // rows
+        let list = commands.spawn(Node { flex_direction: FlexDirection::Column, row_gap: px(2), ..default() }).id();
+        commands.entity(body).add_child(list);
+        if full.is_empty() {
+            let e = commands
+                .spawn((
+                    Text::new("No agents running. Type a task in the bar below."),
+                    font(&f.ui500, 13.0, 1.04),
+                    TextColor(with_alpha(line, 0.7)),
+                    LineHeight::Px(16.9),
+                    Node { margin: UiRect { top: px(8), ..default() }, ..default() },
+                ))
+                .id();
+            commands.entity(list).add_child(e);
+        }
+        let (rows, more) = agent_rows(full.len());
+        for a in full.iter().take(rows) {
+            let (name_c, op) = match a.state {
+                AState::Needs => (acc, 1.0),
+                AState::Done | AState::Failed => (hot, 0.6),
+                _ => (hot, 1.0),
+            };
+            let row = commands
+                .spawn(Node {
+                    flex_direction: FlexDirection::Column,
+                    row_gap: px(4),
+                    padding: UiRect { left: px(8), right: px(8), top: px(7), bottom: px(8) },
+                    margin: UiRect::horizontal(px(-8)),
+                    ..default()
+                })
+                .id();
+            commands.entity(list).add_child(row);
+            // top: name + chip
+            let top = commands
+                .spawn(Node { flex_direction: FlexDirection::Row, justify_content: JustifyContent::SpaceBetween, align_items: AlignItems::Center, column_gap: px(10), ..default() })
+                .id();
+            let name = commands
+                .spawn((Text::new(a.name.to_uppercase()), font(&f.ui600, 13.5, 1.89), TextColor(with_alpha(name_c, op)), LineHeight::Px(17.55)))
+                .id();
+            let (chip_txt, chip_fg, chip_bg, chip_border) = match a.state {
+                AState::Working => ("WORKING", line, Color::NONE, g1),
+                AState::Needs => ("NEEDS YOU", Color::BLACK, acc, acc),
+                AState::Done => ("DONE", ok, Color::NONE, with_alpha(ok, 0.7)),
+                AState::Failed => (a.chip.unwrap_or("FAILED"), bad, Color::NONE, with_alpha(bad, 0.7)),
+            };
+            let chip = commands
+                .spawn((
+                    Node {
+                        flex_direction: FlexDirection::Row,
+                        align_items: AlignItems::Center,
+                        column_gap: px(6),
+                        padding: UiRect { left: px(6), right: px(6), top: px(4), bottom: px(3) },
+                        border: UiRect::all(px(1)),
+                        ..default()
+                    },
+                    BackgroundColor(with_alpha(chip_bg, op)),
+                    BorderColor::all(with_alpha(chip_border, op)),
+                ))
+                .id();
+            if a.state == AState::Working {
+                let led = commands.spawn((Node { width: px(5), height: px(5), ..default() }, BackgroundColor(fill), Blink)).id();
+                commands.entity(chip).add_child(led);
+            }
+            let ct = commands.spawn((Text::new(chip_txt), font(&f.ui700, 10.0, 2.0), TextColor(with_alpha(chip_fg, op)), LineHeight::Px(10.0))).id();
+            commands.entity(chip).add_child(ct);
+            commands.entity(top).add_children(&[name, chip]);
+            // bar: 18 segments + percent
+            let bar = commands
+                .spawn(Node { flex_direction: FlexDirection::Row, align_items: AlignItems::Center, column_gap: px(10), height: px(12), ..default() })
+                .id();
+            let track = commands.spawn(Node { flex_grow: 1.0, height: px(5), flex_direction: FlexDirection::Row, column_gap: px(2), ..default() }).id();
+            let frac = if a.state == AState::Working { a.p } else { 1.0 };
+            let on = (frac * 18.0).round() as usize;
+            let on_c = if a.state == AState::Done { ok } else { fill };
+            for i in 0..18 {
+                let c = if i < on { with_alpha(on_c, op) } else { with_alpha(line, 0.13 * op) };
+                let seg = commands.spawn((Node { flex_grow: 1.0, height: px(5), ..default() }, BackgroundColor(c))).id();
+                commands.entity(track).add_child(seg);
+            }
+            let pct_txt = match (&a.figure, a.state) {
+                (Some(f), _) => f.clone(),
+                (None, AState::Working) => format!("{}%", (a.p * 100.0).round() as i32),
+                (None, AState::Needs) => "WAIT".to_string(),
+                (None, AState::Done) => "OK".to_string(),
+                (None, AState::Failed) => "--".to_string(),
+            };
+            let pct_c = if a.state == AState::Done { ok } else { hot };
+            let pct = commands
+                .spawn((
+                    Node { min_width: px(36), justify_content: JustifyContent::FlexEnd, ..default() },
+                ))
+                .id();
+            let pt = commands.spawn((Text::new(pct_txt), font(&f.mono, 11.5, 2.24), TextColor(with_alpha(pct_c, op)), LineHeight::Px(11.5))).id();
+            commands.entity(pct).add_child(pt);
+            commands.entity(bar).add_children(&[track, pct]);
+            let step = commands
+                .spawn((Text::new(a.step.clone()), font(&f.ui500, 13.0, 1.04), TextColor(with_alpha(line, op)), LineHeight::Px(16.9)))
+                .id();
+            commands.entity(row).add_children(&[top, bar, step]);
+        }
+        if more > 0 {
+            let m = commands
+                .spawn((
+                    Text::new(format!("+{more} MORE")),
+                    font(&f.ui600, 11.0, 2.2),
+                    TextColor(dim),
+                    LineHeight::Px(14.0),
+                    Node { margin: UiRect { top: px(10), ..default() }, ..default() },
+                ))
+                .id();
+            commands.entity(list).add_child(m);
+        }
+    }
+
+
+    fn fonts() -> UiFonts {
+        UiFonts { ui500: Handle::default(), ui600: Handle::default(), ui700: Handle::default(), display: Handle::default(), mono: Handle::default(), mono_bold: Handle::default() }
+    }
+
+    fn agents_of(full: &[Agent]) -> Agents {
+        let mut a = Agents::empty();
+        a.set_roster(Roster::of(full));
+        a
+    }
+
+    /// Every component the panel sets, down the tree, as text: two trees with the same dump look the same.
+    fn dump(world: &World, e: Entity) -> String {
+        fn go(world: &World, e: Entity, depth: usize, out: &mut String) {
+            let er = world.entity(e);
+            let pad = "  ".repeat(depth);
+            out.push_str(&format!("{pad}-\n"));
+            macro_rules! show {
+                ($($t:ty),*) => { $(if let Some(c) = er.get::<$t>() { out.push_str(&format!("{pad} {c:?}\n")); })* };
+            }
+            show!(Node, Text, TextColor, TextFont, LetterSpacing, LineHeight, BackgroundColor, BorderColor);
+            if er.contains::<Blink>() {
+                out.push_str(&format!("{pad} Blink\n"));
+            }
+            if let Some(kids) = er.get::<Children>() {
+                for k in kids.iter() {
+                    go(world, k, depth + 1, out);
+                }
+            }
+        }
+        let mut out = String::new();
+        go(world, e, 0, &mut out);
+        out
+    }
+
+    /// A world with the Agents panel built the old way, for the agents in `full`.
+    fn old_panel(full: &[Agent]) -> (World, Entity) {
+        let mut w = World::new();
+        w.insert_resource(fonts());
+        let root = w.spawn(Node::default()).id();
+        let summary = agents_of(full).summary().to_uppercase();
+        let full = full.to_vec();
+        w.run_system_once(move |mut c: Commands, f: Res<UiFonts>| legacy_build_agents_ui(&mut c, root, &f, &full, summary.clone())).unwrap();
+        (w, root)
+    }
+
+    /// An App holding the agents, with the panel built the new way and the system that keeps it up to date.
+    fn new_panel(full: &[Agent]) -> (App, Entity) {
+        let mut app = App::new();
+        app.insert_resource(fonts())
+            .insert_resource(agents_of(full))
+            .insert_resource(crate::takeover::Outside::default())
+            .insert_resource(Sim { dt: 0.05, t: 0.0, boot_t: 99.0, fixed_dt: None, frozen: false })
+            .add_systems(Update, rebuild_agents_ui);
+        let root = app.world_mut().spawn(Node::default()).id();
+        app.world_mut()
+            .run_system_once(move |mut c: Commands, f: Res<UiFonts>, a: Res<Agents>, o: Res<crate::takeover::Outside>| build_agents_ui(&mut c, root, &f, &a, &o, 0.0))
+            .unwrap();
+        // the first pass of the system sees a version it hasn't seen; nothing needs editing
+        app.update();
+        (app, root)
+    }
+
+    fn set(app: &mut App, full: &[Agent]) {
+        app.world_mut().resource_mut::<Agents>().set_roster(Roster::of(full));
+        app.update();
+    }
+
+    /// Agents of every look the panel has: states, chips, figures, long and short text, empty to many.
+    fn lists() -> Vec<Vec<Agent>> {
+        let mk = |name: &str, state, p, step: &str| agent(name, state, p, step);
+        let queued = Agent { figure: Some("QUEUED".into()), ..mk("Queued one", AState::Working, 0.04, "Queued") };
+        let counted = Agent { figure: Some("7".into()), ..mk("Counting", AState::Working, 0.4, "Running tests, step 7") };
+        let failed = Agent { chip: Some("FAILED"), ..mk("Broke", AState::Failed, 0.2, "Failed: no such file") };
+        let stopped = Agent { chip: Some("STOPPED"), ..mk("Halted", AState::Failed, 0.2, "Stopped") };
+        let needs = mk("Needs a yes", AState::Needs, 1.0, "Needs you: Bash git push");
+        let done = mk("Shipped", AState::Done, 1.0, "Done: all green");
+        let work = mk("Réviser les notes", AState::Working, 0.64, "Running tests · 41 / 64");
+        vec![
+            vec![],
+            vec![work.clone()],
+            vec![work.clone(), done.clone()],
+            vec![needs.clone(), counted.clone(), queued.clone(), done.clone()],
+            vec![failed.clone(), stopped.clone(), done.clone(), needs.clone()],
+            vec![counted.clone(), queued.clone(), needs.clone(), done.clone(), failed.clone()],
+            vec![work.clone(), counted.clone(), queued.clone(), needs.clone(), done.clone(), failed.clone(), stopped.clone(), work.clone(), done.clone()],
+            vec![Agent { p: 0.5, ..work.clone() }],
+            vec![Agent { p: 1.0, ..work.clone() }],
+            vec![Agent { step: "A much longer line of what the agent is doing right now, cut".into(), ..work.clone() }],
+        ]
+    }
+
+    #[test]
+    fn a_new_panel_is_the_one_the_old_builder_made() {
+        let mut dumps = Vec::new();
+        for full in lists() {
+            let (old, old_root) = old_panel(&full);
+            let (app, root) = new_panel(&full);
+            let d = dump(app.world(), root);
+            assert_eq!(d, dump(&old, old_root), "{} agents", full.len());
+            dumps.push(d);
+        }
+        // the comparison has something in it: every list gives a panel of its own, and the words are in the dump
+        let distinct: std::collections::HashSet<&String> = dumps.iter().collect();
+        assert_eq!(distinct.len(), dumps.len());
+        assert!(dumps[3].contains("NEEDS A YES") && dumps[3].contains("NEEDS YOU") && dumps[3].contains("QUEUED") && dumps[3].contains("Blink"));
+        assert!(dumps[6].contains("+6 MORE"));
+    }
+
+    #[test]
+    fn an_edited_panel_is_the_one_a_new_build_makes() {
+        let lists = lists();
+        for a in &lists {
+            for b in &lists {
+                let (mut app, root) = new_panel(a);
+                set(&mut app, b);
+                let (old, old_root) = old_panel(b);
+                assert_eq!(dump(app.world(), root), dump(&old, old_root), "{} agents become {}", a.len(), b.len());
+            }
+        }
+    }
+
+    #[test]
+    fn a_walk_through_many_changes_stays_the_same_as_building_each_time() {
+        let lists = lists();
+        let mut x: u64 = 5;
+        let mut next = move |m: usize| {
+            x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            ((x >> 33) % m as u64) as usize
+        };
+        let (mut app, root) = new_panel(&lists[3]);
+        for _ in 0..300 {
+            let mut full = lists[next(lists.len())].clone();
+            // and now and then a small edit, the common case: one agent's step or progress moves
+            if !full.is_empty() && next(2) == 0 {
+                let i = next(full.len());
+                full[i].p = (next(21) as f32 / 20.0).max(0.04);
+                full[i].step = format!("step {}", next(40));
+            }
+            set(&mut app, &full);
+            let (old, old_root) = old_panel(&full);
+            assert_eq!(dump(app.world(), root), dump(&old, old_root));
+        }
+    }
+
+    /// Where each component was last marked changed, down the tree.
+    fn stamps(world: &World, e: Entity) -> Vec<(Entity, &'static str, u32)> {
+        let mut out = Vec::new();
+        fn go(world: &World, e: Entity, out: &mut Vec<(Entity, &'static str, u32)>) {
+            let er = world.entity(e);
+            macro_rules! stamp {
+                ($($t:ty),*) => { $(if let Some(c) = er.get_ref::<$t>() { out.push((e, stringify!($t), c.last_changed().get())); })* };
+            }
+            stamp!(Node, Text, TextColor, BackgroundColor, BorderColor, Children);
+            if let Some(kids) = er.get::<Children>() {
+                for k in kids.iter() {
+                    go(world, k, out);
+                }
+            }
+        }
+        go(world, e, &mut out);
+        out
+    }
+
+    fn changed_since(before: &[(Entity, &'static str, u32)], after: &[(Entity, &'static str, u32)]) -> Vec<(Entity, &'static str)> {
+        after.iter().filter(|a| before.iter().find(|b| b.0 == a.0 && b.1 == a.1).is_none_or(|b| b.2 != a.2)).map(|a| (a.0, a.1)).collect()
+    }
+
+    #[test]
+    fn an_update_marks_only_the_components_whose_value_changed() {
+        let lists = lists();
+        let (mut app, root) = new_panel(&lists[3]);
+        let s0 = stamps(app.world(), root);
+        // the version moves, the agents are the same: nothing is touched
+        app.world_mut().resource_mut::<Agents>().version += 1;
+        app.update();
+        assert_eq!(changed_since(&s0, &stamps(app.world(), root)), vec![]);
+        // one agent's step changes: that text and no other component
+        let mut full = lists[3].clone();
+        full[1].step = "Editing src/lib.rs, step 8".into();
+        set(&mut app, &full);
+        let s1 = stamps(app.world(), root);
+        let changed = changed_since(&s0, &s1);
+        assert_eq!(changed.len(), 1, "{changed:?}");
+        assert_eq!(changed[0].1, "Text");
+        assert_eq!(app.world().get::<Text>(changed[0].0).unwrap().0, "Editing src/lib.rs, step 8");
+        // progress moves a working agent's bar and its figure: the segments that flip and the figure's text, nothing else
+        let mut full2 = full.clone();
+        full2[1].p = 0.9;
+        full2[1].figure = Some("12".into());
+        let before = stamps(app.world(), root);
+        set(&mut app, &full2);
+        let after = stamps(app.world(), root);
+        let changed = changed_since(&before, &after);
+        assert!(changed.iter().all(|c| c.1 == "BackgroundColor" || c.1 == "Text"), "{changed:?}");
+        assert!(changed.iter().any(|c| c.1 == "BackgroundColor") && changed.iter().any(|c| c.1 == "Text"));
+    }
+
+    #[test]
+    fn rows_keep_their_entities_until_the_shape_changes() {
+        let lists = lists();
+        let body = |app: &mut App| app.world_mut().query_filtered::<Entity, With<AgentsRoot>>().single(app.world()).unwrap();
+        let (mut app, _root) = new_panel(&lists[3]);
+        let b0 = body(&mut app);
+        let mut full = lists[3].clone();
+        full[0].step = "something else".into();
+        full[2].state = AState::Done;
+        full[2].p = 1.0;
+        set(&mut app, &full);
+        assert_eq!(body(&mut app), b0, "same four rows: edited, not rebuilt");
+        // a finished agent loses its LED and a working one gains it, in place
+        let led_count = |app: &mut App| app.world_mut().query_filtered::<Entity, With<Blink>>().iter(app.world()).count();
+        assert_eq!(led_count(&mut app), 1, "only the second row still works");
+        full[3].state = AState::Working;
+        full[3].p = 0.3;
+        set(&mut app, &full);
+        assert_eq!(body(&mut app), b0);
+        assert_eq!(led_count(&mut app), 2);
+        // one more agent: a new row, so the panel is built again
+        let mut more = full.clone();
+        more.push(agent("Late", AState::Working, 0.1, "x"));
+        set(&mut app, &more);
+        assert_ne!(body(&mut app), b0);
+        assert_eq!(led_count(&mut app), 1, "three rows show now, one of them works; the old body's LEDs went with it");
+    }
+
+    #[test]
+    fn the_more_line_counts_in_place() {
+        let list = |n: usize| -> Vec<Agent> { (0..n).map(|i| agent(&format!("a{i}"), AState::Working, 0.5, "x")).collect() };
+        let (mut app, root) = new_panel(&list(6));
+        let find = |app: &App| {
+            let w = app.world();
+            let mut found = vec![];
+            fn go(w: &World, e: Entity, found: &mut Vec<(Entity, String)>) {
+                if let Some(t) = w.get::<Text>(e) {
+                    if t.0.ends_with(" MORE") {
+                        found.push((e, t.0.clone()));
+                    }
+                }
+                if let Some(k) = w.get::<Children>(e) {
+                    for c in k.iter() {
+                        go(w, c, found);
+                    }
+                }
+            }
+            go(w, root, &mut found);
+            found
+        };
+        let before = find(&app);
+        assert_eq!(before.iter().map(|f| f.1.as_str()).collect::<Vec<_>>(), ["+3 MORE"]);
+        set(&mut app, &list(9));
+        let after = find(&app);
+        assert_eq!(after.iter().map(|f| f.1.as_str()).collect::<Vec<_>>(), ["+6 MORE"]);
+        assert_eq!(after[0].0, before[0].0, "the same line, new number");
+        // back to four agents: the line goes away
+        set(&mut app, &list(4));
+        assert!(find(&app).is_empty());
     }
 }

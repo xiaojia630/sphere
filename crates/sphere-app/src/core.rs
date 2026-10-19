@@ -163,13 +163,49 @@ pub struct Agent {
     pub figure: Option<String>,
     pub chip: Option<&'static str>,
 }
+/// What the Agents panel needs of every agent: the first rows (the panel shows four at most), and how many agents
+/// there are in all, and how many of them work or wait. The rest need no row, so none is built.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Roster {
+    pub rows: Vec<Agent>,
+    pub total: usize,
+    pub working: usize,
+    pub waiting: usize,
+}
+
+impl Roster {
+    /// The roster of a whole list: its first four rows and its counts.
+    pub fn of(list: &[Agent]) -> Roster {
+        let count = |s| list.iter().filter(|a| a.state == s).count();
+        Roster { rows: list.iter().take(4).cloned().collect(), total: list.len(), working: count(AState::Working), waiting: count(AState::Needs) }
+    }
+}
+
+/// What the ring draws of each of its four sectors: the agent's state and, while it works, how far along it is. A row's
+/// text is not on the ring.
+fn ring_keys(list: &[Agent]) -> [Option<(AState, f32)>; 4] {
+    let mut k = [None; 4];
+    for (slot, a) in k.iter_mut().zip(list) {
+        *slot = Some((a.state, if a.state == AState::Working { clamp(a.p, 0.02, 1.0) } else { 0.0 }));
+    }
+    k
+}
+
 #[derive(Resource)]
 pub struct Agents {
+    /// The rows the panel, the ring and the ticker show: the first agents in the panel's order, four at most.
     pub list: Vec<Agent>,
+    /// every agent, and how many of them work or wait (queued counts as working)
+    pub total: usize,
+    working: usize,
+    waiting: usize,
+    /// Bumps when the rows or the counts change; the panel follows it.
     pub version: u32,
+    /// Bumps when the ring has to be drawn again: one of its four sectors changed state or progress.
+    pub ring: u32,
     acc: f32,
     seed: u32,
-    /// The look test's scripted progress; real agents only change through `set`.
+    /// The look test's scripted progress; real agents only change through `set_roster`.
     demo: bool,
     /// When the tasks ran, as unix seconds (start, end; `i64::MAX` while it still runs): the Timeline's arcs.
     pub runs: Vec<(i64, i64)>,
@@ -178,24 +214,22 @@ pub struct Agents {
 impl Agents {
     pub fn demo() -> Self {
         let a = |name: &str, state, p, step: &str, rate| Agent { name: name.to_string(), state, p, step: step.to_string(), rate, figure: None, chip: None };
-        Self {
-            list: vec![
-                a("Fix flaky login test", AState::Working, 0.64, "Running tests · 41 / 64", 0.0042),
-                a("Draft release notes", AState::Working, 0.28, "Reading 12 merged PRs", 0.0016),
-                a("Reply to the API review", AState::Needs, 1.0, "Draft ready for your review", 0.0),
-                a("Bump Postgres to 16.4", AState::Done, 1.0, "Merged · #214", 0.0),
-            ],
-            version: 1,
-            acc: 0.0,
-            seed: 12345,
-            demo: true,
-            runs: Vec::new(),
-            runs_ver: 1,
-        }
+        let list = vec![
+            a("Fix flaky login test", AState::Working, 0.64, "Running tests · 41 / 64", 0.0042),
+            a("Draft release notes", AState::Working, 0.28, "Reading 12 merged PRs", 0.0016),
+            a("Reply to the API review", AState::Needs, 1.0, "Draft ready for your review", 0.0),
+            a("Bump Postgres to 16.4", AState::Done, 1.0, "Merged · #214", 0.0),
+        ];
+        let r = Roster::of(&list);
+        Self { list, total: r.total, working: r.working, waiting: r.waiting, version: 1, ring: 1, acc: 0.0, seed: 12345, demo: true, runs: Vec::new(), runs_ver: 1 }
     }
     /// No agents yet: the panel and the ring deck start empty and fill from sphered.
     pub fn empty() -> Self {
-        Self { list: Vec::new(), version: 1, acc: 0.0, seed: 12345, demo: false, runs: Vec::new(), runs_ver: 1 }
+        Self { list: Vec::new(), total: 0, working: 0, waiting: 0, version: 1, ring: 1, acc: 0.0, seed: 12345, demo: false, runs: Vec::new(), runs_ver: 1 }
+    }
+    /// Whether the roster is the look test's scripted one, which moves by itself (see [`Agents::tick`]).
+    pub fn is_demo(&self) -> bool {
+        self.demo
     }
     pub fn set_runs(&mut self, runs: Vec<(i64, i64)>) {
         if self.runs != runs {
@@ -228,18 +262,25 @@ impl Agents {
             })
             .collect()
     }
-    /// Replaces the list (only when it differs, so the panel rebuilds only on real changes).
-    pub fn set(&mut self, list: Vec<Agent>) {
-        if self.list != list {
-            self.list = list;
-            self.version += 1;
+    /// Whether `r` is not what the panel already shows. Asking first keeps the resource from being marked changed (and
+    /// everything that follows it from running) when nothing is.
+    pub fn differs(&self, r: &Roster) -> bool {
+        self.list != r.rows || self.total != r.total || self.working != r.working || self.waiting != r.waiting
+    }
+    /// Takes a new roster. The panel follows `version`; the ring is drawn again only if one of its sectors changed.
+    pub fn set_roster(&mut self, r: Roster) {
+        let ring = ring_keys(&self.list) != ring_keys(&r.rows);
+        (self.list, self.total, self.working, self.waiting) = (r.rows, r.total, r.working, r.waiting);
+        self.version += 1;
+        if ring {
+            self.ring += 1;
         }
     }
     pub fn working(&self) -> usize {
-        self.list.iter().filter(|a| a.state == AState::Working).count()
+        self.working
     }
     pub fn waiting(&self) -> usize {
-        self.list.iter().filter(|a| a.state == AState::Needs).count()
+        self.waiting
     }
     pub fn summary(&self) -> String {
         if self.waiting() > 0 {
@@ -262,6 +303,7 @@ impl Agents {
         self.acc += dt;
         while self.acc >= 1.0 {
             self.acc -= 1.0;
+            let before = ring_keys(&self.list);
             let mut changed = false;
             for i in 0..self.list.len() {
                 if self.list[i].state != AState::Working {
@@ -280,7 +322,12 @@ impl Agents {
                 changed = true;
             }
             if changed {
+                let r = Roster::of(&self.list);
+                (self.working, self.waiting) = (r.working, r.waiting);
                 self.version += 1;
+                if ring_keys(&self.list) != before {
+                    self.ring += 1;
+                }
             }
         }
     }
@@ -402,6 +449,7 @@ pub struct B<'a, 'w, 's> {
     pub commands: &'a mut Commands<'w, 's>,
     pub meshes: &'a mut Assets<Mesh>,
     pub mats: &'a mut Assets<GlowMaterial>,
+    pub slots: &'a mut GlowSlots,
     pub images: &'a mut Assets<Image>,
 }
 
@@ -425,6 +473,10 @@ fn add_geo(
     let mh = b.meshes.add(geo.into_mesh());
     let mut m = glow_mat(if tag == Tag::Spokes { Kind::Spokes } else { Kind::Ring }, role, alpha);
     m.u.a.y = wall;
+    // these two change every frame (see `update_materials`)
+    if matches!(tag, Tag::Need | Tag::Spokes) {
+        b.slots.attach(&mut m);
+    }
     let mut e = b.commands.spawn((
         Mesh3d(mh.clone()),
         MeshMaterial3d(b.mats.add(m)),
@@ -572,10 +624,11 @@ pub fn setup_core(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut mats: ResMut<Assets<GlowMaterial>>,
+    mut slots: ResMut<GlowSlots>,
     mut images: ResMut<Assets<Image>>,
     agents: Res<Agents>,
 ) {
-    let mut b = B { commands: &mut commands, meshes: &mut meshes, mats: &mut mats, images: &mut images };
+    let mut b = B { commands: &mut commands, meshes: &mut meshes, mats: &mut mats, slots: &mut slots, images: &mut images };
     let root = b.commands.spawn((CoreRoot, Transform::from_xyz(0.0, CORE_Y, 0.0), Visibility::default())).id();
     let tilt = b.commands.spawn((CoreTilt, Transform::default(), Visibility::default())).id();
     b.commands.entity(root).add_child(tilt);
@@ -844,6 +897,10 @@ fn spawn_sph(b: &mut B, parent: Entity, mesh: Handle<Mesh>, kind: Kind, role: Ro
     if kind == Kind::Dots {
         m.u.c.z = 3.0;
     }
+    // the shell's time changes every frame (see `update_materials`)
+    if tag == Tag::Shell {
+        b.slots.attach(&mut m);
+    }
     let e = b.commands.spawn((Mesh3d(mesh), MeshMaterial3d(b.mats.add(m)), Transform::default(), GlowInfo { deck: CORE, role, alpha, wall: 0.0, tag })).id();
     b.commands.entity(parent).add_child(e);
 }
@@ -1102,8 +1159,11 @@ pub fn update_core(
     // dynamic geometry
     let now = now_minutes();
     let rebuild_time = (now - *last_min).abs() > 0.2 || agents.runs_ver != last_agents.0;
-    let rebuild_agents = agents.version != *last_ver;
-    agents.tick(dt);
+    let rebuild_agents = agents.ring != *last_ver;
+    // only the look test's scripted agents move by themselves; asking first keeps the real roster from being marked changed every frame
+    if agents.is_demo() {
+        agents.tick(dt);
+    }
     // (the spokes animate in their vertex shader; see `update_materials`)
     let (g_time, g_ag) = (if rebuild_time { Some(build_time_dyn(now, &agents.time_spans(now))) } else { None }, if rebuild_agents { Some(build_agents_dyn(&agents.list)) } else { None });
     let mut g_time = g_time;
@@ -1129,7 +1189,7 @@ pub fn update_core(
         *last_min = now;
     }
     if rebuild_agents {
-        *last_ver = agents.version;
+        *last_ver = agents.ring;
     }
     last_agents.0 = agents.runs_ver;
 
@@ -1158,20 +1218,20 @@ pub fn spin_system(sim: Res<Sim>, ctl: Res<CoreCtl>, mut q: Query<(&mut Transfor
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn update_materials(
     sim: Res<Sim>,
     ctl: Res<CoreCtl>,
     decks: Res<Decks>,
     win: Query<&Window, With<bevy::window::PrimaryWindow>>,
     mut mats: ResMut<Assets<GlowMaterial>>,
+    mut slots: ResMut<GlowSlots>,
     q: Query<(&MeshMaterial3d<GlowMaterial>, &GlowInfo)>,
     core: Res<CoreAssets>,
 ) {
     let pr = win.single().map(|w| w.scale_factor()).unwrap_or(1.0);
     for (h, info) in &q {
-        // `get_mut` marks the asset changed and makes the renderer prepare it again, so only take it when a value
-        // actually differs.
-        let Some(cur) = mats.get(&h.0) else { continue };
+        let Some(kind) = mats.get(&h.0).map(|m| m.kind) else { continue };
         let d = &decks.list[info.deck];
         let mut alpha = info.alpha;
         match info.tag {
@@ -1179,40 +1239,38 @@ pub fn update_materials(
             Tag::Spine => alpha = ctl.depth_amt * 0.55,
             _ => {}
         }
-        let mut u = cur.u;
-        u.color = crate::theme::deck_lin(info.deck, info.role);
-        // the Agent moment's amber flare pulls the core's own colours toward amber
-        if info.deck == CORE && ctl.flare > 0.01 && matches!(info.role, Role::Hot | Role::Fill | Role::Line) {
-            let w = (0.85 * ctl.flare).min(0.85) * if info.role == Role::Line { 0.55 } else { 1.0 };
-            u.color = u.color.lerp(crate::theme::now_lin(Role::Acc), w);
-        }
-        u.c2 = crate::theme::deck_b2_lin(info.deck);
-        u.a = Vec4::new(alpha, info.wall, d.u_reveal, d.u_hi);
-        u.b = Vec4::new(d.u_fade, d.u_depth, 0.0, d.u_pinch);
-        if cur.kind == Kind::Ring && info.deck != CORE {
-            u.c.x = (d.r_min + d.r_max) * 0.5;
-        }
-        if info.tag == Tag::Dots {
-            u.c.z = 3.0 * pr;
-        }
-        if info.tag == Tag::Shell {
-            u.d = Vec4::new(sim.t, 0.0, 0.0, 0.0);
-        }
-        if info.tag == Tag::Spokes {
-            u.d = Vec4::new(sim.t, core.energy, 145.0 + ctl.focus_amt * 165.0, 112.0 * (1.0 - ctl.focus_amt * 0.35));
-        }
-        if info.tag == Tag::Orb {
-            let o = ctl.orb;
-            let rev = clamp(o / 0.85, 0.0, 1.0);
-            u.a = Vec4::new(info.alpha * o, info.wall, rev * rev * (3.0 - 2.0 * rev), ctl.flash * 0.6);
-            u.b = Vec4::new(1.0, 14.0, 0.0, 0.0);
-            u.c.x = 0.0;
-        }
-        if u != cur.u {
-            if let Some(mut m) = mats.get_mut(&h.0) {
-                m.u = u;
+        // the need ring, the shell and the spokes change every frame, and their colour, alpha and time go to their
+        // slots; whatever else differs goes to the material, and only then (see `GlowSlots::update`)
+        slots.update(&mut mats, &h.0, |u| {
+            u.color = crate::theme::deck_lin(info.deck, info.role);
+            // the Agent moment's amber flare pulls the core's own colours toward amber
+            if info.deck == CORE && ctl.flare > 0.01 && matches!(info.role, Role::Hot | Role::Fill | Role::Line) {
+                let w = (0.85 * ctl.flare).min(0.85) * if info.role == Role::Line { 0.55 } else { 1.0 };
+                u.color = u.color.lerp(crate::theme::now_lin(Role::Acc), w);
             }
-        }
+            u.c2 = crate::theme::deck_b2_lin(info.deck);
+            u.a = Vec4::new(alpha, info.wall, d.u_reveal, d.u_hi);
+            u.b = Vec4::new(d.u_fade, d.u_depth, 0.0, d.u_pinch);
+            if kind == Kind::Ring && info.deck != CORE {
+                u.c.x = (d.r_min + d.r_max) * 0.5;
+            }
+            if info.tag == Tag::Dots {
+                u.c.z = 3.0 * pr;
+            }
+            if info.tag == Tag::Shell {
+                u.d = Vec4::new(sim.t, 0.0, 0.0, 0.0);
+            }
+            if info.tag == Tag::Spokes {
+                u.d = Vec4::new(sim.t, core.energy, 145.0 + ctl.focus_amt * 165.0, 112.0 * (1.0 - ctl.focus_amt * 0.35));
+            }
+            if info.tag == Tag::Orb {
+                let o = ctl.orb;
+                let rev = clamp(o / 0.85, 0.0, 1.0);
+                u.a = Vec4::new(info.alpha * o, info.wall, rev * rev * (3.0 - 2.0 * rev), ctl.flash * 0.6);
+                u.b = Vec4::new(1.0, 14.0, 0.0, 0.0);
+                u.c.x = 0.0;
+            }
+        });
     }
 }
 
@@ -1262,5 +1320,68 @@ mod tests {
         let e = unix_now();
         let off = local_offset(e);
         assert!((-14 * 3600..=14 * 3600).contains(&off));
+    }
+
+    fn agent(name: &str, state: AState, p: f32, step: &str) -> Agent {
+        Agent { name: name.into(), state, p, step: step.into(), rate: 0.0, figure: None, chip: None }
+    }
+
+    #[test]
+    fn a_roster_keeps_four_rows_and_counts_every_agent() {
+        let list: Vec<Agent> = (0..7).map(|i| agent(&format!("a{i}"), [AState::Working, AState::Needs, AState::Done, AState::Failed][i % 4], 0.5, "x")).collect();
+        let r = Roster::of(&list);
+        assert_eq!(r.rows, list[..4].to_vec());
+        assert_eq!((r.total, r.working, r.waiting), (7, 2, 2), "a0 and a4 work, a1 and a5 wait");
+        let mut a = Agents::empty();
+        a.set_roster(r);
+        assert_eq!((a.list.len(), a.total, a.working(), a.waiting()), (4, 7, 2, 2));
+        assert_eq!(a.summary(), "2 working · 2 needs you");
+        assert_eq!(Roster::of(&[]), Roster::default());
+    }
+
+    #[test]
+    fn the_ring_is_drawn_again_only_when_a_sector_changes() {
+        let mut a = Agents::empty();
+        let roster = Roster::of(&[agent("a", AState::Working, 0.3, "one"), agent("b", AState::Done, 1.0, "two")]);
+        assert!(a.differs(&roster));
+        let (v, r) = (a.version, a.ring);
+        a.set_roster(roster.clone());
+        assert_eq!((a.version, a.ring), (v + 1, r + 1), "new agents are new sectors");
+        assert!(!a.differs(&roster), "the same roster is no change");
+        let change = |a: &mut Agents, f: &dyn Fn(&mut Roster)| {
+            let mut next = Roster { rows: a.list.clone(), total: a.total, working: a.working(), waiting: a.waiting() };
+            f(&mut next);
+            let (v, r) = (a.version, a.ring);
+            assert!(a.differs(&next));
+            a.set_roster(next);
+            (a.version - v, a.ring - r)
+        };
+        assert_eq!(change(&mut a, &|n| n.rows[0].step = "three".into()), (1, 0), "text is on the panel, not the ring");
+        assert_eq!(change(&mut a, &|n| n.rows[1].p = 0.4), (1, 0), "a finished agent's progress is not drawn");
+        assert_eq!(change(&mut a, &|n| n.rows[0].p = 0.31), (1, 1), "a working agent's arc moves");
+        assert_eq!(change(&mut a, &|n| n.rows[0].p = 0.011), (1, 1), "down to the smallest arc that shows");
+        assert_eq!(change(&mut a, &|n| n.rows[0].p = 0.015), (1, 0), "below it nothing moves");
+        assert_eq!(change(&mut a, &|n| n.rows[0].state = AState::Done), (1, 1), "a state is a sector's look");
+        assert_eq!(change(&mut a, &|n| n.total = 9), (1, 0), "more agents past the fourth change the count only");
+    }
+
+    #[test]
+    fn only_the_demo_moves_by_itself() {
+        let mut real = Agents::empty();
+        real.set_roster(Roster::of(&[agent("a", AState::Working, 0.3, "one")]));
+        let (v, r) = (real.version, real.ring);
+        real.tick(5.0);
+        assert_eq!((real.version, real.ring, real.list[0].p), (v, r, 0.3));
+        assert!(!real.is_demo());
+        let mut demo = Agents::demo();
+        assert!(demo.is_demo());
+        assert_eq!((demo.total, demo.working(), demo.waiting()), (4, 2, 1));
+        let (v, r) = (demo.version, demo.ring);
+        demo.tick(1.0);
+        assert_eq!((demo.version, demo.ring), (v + 1, r + 1), "a second of progress moves the first arcs");
+        for _ in 0..4000 {
+            demo.tick(1.0);
+        }
+        assert_eq!((demo.working(), demo.waiting()), (0, 1), "everything that was working has finished");
     }
 }

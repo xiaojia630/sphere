@@ -139,18 +139,31 @@ fn build_clock_ui(commands: &mut Commands, root: Entity, f: &UiFonts) {
     commands.entity(body).add_children(&[t, d]);
 }
 
-/// Local time as "13:34" and "FRIDAY, OCTOBER 16, 2026", from the system clock and zone (`date`'s view of
-/// it, read once a minute).
+/// Local time as "13:34" and "FRIDAY, OCTOBER 16, 2026", from the system clock and zone (read once a minute, in-process: it used to
+/// start `date` on the main thread, which could hitch a frame).
 fn clock_strings() -> (String, String) {
-    let out = std::process::Command::new("date").arg("+%H:%M|%A, %B %-d, %Y").output();
-    match out {
-        Ok(o) if o.status.success() => {
-            let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
-            let (t, d) = s.split_once('|').unwrap_or((s.as_str(), ""));
-            (t.to_string(), d.to_uppercase())
-        }
-        _ => ("--:--".into(), String::new()),
+    extern "C" {
+        fn tzset();
     }
+    // SAFETY: tzset, time and localtime_r only write into the zeroed `tm` we give them (tzset first, so a changed zone is noticed, as each run of `date` did).
+    let tm = unsafe {
+        tzset();
+        let now = libc::time(std::ptr::null_mut());
+        let mut tm: libc::tm = std::mem::zeroed();
+        (!libc::localtime_r(&now, &mut tm).is_null()).then_some(tm)
+    };
+    tm.map_or_else(|| ("--:--".into(), String::new()), |tm| format_clock(&tm))
+}
+
+/// The two strings for a broken-down time, as `date "+%H:%M|%A, %B %-d, %Y"` printed them (the names are English: the app never sets a locale).
+fn format_clock(tm: &libc::tm) -> (String, String) {
+    let fmt = |f: &std::ffi::CStr| {
+        let mut buf = [0u8; 96];
+        // SAFETY: strftime writes at most `buf.len()` bytes and returns how many.
+        let n = unsafe { libc::strftime(buf.as_mut_ptr().cast(), buf.len(), f.as_ptr(), tm) };
+        String::from_utf8_lossy(&buf[..n]).into_owned()
+    };
+    (fmt(c"%H:%M"), fmt(c"%A, %B %-d, %Y").to_uppercase())
 }
 
 #[allow(clippy::type_complexity)]
@@ -189,6 +202,7 @@ pub fn update_readout_text(
     mut booted: Local<bool>,
 ) {
     // boot: "Starting" with a progress line, then "Standby" at 2.1 s
+    let mut just_booted = false;
     if !*booted {
         let t = sim.boot_t / 1.75;
         if t < 1.2 {
@@ -209,6 +223,7 @@ pub fn update_readout_text(
             return;
         }
         *booted = true;
+        just_booted = true;
         for (mut x, _) in &mut q.p0() {
             x.0 = "STANDBY".into();
         }
@@ -216,7 +231,8 @@ pub fn update_readout_text(
             x.0 = if args.offline() { agents.summary().to_uppercase() } else { "CONNECTING TO SPHERED".into() };
         }
     }
-    if args.offline() || !(agents.is_changed() || live.is_changed()) {
+    // (it follows what changed; at the end of the boot it also says where things stand now)
+    if args.offline() || !(just_booted || agents.is_changed() || live.is_changed()) {
         return;
     }
     use crate::service::Link;
@@ -306,7 +322,8 @@ pub fn setup_backdrop(
     mut mats: ResMut<Assets<GlowMaterial>>,
     cam: Query<Entity, With<CamCore>>,
 ) {
-    let mut m = Mesh::new(PrimitiveTopology::TriangleList, bevy::asset::RenderAssetUsages::default());
+    // only its transform and material change after this: no CPU copy once it's uploaded
+    let mut m = Mesh::new(PrimitiveTopology::TriangleList, bevy::asset::RenderAssetUsages::RENDER_WORLD);
     m.insert_attribute(Mesh::ATTRIBUTE_POSITION, vec![[-0.5f32, -0.5, 0.0], [0.5, -0.5, 0.0], [0.5, 0.5, 0.0], [-0.5, -0.5, 0.0], [0.5, 0.5, 0.0], [-0.5, 0.5, 0.0]]);
     m.insert_attribute(
         ATTR_HOLO,
@@ -358,6 +375,8 @@ pub struct FrameStats {
     pub all: Vec<f32>,
     pub frames: u64,
     pub since_label: f32,
+    /// what the process had used when the bench started counting
+    pub usage0: Option<crate::stats::Usage>,
 }
 
 #[derive(Component)]
@@ -423,6 +442,9 @@ pub fn frame_stats(time: Res<Time<Real>>, sim: Res<Sim>, mut st: ResMut<FrameSta
         eprintln!("stats: long frame {ms:.0} ms (frame {}) at {:.0} ms", st.frames, crate::stats::ms());
     }
     if st.frames > 20 {
+        if st.usage0.is_none() {
+            st.usage0 = Some(crate::stats::Usage::now());
+        }
         st.recent.push(ms);
         if st.recent.len() > 300 {
             st.recent.remove(0);
@@ -441,7 +463,7 @@ pub fn frame_stats(time: Res<Time<Real>>, sim: Res<Sim>, mut st: ResMut<FrameSta
     }
 }
 
-pub fn bench(args: Res<Args>, time: Res<Time<Real>>, st: Res<FrameStats>, mut exit: MessageWriter<AppExit>) {
+pub fn bench(args: Res<Args>, time: Res<Time<Real>>, st: Res<FrameStats>, window: Query<&Window, With<bevy::window::PrimaryWindow>>, mut exit: MessageWriter<AppExit>) {
     let Some(secs) = args.bench else { return };
     if time.elapsed_secs() < secs + 1.5 {
         return;
@@ -450,16 +472,27 @@ pub fn bench(args: Res<Args>, time: Res<Time<Real>>, st: Res<FrameStats>, mut ex
     let mean: f32 = v.iter().sum::<f32>() / v.len().max(1) as f32;
     let (p50, p99, p999) = (pct(&mut v, 0.5), pct(&mut v, 0.99), pct(&mut v, 0.999));
     let max = v.last().copied().unwrap_or(0.0);
+    // CPU time per frame: the main thread, the render thread, and every thread of the process together
+    let now = crate::stats::Usage::now();
+    let n = v.len() as u64;
+    let (main_ms, render_ms, all_ms) = st.usage0.as_ref().map_or((0.0, 0.0, 0.0), |a| now.per_frame_ms(a, n));
     println!(
-        "bench: {} frames over {:.1}s | avg {:.1} fps | frame ms p50 {:.2}  p99 {:.2}  p99.9 {:.2}  max {:.2}",
+        "bench: {} frames over {:.1}s | avg {:.1} fps | frame ms p50 {:.2}  p99 {:.2}  p99.9 {:.2}  max {:.2} | cpu ms/frame main {:.2}  render {:.2}  all threads {:.2}",
         v.len(),
         v.iter().sum::<f32>() / 1000.0,
         1000.0 / mean.max(0.0001),
         p50,
         p99,
         p999,
-        max
+        max,
+        main_ms,
+        render_ms,
+        all_ms
     );
+    if let Some(a) = &st.usage0 {
+        let w = window.iter().next().map(|w| format!("window {}x{} px at scale {}", w.physical_width(), w.physical_height(), w.scale_factor())).unwrap_or_else(|| "offscreen".into());
+        println!("usage: {w} | {}", crate::stats::usage_line(a, &now, n));
+    }
     exit.write(AppExit::Success);
 }
 
@@ -614,4 +647,80 @@ fn unpad(data: &[u8], w: u32, h: u32) -> Vec<u8> {
         return data.to_vec();
     }
     (0..h as usize).flat_map(|y| data[y * padded..y * padded + row].iter().copied()).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::live::Live;
+    use crate::service::Link;
+
+    /// A fixed UTC moment, broken down the way `clock_strings` formats the local one.
+    fn at(t: libc::time_t) -> (String, String) {
+        // SAFETY: gmtime_r only writes into the zeroed `tm` it is given.
+        let tm = unsafe {
+            let mut tm: libc::tm = std::mem::zeroed();
+            libc::gmtime_r(&t, &mut tm);
+            tm
+        };
+        format_clock(&tm)
+    }
+
+    #[test]
+    fn the_clock_reads_hours_and_minutes_and_an_upper_case_date() {
+        assert_eq!(at(1792416840), ("13:34".to_string(), "MONDAY, OCTOBER 19, 2026".to_string()));
+        // hours and minutes keep their zero, the day of the month doesn't
+        assert_eq!(at(1772600760), ("05:06".to_string(), "WEDNESDAY, MARCH 4, 2026".to_string()));
+    }
+
+    #[test]
+    fn the_clock_agrees_with_the_date_command_it_replaced() {
+        for _ in 0..3 {
+            let out = std::process::Command::new("date").env("LC_ALL", "C").arg("+%H:%M|%A, %B %-d, %Y").output().unwrap();
+            let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            let (t, d) = s.split_once('|').unwrap();
+            let now = clock_strings();
+            // the minute may have ticked between the two: look again
+            if now.0 == t {
+                assert_eq!(now.1, d.to_uppercase());
+                return;
+            }
+        }
+        panic!("the minute kept changing");
+    }
+
+    fn args() -> Args {
+        Args { cmd: None, bench: None, shot: None, record: None, record_frames: 180, frames: 120, depth: false, orbit: false, apps: false, work: false, swarm: false, code: false, git: false, open_app: None, icon: false, aa: "smaa".into(), offscreen: false, collapsed: false, focus_term: false, msaa: true, size: (1600, 1000), dt: 0.05, demo: false, live: false, moment: false, elsewhere: false, calendar: false, takeover: None, theme: None, motion: None }
+    }
+
+    /// The readout only follows what changed (`Agents` and `Live` are no longer marked changed every frame), so the
+    /// frame the boot ends in has to say where things stand: they may have settled while the boot ran.
+    #[test]
+    fn the_readout_says_where_things_stand_when_the_boot_ends() {
+        let mut app = App::new();
+        app.insert_resource(Agents::empty())
+            .insert_resource(Live::default())
+            .insert_resource(args())
+            .insert_resource(Sim { dt: 0.05, t: 0.0, boot_t: 0.5, fixed_dt: None, frozen: false })
+            .add_systems(Update, update_readout_text);
+        let main = app.world_mut().spawn((ReadoutMain, Text::new("STANDBY"), TextColor(Color::WHITE))).id();
+        let sub = app.world_mut().spawn((ReadoutSub, Text::new(""))).id();
+        let words = |app: &App| (app.world().get::<Text>(main).unwrap().0.clone(), app.world().get::<Text>(sub).unwrap().0.clone());
+        app.update();
+        assert_eq!(words(&app).0, "STARTING");
+        // the link comes up and an agent starts while the boot still runs
+        app.world_mut().resource_mut::<Live>().link = Some(Link::Connected);
+        let working = Agent { name: "a".into(), state: AState::Working, p: 0.5, step: "x".into(), rate: 0.0, figure: None, chip: None };
+        app.world_mut().resource_mut::<Agents>().set_roster(Roster::of(&[working]));
+        app.update();
+        assert_eq!(words(&app).0, "STARTING");
+        // the boot ends in a frame where nothing changed
+        app.world_mut().resource_mut::<Sim>().boot_t = 99.0;
+        app.update();
+        assert_eq!(words(&app), ("WORKING".to_string(), "1 WORKING · ALL CLEAR".to_string()));
+        // and from then on the readout follows the changes
+        app.world_mut().resource_mut::<Live>().link = Some(Link::Down("gone".into()));
+        app.update();
+        assert_eq!(words(&app).0, "OFFLINE");
+    }
 }

@@ -5,7 +5,7 @@
 use crate::core::{CoreCtl, CoreTilt};
 use crate::fonts::UiFonts;
 use crate::geo::*;
-use crate::glow::{GlowMaterial, Kind, ATTR_HOLO};
+use crate::glow::{GlowMaterial, GlowSlots, Kind, ATTR_HOLO};
 use crate::live::{Live, Toasts};
 use crate::moment::{waiting, Moment};
 use crate::panel::*;
@@ -67,16 +67,19 @@ pub fn setup(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut gmats: ResMut<Assets<GlowMaterial>>,
+    mut gslots: ResMut<GlowSlots>,
     mut atlas: ResMut<crate::panel::PanelAtlas>,
     mut pmats: ResMut<Assets<PanelMaterial>>,
     tilt: Query<Entity, With<CoreTilt>>,
 ) {
     let c = &mut commands;
     let Ok(tilt) = tilt.single() else { return };
-    let mat = |gm: &mut Assets<GlowMaterial>, a: f32| {
+    // the halo, the tethers and the streak change colour and alpha every frame (see `draw`), so each has a slot
+    let mut mat = |gm: &mut Assets<GlowMaterial>, a: f32| {
         let mut m = GlowMaterial::new(Kind::Ring, crate::theme::now_lin(Role::Acc), a);
         m.u.a.y = 0.3;
         m.u.b.y = 6.0;
+        gslots.attach(&mut m);
         gm.add(m)
     };
     // the halo, in core space just behind the time deck
@@ -89,20 +92,22 @@ pub fn setup(
         let a = (45.0 + 90.0 * k as f32) * DEG;
         ring_geo(&mut g, 426.0 + 13.0, 26.0, RingOpt { a0: a - 0.35 * DEG, a1: a + 0.35 * DEG, k: 0.85, ..default() });
     }
-    let e = c.spawn((Mesh3d(meshes.add(g.into_mesh())), MeshMaterial3d(mat(&mut gmats, 0.0)), Transform::default())).id();
+    let e = c.spawn((Mesh3d(meshes.add(g.into_gpu_mesh())), MeshMaterial3d(mat(&mut gmats, 0.0)), Transform::default())).id();
     let mut g = Geo::new();
     dash_geo(&mut g, 457.0, 1.0, 10.0, 9.0);
-    let spin = c.spawn((HaloSpin, Mesh3d(meshes.add(g.into_mesh())), MeshMaterial3d(mat(&mut gmats, 0.0)), Transform::default())).id();
+    let spin = c.spawn((HaloSpin, Mesh3d(meshes.add(g.into_gpu_mesh())), MeshMaterial3d(mat(&mut gmats, 0.0)), Transform::default())).id();
     c.entity(halo).add_children(&[e, spin]);
     // tethers: world space, rebuilt every frame
     let tm = meshes.add(lines(vec![[0.0; 3], [0.0; 3]], vec![0.0, 0.0]));
     let mut tmat = GlowMaterial::new(Kind::Line, crate::theme::now_lin(Role::Acc), 0.0);
     tmat.u.a.y = 0.0;
+    gslots.attach(&mut tmat);
     c.spawn((Tethers, Mesh3d(tm), MeshMaterial3d(gmats.add(tmat)), Transform::default(), Visibility::Hidden, bevy::camera::visibility::NoFrustumCulling));
     // the streak: a comet tail (lines) and its head
     let sm = meshes.add(lines(vec![[0.0; 3], [0.0; 3]], vec![0.0, 0.0]));
     let mut smat = GlowMaterial::new(Kind::Line, crate::theme::now_lin(Role::Hot), 0.0);
     smat.u.a.y = 0.0;
+    gslots.attach(&mut smat);
     c.spawn((Streak, Mesh3d(sm), MeshMaterial3d(gmats.add(smat)), Transform::default(), Visibility::Hidden, bevy::camera::visibility::NoFrustumCulling));
     // satellites: small glass chips for the other waiting requests
     let mut roots = [Entity::PLACEHOLDER; SATS];
@@ -314,6 +319,7 @@ pub fn draw(
     live: Res<Live>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut gmats: ResMut<Assets<GlowMaterial>>,
+    mut gslots: ResMut<GlowSlots>,
     mut pmats: ResMut<Assets<PanelMaterial>>,
     card: Query<(&Panel, &GlobalTransform)>,
     root: Query<&GlobalTransform, With<crate::core::CoreRoot>>,
@@ -357,11 +363,11 @@ pub fn draw(
     }
     for k in kids {
         if let Ok(hm) = halo_mats.get(k) {
-            if let Some(mut g) = gmats.get_mut(&hm.0) {
-                g.u.color = col;
-                g.u.a.x = h * (0.7 + 0.3 * pulse);
-                g.u.a.z = h;
-            }
+            gslots.update(&mut gmats, &hm.0, |u| {
+                u.color = col;
+                u.a.x = h * (0.7 + 0.3 * pulse);
+                u.a.z = h;
+            });
         }
     }
     for mut tr in &mut sets.p1() {
@@ -415,10 +421,10 @@ pub fn draw(
         if let Some(mut mesh) = meshes.get_mut(&mh.0) {
             *mesh = lines(pos.clone(), ks.clone());
         }
-        if let Some(mut g) = gmats.get_mut(&gm.0) {
-            g.u.color = col.lerp(crate::theme::now_lin(Role::Hot), 0.3);
-            g.u.a.x = a;
-        }
+        gslots.update(&mut gmats, &gm.0, |u| {
+            u.color = col.lerp(crate::theme::now_lin(Role::Hot), 0.3);
+            u.a.x = a;
+        });
     }
     // the streak: from the card's centre off the top right, a tail behind a bright head
     let centre = cg.translation();
@@ -451,10 +457,10 @@ pub fn draw(
         if let Some(mut mesh) = meshes.get_mut(&mh.0) {
             *mesh = lines(pos, ks);
         }
-        if let Some(mut g) = gmats.get_mut(&gm.0) {
-            g.u.color = ok.lerp(crate::theme::now_lin(Role::Hot), 0.5);
-            g.u.a.x = 1.0 - clamp((s - 0.8) / 0.2, 0.0, 1.0);
-        }
+        gslots.update(&mut gmats, &gm.0, |u| {
+            u.color = ok.lerp(crate::theme::now_lin(Role::Hot), 0.5);
+            u.a.x = 1.0 - clamp((s - 0.8) / 0.2, 0.0, 1.0);
+        });
     }
     // satellites: the other waiting requests on a tilted ellipse around the core, brighter in front
     let c = root.single().map(|g| g.translation()).unwrap_or(Vec3::ZERO);

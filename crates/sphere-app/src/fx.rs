@@ -2,7 +2,7 @@
 //! sweep, a soft band of light that runs down the screen (theme change). Also flags for other systems.
 use crate::core::{CoreRoot, CORE_Y};
 use crate::geo::{ring, Geo};
-use crate::glow::{GlowMaterial, Kind};
+use crate::glow::{GlowMaterial, GlowSlots, Kind};
 use crate::util::*;
 use bevy::prelude::*;
 
@@ -38,12 +38,14 @@ pub struct Shock;
 #[derive(Component)]
 pub struct Sweep;
 
-pub fn setup(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut mats: ResMut<Assets<GlowMaterial>>, root: Res<crate::hud::OverlayRoot>, core: Query<Entity, With<CoreRoot>>) {
+pub fn setup(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut mats: ResMut<Assets<GlowMaterial>>, mut slots: ResMut<GlowSlots>, root: Res<crate::hud::OverlayRoot>, core: Query<Entity, With<CoreRoot>>) {
     let mut g = Geo::new();
     ring(&mut g, 100.0, 1.6);
     let mut m = GlowMaterial::new(Kind::Ring, crate::theme::now_lin(Role::Hot), 0.0);
     m.u.a.y = 0.0;
-    let e = commands.spawn((Mesh3d(meshes.add(g.into_mesh())), MeshMaterial3d(mats.add(m)), Transform::from_xyz(0.0, 0.0, 120.0), Visibility::Hidden, Shock)).id();
+    // its colour and alpha change every frame while it plays (see `update`)
+    slots.attach(&mut m);
+    let e = commands.spawn((Mesh3d(meshes.add(g.into_gpu_mesh())), MeshMaterial3d(mats.add(m)), Transform::from_xyz(0.0, 0.0, 120.0), Visibility::Hidden, Shock)).id();
     if let Ok(c) = core.single() {
         commands.entity(c).add_child(e);
     } else {
@@ -74,6 +76,7 @@ pub fn update(
     time: Res<Time<Real>>,
     mut fx: ResMut<Fx>,
     mut mats: ResMut<Assets<GlowMaterial>>,
+    mut slots: ResMut<GlowSlots>,
     mut shock: Query<(&mut Transform, &mut Visibility, &MeshMaterial3d<GlowMaterial>), With<Shock>>,
     mut sweep: Query<(&mut Node, &mut Visibility, &mut UiTransform), (With<Sweep>, Without<Shock>)>,
     win: Query<&Window, With<bevy::window::PrimaryWindow>>,
@@ -85,10 +88,10 @@ pub fn update(
         for (mut tr, mut vis, h) in &mut shock {
             *vis = if t < 1.0 { Visibility::Inherited } else { Visibility::Hidden };
             tr.scale = Vec3::splat(lerp(1.1, 4.4, out_cubic(t)));
-            if let Some(mut m) = mats.get_mut(&h.0) {
-                m.u.color = crate::theme::now_lin(fx.shock_role);
-                m.u.a.x = (1.0 - t) * 0.9;
-            }
+            slots.update(&mut mats, &h.0, |u| {
+                u.color = crate::theme::now_lin(fx.shock_role);
+                u.a.x = (1.0 - t) * 0.9;
+            });
         }
     }
     if fx.sweep_t < 1.1 {

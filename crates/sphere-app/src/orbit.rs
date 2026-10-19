@@ -5,7 +5,7 @@
 use crate::core::{CoreCtl, CoreTilt};
 use crate::fonts::UiFonts;
 use crate::geo::*;
-use crate::glow::{GlowMaterial, Kind, ATTR_HOLO};
+use crate::glow::{GlowMaterial, GlowSlots, Kind, ATTR_HOLO};
 use crate::homepanels::APPS;
 use crate::panel::*;
 use crate::util::*;
@@ -143,7 +143,8 @@ fn beam_mesh() -> Mesh {
             at.push([0.0, 0.0, 0.0, kk]);
         }
     }
-    let mut m = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default());
+    // built once and never read back: no CPU copy once it's uploaded
+    let mut m = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::RENDER_WORLD);
     m.insert_attribute(Mesh::ATTRIBUTE_POSITION, pos);
     m.insert_attribute(ATTR_HOLO, at);
     m
@@ -154,6 +155,7 @@ pub fn setup(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut gmats: ResMut<Assets<GlowMaterial>>,
+    mut gslots: ResMut<GlowSlots>,
     mut atlas: ResMut<crate::panel::PanelAtlas>,
     mut pmats: ResMut<Assets<PanelMaterial>>,
     f: Res<UiFonts>,
@@ -192,7 +194,7 @@ pub fn setup(
     }
     parts.push((g, Role::Fill, 1.0, 0.5));
     for (g, role, a, wall) in parts {
-        let e = c.spawn((Mesh3d(meshes.add(g.into_mesh())), MeshMaterial3d(gmats.add(gm(role, a, wall))), Transform::default(), crate::core::GlowInfo { deck: crate::core::CORE, role, alpha: a, wall, tag: crate::core::Tag::Orb })).id();
+        let e = c.spawn((Mesh3d(meshes.add(g.into_gpu_mesh())), MeshMaterial3d(gmats.add(gm(role, a, wall))), Transform::default(), crate::core::GlowInfo { deck: crate::core::CORE, role, alpha: a, wall, tag: crate::core::Tag::Orb })).id();
         c.entity(track).add_child(e);
     }
     // the fixed front marker: an arc ±9° and two arrowheads at ±15°
@@ -207,7 +209,7 @@ pub fn setup(
         let b1 = pt(R + 7.0, front + s * 15.0 * DEG);
         g.tri(tip, b0, b1, 1.0);
     }
-    let e = c.spawn((Mesh3d(meshes.add(g.into_mesh())), MeshMaterial3d(gmats.add(gm(Role::Hot, 1.0, 0.3))), Transform::default(), crate::core::GlowInfo { deck: crate::core::CORE, role: Role::Hot, alpha: 1.0, wall: 0.3, tag: crate::core::Tag::Orb })).id();
+    let e = c.spawn((Mesh3d(meshes.add(g.into_gpu_mesh())), MeshMaterial3d(gmats.add(gm(Role::Hot, 1.0, 0.3))), Transform::default(), crate::core::GlowInfo { deck: crate::core::CORE, role: Role::Hot, alpha: 1.0, wall: 0.3, tag: crate::core::Tag::Orb })).id();
     c.entity(marker).add_child(e);
     // the tiles and their beams
     let bm = meshes.add(beam_mesh());
@@ -218,6 +220,8 @@ pub fn setup(
         c.entity(e).remove::<Panel>().insert((Tile(i), Visibility::Hidden));
         let mut m = GlowMaterial::new(Kind::Ring, crate::theme::now_lin(Role::Fill), 0.0);
         m.u.a.y = 0.0;
+        // a beam's alpha follows its tile every frame while the tiles move (see `update`)
+        gslots.attach(&mut m);
         c.spawn((Beam(i), Mesh3d(bm.clone()), MeshMaterial3d(gmats.add(m)), Transform::default(), Visibility::Hidden));
     }
     c.insert_resource(Orb { open: args.apps, since: 0.0, ..default() });
@@ -321,12 +325,13 @@ pub fn update(
     cam: Query<&GlobalTransform, With<crate::CamCore>>,
     mut pmats: ResMut<Assets<PanelMaterial>>,
     mut gmats: ResMut<Assets<GlowMaterial>>,
+    mut gslots: ResMut<GlowSlots>,
     mut feet: Query<(&TileFoot, &mut Text, &mut TextColor)>,
     (mut words, agents, live, stats, terms, git, ports, files): (Query<(&TileText, &mut Text), Without<TileFoot>>, Res<crate::core::Agents>, Res<crate::live::Live>, Res<crate::sysstats::SysStats>, Res<crate::term::Terms>, Res<crate::gitapp::GitApp>, Res<crate::ports::PortsApp>, Res<crate::filesapp::FilesApp>),
 ) {
     let dt = sim.dt;
     if orb.amount() > 0.01 {
-        let st = TileState { tabs: terms.tabs.len(), agents: agents.list.len(), working: agents.working(), needs: live.requests.len().max(agents.waiting()), tasks: live.titles.len(), docker: stats.get().docker.label(), docker_detail: stats.get().docker.detail(), git: git.caption(), ports: ports.listening(), files: files.caption(), prs: crate::prs::SUMMARY.lock().ok().and_then(|g| g.clone()) };
+        let st = TileState { tabs: terms.tabs.len(), agents: agents.total, working: agents.working(), needs: live.requests.len().max(agents.waiting()), tasks: live.titles.len(), docker: stats.get().docker.label(), docker_detail: stats.get().docker.detail(), git: git.caption(), ports: ports.listening(), files: files.caption(), prs: crate::prs::SUMMARY.lock().ok().and_then(|g| g.clone()) };
         for (t, mut tx) in &mut words {
             let (r, m, s) = tile_text(t.0, Some(&st));
             let want = match t.1 {
@@ -447,14 +452,11 @@ pub fn update(
         tr.translation = pad;
         tr.rotation = Quat::from_mat3(&Mat3::from_cols(side, up, fwd));
         tr.scale = Vec3::new(TILE_W * 0.5 * 0.62, len, 1.0);
-        // only when it differs: `get_mut` makes the renderer prepare the material again
         let color = crate::theme::now_lin(Role::Fill);
-        if gmats.get(&h.0).is_some_and(|m| m.u.a.x != alpha || m.u.color != color) {
-            if let Some(mut m) = gmats.get_mut(&h.0) {
-                m.u.a.x = alpha;
-                m.u.color = color;
-            }
-        }
+        gslots.update(&mut gmats, &h.0, |u| {
+            u.a.x = alpha;
+            u.color = color;
+        });
     }
     // the footer: "■ Enter to open" on the front tile
     for (ft, mut tx, mut c) in &mut feet {

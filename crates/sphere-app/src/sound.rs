@@ -342,14 +342,27 @@ fn start_audio(meter: Arc<Meter>) -> mpsc::Sender<Play> {
         let mut speaking = 0u64;
         let t0 = Instant::now();
         let mut head = Playhead::default();
-        let (mut level, mut last, mut hold) = (0.0f32, 0.0f64, 0.0f64);
+        let (mut level, mut last, mut hold, mut idle) = (0.0f32, 0.0f64, 0.0f64, true);
         loop {
-            let m = match rx.recv_timeout(Duration::from_millis(16)) {
-                Ok(m) => Some(m),
-                Err(mpsc::RecvTimeoutError::Timeout) => None,
-                Err(mpsc::RecvTimeoutError::Disconnected) => return,
+            // the meter looks every 16 ms while speech plays or has just stopped; with nothing to follow, the thread
+            // sleeps until it is handed a sound
+            let m = if idle {
+                match rx.recv() {
+                    Ok(m) => Some(m),
+                    Err(_) => return,
+                }
+            } else {
+                match rx.recv_timeout(Duration::from_millis(16)) {
+                    Ok(m) => Some(m),
+                    Err(mpsc::RecvTimeoutError::Timeout) => None,
+                    Err(mpsc::RecvTimeoutError::Disconnected) => return,
+                }
             };
             let now = t0.elapsed().as_secs_f64();
+            if idle {
+                // asleep, the level stayed at zero: it starts moving from here, as it did when every tick looked
+                last = now;
+            }
             if let Some(m) = m {
               match m {
                 Play::Sfx(i, gain, pitch) => {
@@ -380,6 +393,11 @@ fn start_audio(meter: Arc<Meter>) -> mpsc::Sender<Play> {
                 hold = now + 0.35;
             }
             level = smooth_level(level, raw, (now - last) as f32);
+            // the speech is over and its level has died away: nothing to follow until the next sound
+            idle = !busy && now >= hold && level < 1e-3;
+            if idle {
+                level = 0.0;
+            }
             last = now;
             meter.level.store(level.to_bits(), Ordering::Relaxed);
             meter.speaking.store(busy || now < hold, Ordering::Relaxed);

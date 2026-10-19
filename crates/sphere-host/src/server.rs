@@ -15,6 +15,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
+use tokio::signal::unix::Signal;
 use tokio::sync::{mpsc, watch, Notify};
 
 const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STANDARD;
@@ -61,7 +62,9 @@ struct Child {
     stdin: Mutex<Option<mpsc::UnboundedSender<Vec<u8>>>>,
     master: Option<OwnedFd>,
     exit: Mutex<Option<(ExitStatus, Instant)>>,
-    /// Bumped on new output, output closing and exit.
+    /// Bumped on new output, output closing, exit and the host closing. A
+    /// follower sleeps on this alone (and, once the child has exited, until
+    /// the end of `EXIT_DRAIN`): nothing it waits for may change without one.
     changed: watch::Sender<u64>,
 }
 
@@ -146,6 +149,8 @@ struct Host {
     reap_orphans: bool,
     children: Mutex<HashMap<String, Arc<Child>>>,
     next: AtomicU64,
+    /// A child was added: wakes the reaper when it has to poll (see `reaper`).
+    spawned: Notify,
     shutdown: Notify,
     /// Set once a shutdown starts: the children are being killed, and
     /// followers must see the connection drop, not a clean exit, so their
@@ -193,6 +198,7 @@ impl Host {
             reap_orphans,
             children: Mutex::new(HashMap::new()),
             next: AtomicU64::new(next),
+            spawned: Notify::new(),
             shutdown: Notify::new(),
             closing: AtomicBool::new(false),
         }
@@ -355,12 +361,15 @@ impl Host {
             }
         }
         children.insert(id.clone(), child);
+        self.spawned.notify_one();
         Ok(SpawnResult { id, pid })
     }
 
     fn kill_all(&self) {
         self.closing.store(true, Ordering::SeqCst);
         for c in self.children.lock().unwrap().values() {
+            // Followers end without an exit while closing; tell them.
+            c.bump();
             if c.exit().is_none() {
                 unsafe { libc::kill(-(c.pid as i32), libc::SIGKILL) };
             }
@@ -600,6 +609,7 @@ async fn follow(
         if host.closing.load(Ordering::SeqCst) {
             return Ok(());
         }
+        let mut drain_ends = None;
         if let Some((status, at)) = child.exit() {
             if chan.done.load(Ordering::SeqCst) || at.elapsed() > EXIT_DRAIN {
                 if off < chan.len.load(Ordering::SeqCst) {
@@ -608,10 +618,18 @@ async fn follow(
                 send_line(w, &FollowEvent::Exit { status }).await?;
                 return Ok(());
             }
+            drain_ends = Some(at + EXIT_DRAIN);
         }
-        tokio::select! {
-            _ = rx.changed() => {}
-            _ = tokio::time::sleep(Duration::from_millis(100)) => {}
+        // Idle, a follower sleeps until the child says something. The one
+        // thing that happens without a word is the end of the drain window.
+        match drain_ends {
+            Some(end) => tokio::select! {
+                _ = rx.changed() => {}
+                _ = tokio::time::sleep_until(end.into()) => {}
+            },
+            None => {
+                let _ = rx.changed().await;
+            }
         }
     }
     Ok(())
@@ -681,6 +699,36 @@ async fn handle(host: Arc<Host>, stream: UnixStream) {
     }
 }
 
+/// Collect exit statuses as children exit. SIGCHLD comes for every child that
+/// exits, and for the orphans a subreaper adopts (elsewhere those go to init
+/// and are none of our business), so a host with nothing to do sleeps here.
+/// Where there is no SIGCHLD to wait for, poll, but only while a child runs.
+async fn reaper(host: Arc<Host>, mut sigchld: Option<Signal>) {
+    loop {
+        match sigchld.as_mut() {
+            Some(s) => {
+                if s.recv().await.is_none() {
+                    sigchld = None;
+                }
+            }
+            None => {
+                let running = host
+                    .children
+                    .lock()
+                    .unwrap()
+                    .values()
+                    .any(|c| c.exit().is_none());
+                if running {
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                } else {
+                    host.spawned.notified().await;
+                }
+            }
+        }
+        host.reap();
+    }
+}
+
 /// Run the host until it is told to shut down. Fails if another host already
 /// answers on the socket.
 pub async fn serve(opts: ServeOptions) -> Result<()> {
@@ -706,23 +754,9 @@ pub async fn serve(opts: ServeOptions) -> Result<()> {
     let host = Arc::new(Host::new(opts.dir.clone(), opts.reap_orphans));
     tracing::info!(socket = %opts.socket.display(), "sphere-host listening");
 
-    let reaper = host.clone();
-    tokio::spawn(async move {
-        let mut sigchld =
-            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::child()).ok();
-        loop {
-            match sigchld.as_mut() {
-                Some(s) => {
-                    tokio::select! {
-                        _ = s.recv() => {}
-                        _ = tokio::time::sleep(Duration::from_millis(500)) => {}
-                    }
-                }
-                None => tokio::time::sleep(Duration::from_millis(200)).await,
-            }
-            reaper.reap();
-        }
-    });
+    // Listening before the first connection is accepted, so no child can exit unheard.
+    let sigchld = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::child()).ok();
+    tokio::spawn(reaper(host.clone(), sigchld));
 
     let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     let my_uid = unsafe { libc::geteuid() };
@@ -922,5 +956,51 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
         panic!("child or socket still there");
+    }
+
+    #[tokio::test]
+    async fn the_exit_is_reported_when_a_grandchild_holds_the_pipes_open() {
+        let (_tmp, c) = start().await;
+        // The shell is gone at once but its sleeper keeps stdout open, so the
+        // pipe never ends: only the end of the drain window can finish the
+        // follow, and nothing else wakes the follower to notice it.
+        let began = Instant::now();
+        let s = c.spawn(sh("sleep 300 & echo $!; exit 7")).await.unwrap();
+        let mut f = c.follow(&s.id, Stream::Out, 0).await.unwrap();
+        let mut out = Vec::new();
+        let status = loop {
+            let item = tokio::time::timeout(Duration::from_secs(10), f.next())
+                .await
+                .expect("no exit within ten seconds")
+                .expect("the host closed the connection instead of reporting the exit")
+                .unwrap();
+            match item {
+                FollowItem::Data { bytes, .. } => out.extend(bytes),
+                FollowItem::Exit(status) => break status,
+            }
+        };
+        assert_eq!(status.code, Some(7));
+        assert!(
+            began.elapsed() >= EXIT_DRAIN,
+            "the output got its chance to end first"
+        );
+        let sleeper: i32 = String::from_utf8(out).unwrap().trim().parse().unwrap();
+        assert_eq!(unsafe { libc::getpgid(sleeper) }, s.pid as i32);
+        c.signal(&s.id, serde_json::json!("KILL"), true)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn followers_see_the_connection_drop_when_the_host_shuts_down() {
+        let (_tmp, c) = start().await;
+        let s = c.spawn(sh("sleep 300")).await.unwrap();
+        let mut f = c.follow(&s.id, Stream::Out, 0).await.unwrap();
+        c.shutdown().await.unwrap();
+        // Not an exit: whoever follows must learn that the host went away.
+        let next = tokio::time::timeout(Duration::from_secs(10), f.next())
+            .await
+            .expect("the follower was never told");
+        assert!(next.is_none(), "{next:?}");
     }
 }

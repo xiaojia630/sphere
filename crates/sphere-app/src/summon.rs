@@ -41,6 +41,15 @@ pub fn install(app: &mut App) {
 #[cfg(not(target_os = "macos"))]
 pub fn install(_app: &mut App) {}
 
+/// Whether Sphere is on screen (not hidden or fully covered), for background threads whose work only matters while
+/// someone can see it: live figures, container counts, the service's response-time ping.
+static ON_SCREEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+/// See [`ON_SCREEN`]. Readable from any thread.
+pub fn on_screen() -> bool {
+    ON_SCREEN.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Sphere stays resident: closing the window (the close button) hides it instead of quitting, and Cmd+Q quits.
 /// While it is hidden or fully covered nothing draws: every camera is off (their view textures are freed after a
 /// few frames) and the loop wakes only for events and twice a second for live updates. It shows again in one
@@ -69,6 +78,7 @@ pub fn residency(
     }
     if now != *hidden {
         *hidden = now;
+        ON_SCREEN.store(!now, std::sync::atomic::Ordering::Relaxed);
         if now {
             let idle = UpdateMode::reactive_low_power(std::time::Duration::from_millis(500));
             *ws = bevy::winit::WinitSettings { focused_mode: idle, unfocused_mode: idle };
