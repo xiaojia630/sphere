@@ -1,11 +1,13 @@
 //! The Agent moment card (prototype: Agent moment): the oldest open request, centred over the core on a glass
 //! panel. It shows the exact action (the command, the edit, the question, the plan), never only the agent's
 //! description of it. Enter answers yes, E changes (type, Enter sends), L is later, Esc puts the card away
-//! until something new arrives, and the arrows step through the others. Only these keys answer: the service
-//! takes answers from the app and the CLI, never from an agent.
+//! until something new arrives, and the arrows step through the others. A permission that comes with a rule
+//! to remember also answers on A (yes, and the rule is saved), and when other agents ask the same, Shift+Enter
+//! says yes to all of them at once. Only these keys answer: the service takes answers from the app and the CLI,
+//! never from an agent.
 use crate::appframe::{AppClicks, Click};
 use crate::fonts::UiFonts;
-use crate::live::Live;
+use crate::live::{Live, Toasts};
 use crate::panel::{font, with_alpha, Focus};
 use crate::service::{Cmd, Service};
 use crate::util::*;
@@ -17,7 +19,8 @@ use serde_json::Value;
 use sphere_proto::{AnswerKind, RequestKind, RequestStatus, RequestView};
 
 pub const CARD_W: f32 = 600.0;
-pub const CARD_H: f32 = 452.0;
+/// Tall enough for the fullest card: a long summary and command, the same-ask line and the Always / Allow all row.
+pub const CARD_H: f32 = 512.0;
 /// The card's id in `AppClicks` (its quad carries an `AppPart` with it, so the app-pane click layer reaches it).
 pub const CLICK_APP: u8 = 200;
 
@@ -53,6 +56,9 @@ pub struct Moment {
     pub streak: Option<f32>,
     /// a key came while the answered card was leaving: finish its exit now and bring the next one up
     pub skip: bool,
+    /// how many other agents' requests ask the same as the card drawn last (the answered card keeps its line and button
+    /// while it folds)
+    same: usize,
 }
 
 impl Moment {
@@ -132,6 +138,47 @@ pub fn pending_count(live: &Live, m: &Moment) -> usize {
     live.requests.iter().filter(|r| pending(r, m)).count()
 }
 
+/// The allow rule a permission suggestion stands for, as sphered saves it to the policy (its `rule_from_suggestion`):
+/// an "addRules" suggestion with behavior "allow", its first rule's tool name plus `(content)` when there is content.
+fn rule_from_suggestion(s: &Value) -> Option<String> {
+    if s.get("type")?.as_str()? != "addRules" || s.get("behavior").and_then(Value::as_str) != Some("allow") {
+        return None;
+    }
+    let rule = s.get("rules")?.as_array()?.first()?;
+    let tool = rule.get("toolName")?.as_str()?;
+    Some(match rule.get("ruleContent").and_then(Value::as_str) {
+        Some(c) if !c.is_empty() => format!("{tool}({c})"),
+        _ => tool.to_string(),
+    })
+}
+
+/// The rule Always would save for `r`: a permission's first suggestion (the only one sphered reads) when it is an allow
+/// rule. Questions, plans and resume checks have none.
+pub fn always_rule(r: &RequestView) -> Option<String> {
+    if r.info.kind != RequestKind::Permission {
+        return None;
+    }
+    rule_from_suggestion(r.info.suggestions.first()?)
+}
+
+/// Two requests ask the same when both are permissions for the same tool with exactly the same input. That is what the
+/// person has seen on the card, so it is all that Allow all says yes to: the same suggested rule is not enough (`npm
+/// install lodash` and `npm install react` share one, and so do `git push` and `git push --force`).
+pub fn same_ask(a: &RequestView, b: &RequestView) -> bool {
+    a.info.kind == RequestKind::Permission && b.info.kind == RequestKind::Permission && a.info.tool == b.info.tool && a.info.input == b.info.input
+}
+
+/// The other agents' requests that ask the same as `r`: waiting, not put off, from other tasks. The card counts them
+/// ("+N more agents ask the same") and Shift+Enter answers them with `r`.
+pub fn same_ask_others<'a>(live: &'a Live, m: &Moment, r: &RequestView) -> Vec<&'a RequestView> {
+    waiting(live, m).into_iter().filter(|o| pending(o, m) && o.info.task != r.info.task && same_ask(r, o)).collect()
+}
+
+/// What Shift+Enter answers: `r` first, then every other request that asks the same, worked out when the key goes down.
+fn allow_all_ids(live: &Live, m: &Moment, r: &RequestView) -> Vec<String> {
+    std::iter::once(r.info.id.clone()).chain(same_ask_others(live, m, r).iter().map(|o| o.info.id.clone())).collect()
+}
+
 /// Shows the card when a request arrives that wasn't put away, hides it when nothing waits.
 pub fn update(live: Res<Live>, mut m: ResMut<Moment>, mut seen: Local<u64>, mut sound: ResMut<crate::sound::Sound>, swarm: Res<crate::swarm::Swarm>) {
     if *seen == live.version {
@@ -166,7 +213,18 @@ pub fn update(live: Res<Live>, mut m: ResMut<Moment>, mut seen: Local<u64>, mut 
     m.version += 1;
 }
 
-pub fn keys(mut ev: MessageReader<KeyboardInput>, focus: Res<Focus>, mut m: ResMut<Moment>, live: Res<Live>, svc: Res<Service>, mut sound: ResMut<crate::sound::Sound>, mut clicks: ResMut<AppClicks>) {
+#[allow(clippy::too_many_arguments)]
+pub fn keys(
+    mut ev: MessageReader<KeyboardInput>,
+    keys: Res<ButtonInput<KeyCode>>,
+    focus: Res<Focus>,
+    mut m: ResMut<Moment>,
+    live: Res<Live>,
+    svc: Res<Service>,
+    mut sound: ResMut<crate::sound::Sound>,
+    mut toasts: ResMut<Toasts>,
+    mut clicks: ResMut<AppClicks>,
+) {
     // clicks on the card's buttons and option rows; they do what the same key does, and only on a card that is up and waiting
     let clicked = clicks.take(CLICK_APP);
     if !clicked.is_empty() && (m.fold.is_some() || m.later.is_some()) {
@@ -202,6 +260,16 @@ pub fn keys(mut ev: MessageReader<KeyboardInput>, focus: Res<Focus>, mut m: ResM
                     answer(&mut m, &svc, &id, AnswerKind::Later, None);
                     sound.play_with("whoosh", 0.6, 0.0);
                 }
+                Click::Key(KeyCode::KeyA) => {
+                    if let Some(rule) = always_rule(&req) {
+                        answer_always(&mut m, &svc, &mut toasts, &id, &rule);
+                        sound.play_with("confirm", 0.7, 0.0);
+                    }
+                }
+                Click::Alt(0) if !question => {
+                    allow_all(&mut m, &svc, &live, &req);
+                    sound.play_with("confirm", 0.7, 0.0);
+                }
                 Click::Key(KeyCode::ArrowRight) if n > 1 => m.index = (m.index + 1) % n,
                 Click::Key(KeyCode::ArrowLeft) if n > 1 => m.index = (m.index + n - 1) % n,
                 Click::Pick(i) if question => {
@@ -214,6 +282,9 @@ pub fn keys(mut ev: MessageReader<KeyboardInput>, focus: Res<Focus>, mut m: ResM
             m.version += 1;
         }
     }
+    let shift = keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]);
+    // A saves a rule: never on a held key, and never as Cmd+A (select all) or the like
+    let mods = keys.any_pressed([KeyCode::SuperLeft, KeyCode::SuperRight, KeyCode::ControlLeft, KeyCode::ControlRight, KeyCode::AltLeft, KeyCode::AltRight]);
     for e in ev.read() {
         if e.state != ButtonState::Pressed || !m.shown || focus.cmd || focus.terminal {
             continue;
@@ -257,6 +328,11 @@ pub fn keys(mut ev: MessageReader<KeyboardInput>, focus: Res<Focus>, mut m: ResM
             continue;
         }
         match &e.logical_key {
+            // Shift+Enter: yes to this request and to every other agent's request that asks the same
+            Key::Enter if shift && !mods && !e.repeat && req.info.kind != RequestKind::Question => {
+                allow_all(&mut m, &svc, &live, &req);
+                sound.play_with("confirm", 0.7, 0.0);
+            }
             Key::Enter => {
                 if req.info.kind == RequestKind::Question {
                     // A question needs an answer: pick an option by number, or type one.
@@ -287,6 +363,13 @@ pub fn keys(mut ev: MessageReader<KeyboardInput>, focus: Res<Focus>, mut m: ResM
                     answer(&mut m, &svc, &id, AnswerKind::Later, None);
                     sound.play_with("whoosh", 0.6, 0.0);
                 }
+                // A is a yes that also saves the rule the agent suggested (only when there is one)
+                "a" if !mods && !e.repeat => {
+                    if let Some(rule) = always_rule(&req) {
+                        answer_always(&mut m, &svc, &mut toasts, &id, &rule);
+                        sound.play_with("confirm", 0.7, 0.0);
+                    }
+                }
                 d if req.info.kind == RequestKind::Question && d.len() == 1 && d.as_bytes()[0].is_ascii_digit() => {
                     let i = (d.as_bytes()[0] - b'0') as usize;
                     if let Some(label) = options(&req.info.input).get(i.wrapping_sub(1)) {
@@ -302,6 +385,28 @@ pub fn keys(mut ev: MessageReader<KeyboardInput>, focus: Res<Focus>, mut m: ResM
 }
 
 fn answer(m: &mut Moment, svc: &Service, id: &str, kind: AnswerKind, text: Option<String>) {
+    answer_with(m, svc, id, kind, text, false);
+}
+
+/// A yes that also saves the rule the agent suggested; the toast names the rule.
+fn answer_always(m: &mut Moment, svc: &Service, toasts: &mut Toasts, id: &str, rule: &str) {
+    answer_with(m, svc, id, AnswerKind::Yes, None, true);
+    toasts.push_ok(format!("Saved rule: {}", clip(rule, 60)));
+}
+
+/// Yes to `req` and to every other agent's request that asks the same. The card is the one answered request: the
+/// others are marked answered (hidden until the snapshot drops them) and sent, so the fold, the next card and the
+/// sounds go as for any yes.
+fn allow_all(m: &mut Moment, svc: &Service, live: &Live, req: &RequestView) {
+    let ids = allow_all_ids(live, m, req);
+    answer(m, svc, &req.info.id, AnswerKind::Yes, None);
+    for id in &ids[1..] {
+        m.answered.push(id.clone());
+        svc.send(Cmd::Answer { request: id.clone(), answer: AnswerKind::Yes, text: None, always: false });
+    }
+}
+
+fn answer_with(m: &mut Moment, svc: &Service, id: &str, kind: AnswerKind, text: Option<String>, always: bool) {
     // keep the answered card on screen while it folds (yes) or dims into orbit (later)
     if kind != AnswerKind::Change {
         m.holding = m.current.clone();
@@ -319,7 +424,7 @@ fn answer(m: &mut Moment, svc: &Service, id: &str, kind: AnswerKind, text: Optio
     }
     m.text.clear();
     m.editing = false;
-    svc.send(Cmd::Answer { request: id.to_string(), answer: kind, text });
+    svc.send(Cmd::Answer { request: id.to_string(), answer: kind, text, always });
 }
 
 // ------------------------------------------------------------------ what the card says
@@ -401,11 +506,13 @@ fn yes_label(r: &RequestView) -> &'static str {
 }
 
 fn waited(opened_at: &str) -> String {
-    // RFC 3339 from the service; minutes since then, from the system clock.
-    let secs = crate::working::parse_rfc3339(opened_at);
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
-    match secs {
-        Some(t) if now - t >= 60 => format!("waiting {} min", (now - t) / 60),
+    waited_since(opened_at, crate::core::unix_now())
+}
+
+/// "waiting 12 min", "waiting 3 h 5 min" (RFC 3339 from the service; `now` is unix seconds), or "just now" under a minute.
+fn waited_since(opened_at: &str, now: i64) -> String {
+    match crate::working::parse_rfc3339(opened_at) {
+        Some(t) if now - t >= 60 => format!("waiting {}", crate::live::fmt_waited((now - t) as u64)),
         _ => "just now".into(),
     }
 }
@@ -421,7 +528,7 @@ pub fn draw(mut commands: Commands, mut m: ResMut<Moment>, live: Res<Live>, root
     commands.entity(root.0).despawn_children();
     // while folding, the answered card stays
     if let Some((r, title)) = m.holding.clone() {
-        let body = build(&mut commands, &f, &r, &title, &m, 1);
+        let body = build(&mut commands, &f, &r, &title, &m, 1, m.same);
         commands.entity(root.0).add_child(body);
         return;
     }
@@ -429,12 +536,57 @@ pub fn draw(mut commands: Commands, mut m: ResMut<Moment>, live: Res<Live>, root
     let Some(r) = w.get(m.index).map(|r| (*r).clone()) else { return };
     let title = live.title(&r.info.task).to_string();
     let n = w.len();
-    let body = build(&mut commands, &f, &r, &title, &m, n);
+    let same = same_ask_others(&live, &m, &r).len();
+    let body = build(&mut commands, &f, &r, &title, &m, n, same);
     commands.entity(root.0).add_child(body);
-    m.bypass_change_detection().current = Some((r, title));
+    let m = m.bypass_change_detection();
+    m.current = Some((r, title));
+    m.same = same;
 }
 
-fn build(c: &mut Commands, f: &UiFonts, r: &RequestView, title: &str, m: &Moment, n: usize) -> Entity {
+/// "+2 more agents ask the same", the card's line when other agents wait on the same ask.
+fn same_line(n: usize) -> String {
+    if n == 1 {
+        "+1 more agent asks the same".to_string()
+    } else {
+        format!("+{n} more agents ask the same")
+    }
+}
+
+/// The row above the actions with the other ways to say yes: Always (A), named by the rule it saves, and Allow all
+/// (Shift+Enter) for the other agents asking the same.
+fn more_ways(c: &mut Commands, f: &UiFonts, rule: Option<String>, same: usize) -> Entity {
+    let line = role_color(Role::Line);
+    let hot = role_color(Role::Hot);
+    let acc = role_color(Role::Acc);
+    let mute = with_alpha(line, 0.62);
+    let nowrap = TextLayout { linebreak: LineBreak::NoWrap, ..default() };
+    let row = c.spawn(Node { flex_direction: FlexDirection::Row, align_items: AlignItems::Center, column_gap: px(10), margin: UiRect { top: px(8), bottom: px(12), ..default() }, ..default() }).id();
+    let chip = |c: &mut Commands, border: Color, click: Click| -> Entity {
+        c.spawn((Node { flex_direction: FlexDirection::Row, align_items: AlignItems::Center, column_gap: px(8), flex_shrink: 0.0, padding: UiRect { left: px(14), right: px(12), top: px(8), bottom: px(7) }, border: UiRect::all(px(1)), ..default() }, BorderColor::all(border), click)).id()
+    };
+    let key = |c: &mut Commands, t: &str| -> Entity { c.spawn((Text::new(t), font(&f.mono_bold, 9.5, 0.0), TextColor(mute), LineHeight::Px(11.0), nowrap)).id() };
+    if let Some(rule) = rule {
+        let b = chip(c, with_alpha(line, 0.34), Click::Key(KeyCode::KeyA));
+        let t = c.spawn((Text::new("ALWAYS ·"), font(&f.ui700, 11.5, 2.76), TextColor(hot), LineHeight::Px(12.5), nowrap)).id();
+        // the rule as it will be saved, clipped only when the row is short of room
+        let name = c.spawn((Text::new(clip(&rule, if same > 0 { 32 } else { 56 })), font(&f.mono, 12.0, 0.0), TextColor(hot), LineHeight::Px(14.0), nowrap)).id();
+        let k = key(c, "A");
+        c.entity(b).add_children(&[t, name, k]);
+        c.entity(row).add_child(b);
+    }
+    if same > 0 {
+        let b = chip(c, acc, Click::Alt(0));
+        let t = c.spawn((Text::new(format!("ALLOW ALL {}", same + 1)), font(&f.ui700, 11.5, 2.76), TextColor(acc), LineHeight::Px(12.5), nowrap)).id();
+        let k = key(c, "⇧ ENTER");
+        c.entity(b).add_children(&[t, k]);
+        c.entity(row).add_child(b);
+    }
+    row
+}
+
+/// `n`: how many requests wait; `same`: how many other agents' requests ask the same as `r`.
+fn build(c: &mut Commands, f: &UiFonts, r: &RequestView, title: &str, m: &Moment, n: usize, same: usize) -> Entity {
     let line = role_color(Role::Line);
     let hot = role_color(Role::Hot);
     let acc = role_color(Role::Acc);
@@ -527,6 +679,11 @@ fn build(c: &mut Commands, f: &UiFonts, r: &RequestView, title: &str, m: &Moment
             c.entity(draft).add_child(row);
         }
     }
+    // the same ask from other agents (the card's Allow all answers them too)
+    if same > 0 && !m.editing {
+        let also = c.spawn((Text::new(same_line(same)), font(&f.ui600, 12.5, 0.6), TextColor(acc), LineHeight::Px(15.0), nowrap)).id();
+        c.entity(draft).add_child(also);
+    }
     c.entity(body).add_child(draft);
 
     // what you're typing
@@ -565,6 +722,13 @@ fn build(c: &mut Commands, f: &UiFonts, r: &RequestView, title: &str, m: &Moment
     // spacer pushes the actions to the bottom
     let sp = c.spawn(Node { flex_grow: 1.0, ..default() }).id();
     c.entity(body).add_child(sp);
+
+    // other ways to say yes
+    let rule = always_rule(r);
+    if !m.editing && (rule.is_some() || same > 0) {
+        let more = more_ways(c, f, rule, same);
+        c.entity(body).add_child(more);
+    }
 
     // actions
     let acts = c
@@ -626,6 +790,22 @@ mod tests {
     }
 
     #[test]
+    fn the_header_says_how_long_a_request_has_waited_in_minutes_then_hours() {
+        let at = "2026-10-19T12:00:00Z";
+        let opened = crate::working::parse_rfc3339(at).unwrap();
+        assert_eq!(waited_since(at, opened), "just now");
+        assert_eq!(waited_since(at, opened + 59), "just now");
+        assert_eq!(waited_since(at, opened + 60), "waiting 1 min");
+        assert_eq!(waited_since(at, opened + 12 * 60 + 30), "waiting 12 min");
+        assert_eq!(waited_since(at, opened + 3600), "waiting 1 h");
+        assert_eq!(waited_since(at, opened + 3 * 3600 + 5 * 60), "waiting 3 h 5 min");
+        // a long wait is not a count of minutes, and a clock behind the service's or a time that can't be read is just now
+        assert_eq!(waited_since(at, opened + 4271 * 60), "waiting 71 h 11 min");
+        assert_eq!(waited_since(at, opened - 5), "just now");
+        assert_eq!(waited_since("not a time", opened), "just now");
+    }
+
+    #[test]
     fn a_request_put_off_stays_findable_but_does_not_raise_the_card() {
         let mut live = Live::default();
         live.requests = vec![req("r1", RequestStatus::Snoozed), req("r2", RequestStatus::Open), req("r3", RequestStatus::Open)];
@@ -644,5 +824,409 @@ mod tests {
         assert_eq!(pending_count(&live, &m), 0);
         // the agent's own card (swarm, show_task) still finds a put-off request
         assert!(waiting(&live, &m).iter().any(|r| r.info.task == "t-r1"));
+    }
+
+    /// A permission from `task` for `tool` with `input`; `rule` is the content of the allow rule it suggests, if any.
+    fn ask(id: &str, task: &str, tool: &str, input: Value, rule: Option<&str>) -> RequestView {
+        let suggestions: Vec<Value> = rule.map(|c| serde_json::json!({"type": "addRules", "rules": [{"toolName": tool, "ruleContent": c}], "behavior": "allow", "destination": "localSettings"})).into_iter().collect();
+        let info: sphere_proto::RequestInfo = serde_json::from_value(serde_json::json!({"id": id, "task": task, "kind": "permission", "tool": tool, "summary": "", "input": input, "suggestions": suggestions})).unwrap();
+        RequestView { info, status: RequestStatus::Open, opened_at: "2026-10-19T00:00:00Z".into() }
+    }
+
+    fn npm(id: &str, task: &str, pkg: &str) -> RequestView {
+        ask(id, task, "Bash", serde_json::json!({"command": format!("npm install {pkg}")}), Some("npm install:*"))
+    }
+
+    #[test]
+    fn a_suggestion_becomes_the_rule_sphered_saves() {
+        use serde_json::json;
+        let bash = json!({"type": "addRules", "rules": [{"toolName": "Bash", "ruleContent": "npm install:*"}], "behavior": "allow", "destination": "localSettings"});
+        assert_eq!(rule_from_suggestion(&bash).as_deref(), Some("Bash(npm install:*)"));
+        // no content, or empty content: the bare tool
+        assert_eq!(rule_from_suggestion(&json!({"type": "addRules", "rules": [{"toolName": "WebFetch"}], "behavior": "allow"})).as_deref(), Some("WebFetch"));
+        assert_eq!(rule_from_suggestion(&json!({"type": "addRules", "rules": [{"toolName": "WebFetch", "ruleContent": ""}], "behavior": "allow"})).as_deref(), Some("WebFetch"));
+        // the first rule only
+        assert_eq!(rule_from_suggestion(&json!({"type": "addRules", "rules": [{"toolName": "Read", "ruleContent": "/a/**"}, {"toolName": "Bash", "ruleContent": "ls:*"}], "behavior": "allow"})).as_deref(), Some("Read(/a/**)"));
+        // not an allow rule: a mode change, a deny, no rules, no tool name, not even an object
+        assert_eq!(rule_from_suggestion(&json!({"type": "setMode", "mode": "acceptEdits"})), None);
+        assert_eq!(rule_from_suggestion(&json!({"type": "addRules", "rules": [{"toolName": "Bash", "ruleContent": "x"}], "behavior": "deny"})), None);
+        assert_eq!(rule_from_suggestion(&json!({"type": "addRules", "rules": [], "behavior": "allow"})), None);
+        assert_eq!(rule_from_suggestion(&json!({"type": "addRules", "rules": [{"ruleContent": "x"}], "behavior": "allow"})), None);
+        assert_eq!(rule_from_suggestion(&json!("addRules")), None);
+    }
+
+    #[test]
+    fn always_is_for_a_permission_whose_first_suggestion_is_a_rule() {
+        use serde_json::json;
+        assert_eq!(always_rule(&npm("r1", "t1", "left-pad")).as_deref(), Some("Bash(npm install:*)"));
+        // nothing suggested
+        assert_eq!(always_rule(&ask("r2", "t2", "Bash", json!({}), None)), None);
+        // sphered reads the first suggestion only, so a rule behind a mode change is not offered
+        let mut behind = npm("r3", "t3", "x");
+        behind.info.suggestions.insert(0, json!({"type": "setMode", "mode": "acceptEdits"}));
+        assert_eq!(always_rule(&behind), None);
+        // questions, plans and resume checks never get one, whatever they carry
+        for kind in [RequestKind::Question, RequestKind::Plan, RequestKind::ResumeCheck] {
+            let mut r = npm("r4", "t4", "x");
+            r.info.kind = kind;
+            assert_eq!(always_rule(&r), None, "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn two_requests_ask_the_same_only_when_the_tool_and_the_input_are_exactly_the_same() {
+        use serde_json::json;
+        // the same command, from whichever agent
+        assert!(same_ask(&npm("r1", "t1", "left-pad"), &npm("r2", "t2", "left-pad")));
+        // the same rule is not the same ask: Allow all says yes to what was seen, not to what a rule would cover
+        assert!(!same_ask(&npm("r1", "t1", "lodash"), &npm("r2", "t2", "react")));
+        let push = |id: &str, cmd: &str| ask(id, "t", "Bash", json!({"command": cmd}), Some("git push:*"));
+        assert!(!same_ask(&push("a", "git push"), &push("b", "git push --force")));
+        // with a rule or without one (or another), the input decides
+        let make = |id: &str, rule: Option<&str>| ask(id, "t", "Bash", json!({"command": "make test"}), rule);
+        assert!(same_ask(&make("a", None), &make("b", None)));
+        assert!(same_ask(&make("a", Some("make test:*")), &make("b", None)));
+        assert!(same_ask(&make("a", Some("make test:*")), &make("b", Some("make:*"))));
+        let lint = ask("b", "t", "Bash", json!({"command": "make lint"}), None);
+        assert!(!same_ask(&make("a", None), &lint));
+        // a word more in the input is another ask
+        let said = |id: &str, why: &str| ask(id, "t", "Bash", json!({"command": "make test", "description": why}), None);
+        assert!(same_ask(&said("a", "run the tests"), &said("b", "run the tests")));
+        assert!(!same_ask(&said("a", "run the tests"), &said("b", "run them again")));
+        // another tool is another ask, input or no input
+        assert!(!same_ask(&ask("a", "t", "Edit", json!({"x": 1}), None), &ask("b", "t", "Write", json!({"x": 1}), None)));
+        // only permissions ask the same
+        let mut q1 = make("a", None);
+        let mut q2 = make("b", None);
+        q1.info.kind = RequestKind::Question;
+        q2.info.kind = RequestKind::Question;
+        assert!(!same_ask(&q1, &q2));
+        assert!(!same_ask(&q1, &make("b", None)));
+    }
+
+    /// Twelve open requests, one per task but t1's two (r1 and r9). The `npm install left-pad` asks (r1, r2, r3, r5, r6, r9,
+    /// r11) are the same; r4 is one of them put off before (Snoozed), r7 asks for another rule, r8 another tool, r10 is a
+    /// question, and r12 installs another package under the very same rule as the rest.
+    fn crowd() -> Live {
+        use serde_json::json;
+        let mut live = Live::default();
+        let mut snoozed = npm("r4", "t4", "left-pad");
+        snoozed.status = RequestStatus::Snoozed;
+        let mut question = npm("r10", "t10", "left-pad");
+        question.info.kind = RequestKind::Question;
+        live.requests = vec![
+            npm("r1", "t1", "left-pad"),
+            npm("r2", "t2", "left-pad"),
+            npm("r3", "t3", "left-pad"),
+            snoozed,
+            npm("r5", "t5", "left-pad"),
+            npm("r6", "t6", "left-pad"),
+            ask("r7", "t7", "Bash", json!({"command": "git push"}), Some("git push:*")),
+            ask("r8", "t8", "Edit", json!({"file_path": "/a"}), None),
+            npm("r9", "t1", "left-pad"),
+            question,
+            npm("r11", "t11", "left-pad"),
+            npm("r12", "t12", "react"),
+        ];
+        live
+    }
+
+    #[test]
+    fn allow_all_is_the_card_and_exactly_the_waiting_others_that_ask_the_same() {
+        let live = crowd();
+        let mut m = Moment::default();
+        // r5 was put off here, r6 answered here, r4 was put off before (sphered says Snoozed)
+        m.put_off.push("r5".into());
+        m.answered.push("r6".into());
+        let r1 = live.requests[0].clone();
+        // not r4, r5, r6 (not waiting, or put off), r7, r8 (another ask), r9 (r1's own task, not another agent), r10 (a question),
+        // and not r12, which installs another package under the same rule
+        assert_eq!(allow_all_ids(&live, &m, &r1), ["r1", "r2", "r3", "r11"].map(String::from));
+        // the card counts the same agents, other than itself
+        assert_eq!(same_ask_others(&live, &m, &r1).len(), 3);
+        // from r2's card r9 is another agent's (and r1, which is from the same task as r9, is too)
+        let r2 = live.requests[1].clone();
+        assert_eq!(allow_all_ids(&live, &m, &r2), ["r2", "r1", "r3", "r9", "r11"].map(String::from));
+        // a card whose ask nobody else shares: just itself, even when others share its rule
+        let r7 = live.requests[6].clone();
+        assert_eq!(allow_all_ids(&live, &m, &r7), ["r7"].map(String::from));
+        assert!(same_ask_others(&live, &m, &r7).is_empty());
+        let r12 = live.requests[11].clone();
+        assert_eq!(allow_all_ids(&live, &m, &r12), ["r12"].map(String::from));
+        assert!(same_ask_others(&live, &m, &r12).is_empty());
+        // worked out again after an answer here: the answered one drops out of the count
+        m.answered.push("r2".into());
+        assert_eq!(allow_all_ids(&live, &m, &r1), ["r1", "r3", "r11"].map(String::from));
+    }
+
+    // ---- the keys and the buttons, on a bare App
+
+    use crate::live::ToastKind;
+    use tokio::sync::mpsc::UnboundedReceiver;
+
+    /// A bare App with the card up on `live`'s first request (as `draw` leaves it) and the service's commands readable.
+    fn card(live: Live) -> (App, UnboundedReceiver<Cmd>) {
+        let (svc, rx) = Service::with_receiver();
+        let m = Moment { shown: true, current: Some((live.requests[0].clone(), "Install it".into())), ..default() };
+        let mut app = App::new();
+        app.add_message::<KeyboardInput>()
+            .init_resource::<ButtonInput<KeyCode>>()
+            .init_resource::<Focus>()
+            .init_resource::<AppClicks>()
+            .init_resource::<Toasts>()
+            .init_resource::<crate::sound::Sound>()
+            .insert_resource(live)
+            .insert_resource(m)
+            .insert_resource(svc)
+            .add_systems(Update, keys);
+        (app, rx)
+    }
+
+    fn press_key(app: &mut App, key: Key, code: KeyCode, repeat: bool) {
+        let text = if let Key::Character(c) = &key { Some(c.clone()) } else { None };
+        app.world_mut().write_message(KeyboardInput { key_code: code, logical_key: key, state: ButtonState::Pressed, text, repeat, window: Entity::PLACEHOLDER });
+        app.update();
+    }
+
+    fn press(app: &mut App, key: Key, code: KeyCode) {
+        press_key(app, key, code, false);
+    }
+
+    fn hold(app: &mut App, code: KeyCode) {
+        app.world_mut().resource_mut::<ButtonInput<KeyCode>>().press(code);
+    }
+
+    fn a_key() -> Key {
+        Key::Character("a".into())
+    }
+
+    /// The answers sent so far: (request, answer, always).
+    fn sent(rx: &mut UnboundedReceiver<Cmd>) -> Vec<(String, AnswerKind, bool)> {
+        let mut out = Vec::new();
+        while let Ok(Cmd::Answer { request, answer, always, .. }) = rx.try_recv() {
+            out.push((request, answer, always));
+        }
+        out
+    }
+
+    fn yes(ids: &[&str], always: bool) -> Vec<(String, AnswerKind, bool)> {
+        ids.iter().map(|i| (i.to_string(), AnswerKind::Yes, always)).collect()
+    }
+
+    /// `card`, and the drawing too: `draw` builds the card under a root node, so what the card says can be read back.
+    fn drawn(live: Live) -> (App, UnboundedReceiver<Cmd>) {
+        let (mut app, rx) = card(live);
+        let root = app.world_mut().spawn(Node::default()).id();
+        app.insert_resource(CardRoot(root))
+            .insert_resource(UiFonts { ui500: default(), ui600: default(), ui700: default(), display: default(), mono: default(), mono_bold: default() })
+            .add_systems(Update, draw.after(keys));
+        app.world_mut().resource_mut::<Moment>().version = 1;
+        (app, rx)
+    }
+
+    /// Every text on the card, sorted.
+    fn texts(app: &mut App) -> Vec<String> {
+        let world = app.world_mut();
+        let mut said: Vec<String> = world.query::<&Text>().iter(world).map(|t| t.0.clone()).collect();
+        said.sort();
+        said
+    }
+
+    fn says(said: &[String], t: &str) -> bool {
+        said.iter().any(|s| s == t)
+    }
+
+    #[test]
+    fn the_card_offers_always_and_allow_all_only_where_they_apply() {
+        use serde_json::json;
+        let first_card = |requests: Vec<RequestView>| {
+            let mut live = Live::default();
+            live.requests = requests;
+            let (mut app, _rx) = drawn(live);
+            app.update();
+            texts(&mut app)
+        };
+        let no_allow_all = |said: &[String]| !said.iter().any(|s| s.starts_with("ALLOW ALL") || s.contains("ask the same") || s.contains("asks the same"));
+        // a rule, and two other agents asking the same: both ways, named and counted (the card is one of the three)
+        let said = first_card(vec![npm("r1", "t1", "left-pad"), npm("r2", "t2", "left-pad"), npm("r3", "t3", "left-pad")]);
+        assert!(says(&said, "ALWAYS ·") && says(&said, "Bash(npm install:*)"), "{said:?}");
+        assert!(says(&said, "ALLOW ALL 3") && says(&said, "⇧ ENTER") && says(&said, "+2 more agents ask the same"), "{said:?}");
+        // one other agent: the line is singular
+        let said = first_card(vec![npm("r1", "t1", "left-pad"), npm("r2", "t2", "left-pad")]);
+        assert!(says(&said, "ALLOW ALL 2") && says(&said, "+1 more agent asks the same"), "{said:?}");
+        // another package under the same rule is not the same ask: Always only
+        let said = first_card(vec![npm("r1", "t1", "lodash"), npm("r2", "t2", "react")]);
+        assert!(says(&said, "ALWAYS ·") && no_allow_all(&said), "{said:?}");
+        // a rule and nobody else: Always only
+        let said = first_card(vec![npm("r1", "t1", "left-pad"), ask("r2", "t2", "Bash", json!({"command": "git push"}), Some("git push:*"))]);
+        assert!(says(&said, "ALWAYS ·") && no_allow_all(&said), "{said:?}");
+        // no rule but the very same input as another agent's: Allow all only
+        let cmd = json!({"command": "make test"});
+        let said = first_card(vec![ask("r1", "t1", "Bash", cmd.clone(), None), ask("r2", "t2", "Bash", cmd, None)]);
+        assert!(says(&said, "ALLOW ALL 2") && !says(&said, "ALWAYS ·"), "{said:?}");
+        // a question has neither, even with another agent's question beside it
+        let (mut q1, mut q2) = (npm("r1", "t1", "left-pad"), npm("r2", "t2", "left-pad"));
+        q1.info.kind = RequestKind::Question;
+        q2.info.kind = RequestKind::Question;
+        let said = first_card(vec![q1, q2]);
+        assert!(!said.iter().any(|s| s.starts_with("ALWAYS")) && no_allow_all(&said), "{said:?}");
+    }
+
+    #[test]
+    fn the_answered_card_keeps_its_line_and_buttons_while_it_folds() {
+        let kept = |said: &[String]| says(said, "+5 more agents ask the same") && says(said, "ALLOW ALL 6") && says(said, "ALWAYS ·");
+        // a plain yes answers only the card, but the card on its way out still reads as it did
+        let (mut app, mut rx) = drawn(crowd());
+        app.update();
+        let before = texts(&mut app);
+        assert!(kept(&before), "{before:?}");
+        press(&mut app, Key::Enter, KeyCode::Enter);
+        assert_eq!(sent(&mut rx), yes(&["r1"], false));
+        assert!(app.world().resource::<Moment>().holding.is_some());
+        let folding = texts(&mut app);
+        assert!(kept(&folding), "{folding:?}");
+        // Allow all takes the other five off the list at once, yet the card it answered still counts them
+        let (mut app, mut rx) = drawn(crowd());
+        app.update();
+        hold(&mut app, KeyCode::ShiftLeft);
+        press(&mut app, Key::Enter, KeyCode::Enter);
+        assert_eq!(sent(&mut rx).len(), 6);
+        let folding = texts(&mut app);
+        assert!(kept(&folding), "{folding:?}");
+    }
+
+    #[test]
+    fn shift_enter_says_yes_to_the_card_and_every_other_agent_that_asks_the_same() {
+        let (mut app, mut rx) = card(crowd());
+        hold(&mut app, KeyCode::ShiftLeft);
+        press(&mut app, Key::Enter, KeyCode::Enter);
+        // a plain yes (never Always) for the card and each of the five that ask the same, the card first
+        assert_eq!(sent(&mut rx), yes(&["r1", "r2", "r3", "r5", "r6", "r11"], false));
+        // the card folds like any yes, and everything answered is hidden until the snapshot drops it
+        let (m, live) = (app.world().resource::<Moment>(), app.world().resource::<Live>());
+        assert!(m.fold.is_some() && m.holding.as_ref().is_some_and(|(r, _)| r.info.id == "r1"));
+        assert_eq!(m.answered, ["r1", "r2", "r3", "r5", "r6", "r11"]);
+        // the next card is the first of what is left; r4 (put off before) comes last and does not raise the card
+        assert_eq!(waiting(live, m).iter().map(|r| r.info.id.as_str()).collect::<Vec<_>>(), ["r7", "r8", "r9", "r10", "r12", "r4"]);
+        assert_eq!(pending_count(live, m), 5);
+        // a held Enter does not answer again while the card is folding (it only skips the fold)
+        press_key(&mut app, Key::Enter, KeyCode::Enter, true);
+        assert!(sent(&mut rx).is_empty());
+    }
+
+    #[test]
+    fn answering_all_the_requests_that_wait_ends_the_moment() {
+        let mut live = Live::default();
+        live.requests = vec![npm("r1", "t1", "left-pad"), npm("r2", "t2", "left-pad"), npm("r3", "t3", "left-pad")];
+        let (mut app, mut rx) = card(live);
+        hold(&mut app, KeyCode::ShiftRight);
+        press(&mut app, Key::Enter, KeyCode::Enter);
+        assert_eq!(sent(&mut rx), yes(&["r1", "r2", "r3"], false));
+        let (m, live) = (app.world().resource::<Moment>(), app.world().resource::<Live>());
+        // nothing is left to raise a card: the fold ends in the all-done flow
+        assert_eq!(pending_count(live, m), 0);
+        assert!(waiting(live, m).is_empty());
+    }
+
+    #[test]
+    fn enter_answers_only_the_card_and_shift_enter_alone_is_just_a_yes() {
+        let (mut app, mut rx) = card(crowd());
+        press(&mut app, Key::Enter, KeyCode::Enter);
+        assert_eq!(sent(&mut rx), yes(&["r1"], false));
+        // Shift+Enter on a card nobody else shares
+        let mut live = Live::default();
+        live.requests = vec![ask("r7", "t7", "Bash", serde_json::json!({"command": "git push"}), Some("git push:*")), npm("r1", "t1", "left-pad")];
+        let (mut app, mut rx) = card(live);
+        hold(&mut app, KeyCode::ShiftLeft);
+        press(&mut app, Key::Enter, KeyCode::Enter);
+        assert_eq!(sent(&mut rx), yes(&["r7"], false));
+        // the same rule for another package is not the same ask: only the card is answered
+        let mut live = Live::default();
+        live.requests = vec![npm("r1", "t1", "lodash"), npm("r2", "t2", "react")];
+        let (mut app, mut rx) = card(live);
+        hold(&mut app, KeyCode::ShiftLeft);
+        press(&mut app, Key::Enter, KeyCode::Enter);
+        assert_eq!(sent(&mut rx), yes(&["r1"], false));
+    }
+
+    #[test]
+    fn shift_enter_on_a_question_still_asks_for_the_answer() {
+        let mut live = Live::default();
+        let mut q = npm("r1", "t1", "a");
+        q.info.kind = RequestKind::Question;
+        live.requests = vec![q, npm("r2", "t2", "b")];
+        let (mut app, mut rx) = card(live);
+        hold(&mut app, KeyCode::ShiftLeft);
+        press(&mut app, Key::Enter, KeyCode::Enter);
+        assert!(sent(&mut rx).is_empty());
+        assert!(app.world().resource::<Moment>().editing);
+    }
+
+    #[test]
+    fn a_says_yes_saves_the_rule_and_says_so() {
+        let (mut app, mut rx) = card(crowd());
+        press(&mut app, a_key(), KeyCode::KeyA);
+        assert_eq!(sent(&mut rx), yes(&["r1"], true));
+        let toasts: Vec<(String, ToastKind)> = app.world().resource::<Toasts>().list.iter().map(|t| (t.0.clone(), t.2)).collect();
+        assert_eq!(toasts, [("Saved rule: Bash(npm install:*)".to_string(), ToastKind::Ok)]);
+        // it folds like any yes, for this request only
+        let m = app.world().resource::<Moment>();
+        assert!(m.fold.is_some() && m.holding.is_some());
+        assert_eq!(m.answered, ["r1"]);
+    }
+
+    #[test]
+    fn a_does_nothing_without_a_rule_or_on_a_held_key_or_with_cmd() {
+        use serde_json::json;
+        let silent = |app: &mut App, rx: &mut UnboundedReceiver<Cmd>| {
+            assert!(sent(rx).is_empty());
+            assert!(app.world().resource::<Toasts>().list.is_empty());
+            assert!(app.world().resource::<Moment>().fold.is_none());
+        };
+        // nothing suggested
+        let mut live = Live::default();
+        live.requests = vec![ask("r1", "t1", "Bash", json!({"command": "ls"}), None)];
+        let (mut app, mut rx) = card(live);
+        press(&mut app, a_key(), KeyCode::KeyA);
+        silent(&mut app, &mut rx);
+        // a question, a plan or a resume check, whatever they carry
+        for kind in [RequestKind::Question, RequestKind::Plan, RequestKind::ResumeCheck] {
+            let mut live = Live::default();
+            let mut r = npm("r1", "t1", "a");
+            r.info.kind = kind;
+            live.requests = vec![r];
+            let (mut app, mut rx) = card(live);
+            press(&mut app, a_key(), KeyCode::KeyA);
+            silent(&mut app, &mut rx);
+        }
+        // a held A, and Cmd+A (select all) or Ctrl+A on a card that does have a rule
+        let (mut app, mut rx) = card(crowd());
+        press_key(&mut app, a_key(), KeyCode::KeyA, true);
+        silent(&mut app, &mut rx);
+        for code in [KeyCode::SuperLeft, KeyCode::ControlLeft, KeyCode::AltLeft] {
+            let (mut app, mut rx) = card(crowd());
+            hold(&mut app, code);
+            press(&mut app, a_key(), KeyCode::KeyA);
+            silent(&mut app, &mut rx);
+        }
+        // while typing a change the key is a letter
+        let (mut app, mut rx) = card(crowd());
+        app.world_mut().resource_mut::<Moment>().editing = true;
+        press(&mut app, a_key(), KeyCode::KeyA);
+        assert!(sent(&mut rx).is_empty());
+        assert_eq!(app.world().resource::<Moment>().text, "a");
+    }
+
+    #[test]
+    fn the_buttons_do_what_their_keys_do() {
+        let (mut app, mut rx) = card(crowd());
+        app.world_mut().resource_mut::<AppClicks>().push(CLICK_APP, Click::Alt(0));
+        app.update();
+        assert_eq!(sent(&mut rx), yes(&["r1", "r2", "r3", "r5", "r6", "r11"], false));
+        let (mut app, mut rx) = card(crowd());
+        app.world_mut().resource_mut::<AppClicks>().push(CLICK_APP, Click::Key(KeyCode::KeyA));
+        app.update();
+        assert_eq!(sent(&mut rx), yes(&["r1"], true));
+        assert_eq!(app.world().resource::<Toasts>().list.len(), 1);
     }
 }

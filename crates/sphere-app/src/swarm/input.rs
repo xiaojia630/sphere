@@ -472,7 +472,7 @@ fn command(e: &mut Env, st: &mut Input, c: SwarmCmd) {
             None => e.toasts.push("Open an agent first, then say stop"),
         },
         SwarmCmd::Status => {
-            let line = super::feedback::status_line(&e.swarm.model);
+            let line = super::feedback::status_line(&e.swarm.model, e.live.waited_today_secs(crate::core::unix_now()));
             e.sound.speak(&line);
             e.say.say(line);
         }
@@ -1088,6 +1088,11 @@ mod tests {
         app.world_mut().resource_mut::<Open>().swarm_cmds.push(SwarmCmd::Status);
         app.update();
         assert_eq!(app.world().resource::<crate::homepanels::Say>().text, "4 agents: 1 working, 2 needs you, 1 ready to merge. About $0.00 today, API estimate.");
+        // with 7 min already waited today (and two requests that just opened), it says so
+        app.world_mut().resource_mut::<Live>().waited_closed_secs = 7 * 60;
+        app.world_mut().resource_mut::<Open>().swarm_cmds.push(SwarmCmd::Status);
+        app.update();
+        assert_eq!(app.world().resource::<crate::homepanels::Say>().text, "4 agents: 1 working, 2 needs you, 1 ready to merge. About $0.00 today, API estimate. Agents waited 7 min on you today.");
     }
 
     #[test]

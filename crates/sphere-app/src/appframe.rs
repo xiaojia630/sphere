@@ -262,6 +262,12 @@ impl AppClicks {
         self.0 = rest;
         mine.into_iter().map(|c| c.1).collect()
     }
+
+    /// A click on an app's pane, as `route_clicks` makes them (tests).
+    #[cfg(test)]
+    pub fn push(&mut self, app: u8, c: Click) {
+        self.0.push((app, c));
+    }
 }
 
 /// Finds the clickable node under each click: the smallest one whose rect holds the point.
