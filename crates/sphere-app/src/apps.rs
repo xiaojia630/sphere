@@ -1,4 +1,4 @@
-//! Opening the eight apps (the rolodex, the core-open orbit, clicks on the home). Terminal and Agents open real
+//! Opening the apps (the rolodex, the core-open orbit, clicks on the home). Terminal and Agents open real
 //! panels; the others say they come in a later pass, like the prototype.
 use crate::homepanels::APPS;
 use crate::live::Toasts;
