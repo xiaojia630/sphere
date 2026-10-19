@@ -201,6 +201,7 @@ pub fn update_readout_text(
     mut booted: Local<bool>,
 ) {
     // boot: "Starting" with a progress line, then "Standby" at 2.1 s
+    let mut just_booted = false;
     if !*booted {
         let t = sim.boot_t / 1.75;
         if t < 1.2 {
@@ -221,6 +222,7 @@ pub fn update_readout_text(
             return;
         }
         *booted = true;
+        just_booted = true;
         for (mut x, _) in &mut q.p0() {
             x.0 = "STANDBY".into();
         }
@@ -228,7 +230,8 @@ pub fn update_readout_text(
             x.0 = if args.offline() { agents.summary().to_uppercase() } else { "CONNECTING TO SPHERED".into() };
         }
     }
-    if args.offline() || !(agents.is_changed() || live.is_changed()) {
+    // (it follows what changed; at the end of the boot it also says where things stand now)
+    if args.offline() || !(just_booted || agents.is_changed() || live.is_changed()) {
         return;
     }
     use crate::service::Link;
@@ -647,6 +650,8 @@ fn unpad(data: &[u8], w: u32, h: u32) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::live::Live;
+    use crate::service::Link;
 
     /// A fixed UTC moment, broken down the way `clock_strings` formats the local one.
     fn at(t: libc::time_t) -> (String, String) {
@@ -680,5 +685,40 @@ mod tests {
             }
         }
         panic!("the minute kept changing");
+    }
+
+    fn args() -> Args {
+        Args { cmd: None, bench: None, shot: None, record: None, record_frames: 180, frames: 120, depth: false, orbit: false, apps: false, work: false, swarm: false, code: false, git: false, open_app: None, icon: false, aa: "smaa".into(), offscreen: false, collapsed: false, focus_term: false, msaa: true, size: (1600, 1000), dt: 0.05, demo: false, live: false, moment: false, theme: None, motion: None }
+    }
+
+    /// The readout only follows what changed (`Agents` and `Live` are no longer marked changed every frame), so the
+    /// frame the boot ends in has to say where things stand: they may have settled while the boot ran.
+    #[test]
+    fn the_readout_says_where_things_stand_when_the_boot_ends() {
+        let mut app = App::new();
+        app.insert_resource(Agents::empty())
+            .insert_resource(Live::default())
+            .insert_resource(args())
+            .insert_resource(Sim { dt: 0.05, t: 0.0, boot_t: 0.5, fixed_dt: None, frozen: false })
+            .add_systems(Update, update_readout_text);
+        let main = app.world_mut().spawn((ReadoutMain, Text::new("STANDBY"), TextColor(Color::WHITE))).id();
+        let sub = app.world_mut().spawn((ReadoutSub, Text::new(""))).id();
+        let words = |app: &App| (app.world().get::<Text>(main).unwrap().0.clone(), app.world().get::<Text>(sub).unwrap().0.clone());
+        app.update();
+        assert_eq!(words(&app).0, "STARTING");
+        // the link comes up and an agent starts while the boot still runs
+        app.world_mut().resource_mut::<Live>().link = Some(Link::Connected);
+        let working = Agent { name: "a".into(), state: AState::Working, p: 0.5, step: "x".into(), rate: 0.0, figure: None, chip: None };
+        app.world_mut().resource_mut::<Agents>().set_roster(Roster::of(&[working]));
+        app.update();
+        assert_eq!(words(&app).0, "STARTING");
+        // the boot ends in a frame where nothing changed
+        app.world_mut().resource_mut::<Sim>().boot_t = 99.0;
+        app.update();
+        assert_eq!(words(&app), ("WORKING".to_string(), "1 WORKING · ALL CLEAR".to_string()));
+        // and from then on the readout follows the changes
+        app.world_mut().resource_mut::<Live>().link = Some(Link::Down("gone".into()));
+        app.update();
+        assert_eq!(words(&app).0, "OFFLINE");
     }
 }

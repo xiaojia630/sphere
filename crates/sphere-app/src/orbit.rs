@@ -304,7 +304,7 @@ pub fn update(
 ) {
     let dt = sim.dt;
     if orb.amount() > 0.01 {
-        let st = TileState { tabs: terms.tabs.len(), agents: agents.list.len(), working: agents.working(), needs: live.requests.len().max(agents.waiting()), tasks: live.titles.len(), docker: stats.get().docker.label(), docker_detail: stats.get().docker.detail() };
+        let st = TileState { tabs: terms.tabs.len(), agents: agents.total, working: agents.working(), needs: live.requests.len().max(agents.waiting()), tasks: live.titles.len(), docker: stats.get().docker.label(), docker_detail: stats.get().docker.detail() };
         for (t, mut tx) in &mut words {
             let (r, m, s) = tile_text(t.0, Some(&st));
             let want = match t.1 {
