@@ -215,25 +215,28 @@ pub fn setup(
 
 /// What a tile says (right label, headline, sub line), from what the machine and sphered report right now.
 /// `None` is the moment before the first look: nothing claimed yet.
-fn tile_text(i: usize, now: Option<&TileState>) -> (&'static str, String, String) {
+fn tile_text(i: usize, now: Option<&TileState>) -> (String, String, String) {
     let tasks = now.map(|n| n.tasks);
     match i {
-        0 => ("live", now.map(|n| format!("{} tab{}", n.tabs, if n.tabs == 1 { "" } else { "s" })).unwrap_or_else(|| "Your shell".into()), "Cmd T new · Cmd 1-9 switch".into()),
+        0 => ("live".into(), now.map(|n| format!("{} tab{}", n.tabs, if n.tabs == 1 { "" } else { "s" })).unwrap_or_else(|| "Your shell".into()), "Cmd T new · Cmd 1-9 switch".into()),
         1 => match now {
-            Some(n) if n.agents == 0 => ("live", "No agents yet".into(), "Start one with /".into()),
-            Some(n) => ("live", format!("{} working", n.working), if n.needs > 0 { format!("{} need{} you · Enter to answer", n.needs, if n.needs == 1 { "s" } else { "" }) } else { "Start one with / · answer with Enter".into() }),
-            None => ("live", "Agents".into(), "Start one with /".into()),
+            Some(n) if n.agents == 0 => ("live".into(), "No agents yet".into(), "Start one with /".into()),
+            Some(n) => ("live".into(), format!("{} working", n.working), if n.needs > 0 { format!("{} need{} you · Enter to answer", n.needs, if n.needs == 1 { "s" } else { "" }) } else { "Start one with / · answer with Enter".into() }),
+            None => ("live".into(), "Agents".into(), "Start one with /".into()),
         },
-        2 => ("live", "Zed and diffs".into(), match tasks {
+        2 => ("live".into(), "Zed and diffs".into(), match tasks {
             Some(0) => "No tasks yet · review, merge, PR".into(),
             Some(n) => format!("{n} task{} · review, merge, PR", if n == 1 { "" } else { "s" }),
             None => "Review, checkpoints, merge, PR".into(),
         }),
-        3 => ("live", "Branches and PRs".into(), "gitui and your gh login".into()),
-        4 => ("live", now.map(|n| n.docker.clone()).unwrap_or_else(|| "Docker".into()), now.map(|n| n.docker_detail.clone()).unwrap_or_else(|| "Start, stop, restart, logs".into())),
-        5 => ("live", "Ports and logs".into(), "What's listening, and its output".into()),
-        6 => ("live", "Files".into(), "Browse, preview, quick edit".into()),
-        _ => ("soon", "Music".into(), "Not built yet".into()),
+        3 => match now.and_then(|n| n.prs.as_ref()) {
+            Some((open, line)) => (format!("{open} open"), "Branches and PRs".into(), line.clone()),
+            None => ("live".into(), "Branches and PRs".into(), "Status, branches and pull requests".into()),
+        },
+        4 => ("live".into(), now.map(|n| n.docker.clone()).unwrap_or_else(|| "Docker".into()), now.map(|n| n.docker_detail.clone()).unwrap_or_else(|| "Start, stop, restart, logs".into())),
+        5 => ("live".into(), "Ports and logs".into(), "What's listening, and its output".into()),
+        6 => ("live".into(), "Files".into(), "Browse, preview, quick edit".into()),
+        _ => ("soon".into(), "Music".into(), "Not built yet".into()),
     }
 }
 
@@ -245,6 +248,7 @@ struct TileState {
     tasks: usize,
     docker: String,
     docker_detail: String,
+    prs: Option<(usize, String)>,
 }
 
 fn build_tile(c: &mut Commands, root: Entity, f: &UiFonts, i: usize, name: &str, live: bool) {
@@ -308,7 +312,7 @@ pub fn update(
 ) {
     let dt = sim.dt;
     if orb.amount() > 0.01 {
-        let st = TileState { tabs: terms.tabs.len(), agents: agents.total, working: agents.working(), needs: live.requests.len().max(agents.waiting()), tasks: live.titles.len(), docker: stats.get().docker.label(), docker_detail: stats.get().docker.detail() };
+        let st = TileState { tabs: terms.tabs.len(), agents: agents.total, working: agents.working(), needs: live.requests.len().max(agents.waiting()), tasks: live.titles.len(), docker: stats.get().docker.label(), docker_detail: stats.get().docker.detail(), prs: crate::prs::SUMMARY.lock().ok().and_then(|g| g.clone()) };
         for (t, mut tx) in &mut words {
             let (r, m, s) = tile_text(t.0, Some(&st));
             let want = match t.1 {

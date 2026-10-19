@@ -26,6 +26,7 @@ mod mouse;
 mod orbit;
 mod opsdata;
 mod ports;
+mod prs;
 mod panel;
 mod service;
 mod sound;
