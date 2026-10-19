@@ -620,7 +620,7 @@ fn run_tests(app: &mut CodeApp, wd: String, toasts: &mut crate::live::Toasts) {
 #[allow(clippy::too_many_arguments)]
 pub fn update(sim: Res<crate::core::Sim>, mut atlases: ResMut<AppAtlases>, mut app: ResMut<CodeApp>, mut ctl: ResMut<CoreCtl>, svc: Res<Service>, mut toasts: ResMut<crate::live::Toasts>, mut sound: ResMut<crate::sound::Sound>) {
     app.amt.t = if app.open { 1.0 } else { 0.0 };
-    app.amt.step(sim.dt);
+    app.amt.step(crate::motion::dt(crate::motion::Pace::Big, sim.dt));
     ctl.app = clamp(app.amt.x, 0.0, 1.0);
     atlases.want(0, app.open || app.amt.x > 0.001);
     if let Some((_, until)) = app.armed {

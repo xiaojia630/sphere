@@ -129,7 +129,7 @@ pub fn place_app(app: u8, amt: f32, hide: impl Fn(u8) -> bool, q: &mut Query<(&m
 /// Opening and closing: the spring and the core's corner.
 pub fn step_open(open: bool, amt: &mut Spring, dt: f32, ctl: &mut crate::core::CoreCtl) {
     amt.t = if open { 1.0 } else { 0.0 };
-    amt.step(dt);
+    amt.step(crate::motion::dt(crate::motion::Pace::Big, dt));
     ctl.app = ctl.app.max(amt.x.clamp(0.0, 1.0));
 }
 

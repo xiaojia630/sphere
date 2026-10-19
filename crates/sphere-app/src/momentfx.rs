@@ -163,7 +163,8 @@ pub fn flows(
     mut say: ResMut<crate::homepanels::Say>,
     mut efx: ResMut<crate::fx::Fx>,
 ) {
-    let dt = sim.dt;
+    // the moment's whole sequence (rise, Send's fold and streak, Later, all done) runs on the Big clock
+    let dt = crate::motion::dt(crate::motion::Pace::Big, sim.dt);
     fx.t += dt;
     let on = m.shown || m.holding.is_some() || m.all_done.is_some();
     fx.amt.t = if on { 1.0 } else { 0.0 };
@@ -171,7 +172,7 @@ pub fn flows(
     fx.halo.t = if on { 1.0 } else { 0.0 };
     fx.halo.step(dt);
     fx.flare *= (-1.1 * dt).exp();
-    fx.orb += TAU / 50.0 * dt;
+    fx.orb += TAU / 50.0 * sim.dt;
     ctl.moment = clamp(fx.amt.x, 0.0, 1.0);
     ctl.flare = fx.flare;
     // a card rose: the first one flares the core; each one is read out
@@ -197,8 +198,9 @@ pub fn flows(
         }
     }
     // Send: fold at .55 s, streak at 1.01, ok at 1.17, the next one (or the end) at 1.79
+    let skip = std::mem::take(&mut m.skip);
     if let Some(t0) = m.fold {
-        let t = t0 + dt;
+        let t = if skip { t0.max(1.79) + dt } else { t0 + dt };
         m.fold = Some(t);
         if t0 < 0.55 && t >= 0.55 {
             sound.play_with("collapse", 0.45, 0.0);
@@ -226,7 +228,7 @@ pub fn flows(
     }
     // Later: dims, then flies into orbit; the next rises
     if let Some(t0) = m.later {
-        let t = t0 + dt;
+        let t = if skip { t0.max(0.45) + dt } else { t0 + dt };
         m.later = Some(t);
         if t0 == 0.0 {
             sound.play_with("discard", 0.5, 0.0);

@@ -544,7 +544,7 @@ pub fn keys(
 #[allow(clippy::too_many_arguments)]
 pub fn update(sim: Res<crate::core::Sim>, mut atlases: ResMut<AppAtlases>, mut app: ResMut<GitApp>, mut ctl: ResMut<CoreCtl>, svc: Res<Service>, mut bar: ResMut<CmdBar>, mut toasts: ResMut<crate::live::Toasts>, mut sound: ResMut<crate::sound::Sound>) {
     app.amt.t = if app.open { 1.0 } else { 0.0 };
-    app.amt.step(sim.dt);
+    app.amt.step(crate::motion::dt(crate::motion::Pace::Big, sim.dt));
     ctl.app = ctl.app.max(clamp(app.amt.x, 0.0, 1.0));
     atlases.want(1, app.open || app.amt.x > 0.001);
     // what you typed in the bar for us (it waits while an action runs, so it isn't lost)

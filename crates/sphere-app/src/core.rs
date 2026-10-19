@@ -912,7 +912,7 @@ pub fn update_core(
             tr.scale = tr.scale.lerp(Vec3::splat(0.105), a);
         }
     }
-    let k = 1.0 - (-3.2 * dt).exp();
+    let k = 1.0 - (-3.2 * crate::motion::dt(crate::motion::Pace::Ui, dt)).exp();
     if ctl.auto_orient {
         ctl.q_user = ctl.q_user.slerp(tgt, k);
     } else if ctl.omega.length() > 1e-4 {
@@ -922,7 +922,7 @@ pub fn update_core(
         ctl.omega *= (-2.4 * dt).exp();
     }
     ctl.flash *= (-3.2 * dt).exp();
-    ctl.collapse_t += dt;
+    ctl.collapse_t += crate::motion::dt(crate::motion::Pace::Ui, dt);
     let (px, py) = ctl.pointer.map(|p| (p.x - 0.5, p.y - 0.5)).unwrap_or((0.0, 0.0));
     let qp = Quat::from_euler(EulerRot::YXZ, px * 7.0 * DEG, py * 5.0 * DEG, 0.0);
     let kp = 1.0 - (-3.0 * dt).exp();
@@ -951,9 +951,10 @@ pub fn update_core(
     let o = ctl.orb;
     ctl.spacing.t = lerp(ctl.spacing.t, 30.0, o);
     ctl.depth.t = lerp(ctl.depth.t, 12.0, o);
-    ctl.spacing.step(dt);
-    ctl.depth.step(dt);
-    ctl.zoom.step(dt);
+    let udt = crate::motion::dt(crate::motion::Pace::Ui, dt);
+    ctl.spacing.step(udt);
+    ctl.depth.step(udt);
+    ctl.zoom.step(udt);
     let spin_target = ctl.work_spin;
     ctl.spin_mul = lerp(ctl.spin_mul, spin_target, 1.0 - (-3.0 * dt).exp());
     let spin_mul = ctl.spin_mul;
@@ -982,10 +983,10 @@ pub fn update_core(
     let mut all_landed = true;
     for (i, d) in decks.list.iter_mut().enumerate() {
         d.hi.t = 0.0;
-        d.hi.step(dt);
+        d.hi.step(udt);
         // Orbit: the outer rings fold around the core and precess
         d.f.t = if orbit && d.fold_e.is_some() { 1.0 } else { 0.0 };
-        d.f.step(dt);
+        d.f.step(udt);
         d.prec_a += dt * d.f.x;
         let qf = match d.fold_e {
             Some(e) => {
@@ -1012,7 +1013,7 @@ pub fn update_core(
                     d.c.c = 2.0 * z * f32::sqrt(k);
                 }
             }
-            d.c.step(dt);
+            d.c.step(udt);
             c = d.c.x.max(0.0);
             if collapsed && c < 0.9 {
                 all_landed = false;
@@ -1032,7 +1033,7 @@ pub fn update_core(
             tr.translation.z = lerp(z, 2.0 * spacing, clamp(c, 0.0, 1.0));
         }
         // a single ring folded onto its own radius
-        d.g.step(dt);
+        d.g.step(udt);
         d.u_pinch = clamp(d.g.x, 0.0, 1.0);
         let smooth = |a: f32, b: f32, x: f32| {
             let t = clamp((x - a) / (b - a), 0.0, 1.0);

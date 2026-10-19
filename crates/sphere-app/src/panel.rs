@@ -584,7 +584,7 @@ pub fn update_panels(
                 p.py.set(CORE_Y);
                 p.pz.set(-140.0);
             }
-            p.rise_t += dt;
+            p.rise_t += crate::motion::dt(crate::motion::Pace::Big, dt);
             let loose = p.rise_t < 1.5;
             (p.sc.k, p.sc.c) = if loose { (105.0, 12.5) } else { (120.0, 19.0) };
             (p.pz.k, p.pz.c) = if loose { (88.0, 13.0) } else { (60.0, 14.0) };
@@ -643,13 +643,16 @@ pub fn update_panels(
         p.ry.t = try_;
         p.sc.t = tsc;
         p.op.t = if icon { 0.0 } else { top };
-        p.px.step(dt);
-        p.py.step(dt);
-        p.pz.step(dt);
-        p.rx.step(dt);
-        p.ry.step(dt);
-        p.sc.step(dt);
-        p.op.step(dt);
+        // an app's panes and the moment card move with the big transitions, the rest of the HUD on the UI clock
+        let pace = if p.work.is_some() || p.id == PanelId::Moment { crate::motion::Pace::Big } else { crate::motion::Pace::Ui };
+        let sdt = crate::motion::dt(pace, dt);
+        p.px.step(sdt);
+        p.py.step(sdt);
+        p.pz.step(sdt);
+        p.rx.step(sdt);
+        p.ry.step(sdt);
+        p.sc.step(sdt);
+        p.op.step(sdt);
         tr.translation = Vec3::new(p.px.x, p.py.x, p.pz.x);
         tr.rotation = Quat::from_euler(EulerRot::XYZ, p.rx.x, p.ry.x, 0.0);
         tr.scale = Vec3::splat(p.sc.x.max(0.001));
@@ -671,7 +674,7 @@ pub fn update_panels(
         if p.id == PanelId::Moment && !moment.shown {
             p.draw_t = 0.0;
         } else if shown {
-            p.draw_t += dt;
+            p.draw_t += sdt;
         }
         let draw = if sim.frozen { 1.0 } else { bezier(0.65, 0.05, 0.25, 1.0, p.draw_t / 1.15) };
         if mats.get(&p.material).is_some_and(|m| m.u.size.w != op || m.u.q.x != draw) {

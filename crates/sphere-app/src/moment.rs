@@ -49,6 +49,8 @@ pub struct Moment {
     pub all_done: Option<f32>,
     /// the streak's start: the card was here when it folded
     pub streak: Option<f32>,
+    /// a key came while the answered card was leaving: finish its exit now and bring the next one up
+    pub skip: bool,
 }
 
 /// The card's UI root (inside its panel texture).
@@ -94,6 +96,9 @@ pub fn update(live: Res<Live>, mut m: ResMut<Moment>, mut seen: Local<u64>, mut 
 pub fn keys(mut ev: MessageReader<KeyboardInput>, focus: Res<Focus>, mut m: ResMut<Moment>, live: Res<Live>, svc: Res<Service>, mut sound: ResMut<crate::sound::Sound>, mut clicks: ResMut<AppClicks>) {
     // clicks on the card's buttons and option rows; they do what the same key does, and only on a card that is up and waiting
     let clicked = clicks.take(CLICK_APP);
+    if !clicked.is_empty() && (m.fold.is_some() || m.later.is_some()) {
+        m.skip = true;
+    }
     if m.shown && m.holding.is_none() && m.fold.is_none() && m.later.is_none() && m.all_done.is_none() {
         for c in clicked {
             let w = waiting(&live, &m);
@@ -138,6 +143,12 @@ pub fn keys(mut ev: MessageReader<KeyboardInput>, focus: Res<Focus>, mut m: ResM
     }
     for e in ev.read() {
         if e.state != ButtonState::Pressed || !m.shown || focus.cmd || focus.terminal {
+            continue;
+        }
+        if m.fold.is_some() || m.later.is_some() {
+            // the answered card is still leaving: don't wait for it, and don't apply the key to the next request
+            // before it is on screen
+            m.skip = true;
             continue;
         }
         let w = waiting(&live, &m);

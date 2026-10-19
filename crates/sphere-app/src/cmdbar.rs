@@ -243,6 +243,15 @@ fn home_command(t: &str, acts: &mut crate::home::Acts, open: &mut crate::apps::O
     use crate::theme::ThemeId;
     let l = t.to_ascii_lowercase();
     let starts = |ws: &[&str]| ws.iter().any(|w| l == *w || l.starts_with(&format!("{w} ")));
+    if starts(&["motion", "animation", "animations"]) {
+        // "motion fast", "motion cinematic"; "motion" alone switches
+        use crate::motion::{self, Motion};
+        let rest = l.split_once(' ').map(|(_, r)| r).unwrap_or("");
+        let m = Motion::from_key(rest).unwrap_or(if motion::get() == Motion::Fast { Motion::Cinematic } else { Motion::Fast });
+        motion::set(m);
+        toasts.push(format!("Motion · {}", if m == Motion::Fast { "Fast" } else { "Cinematic" }));
+        return true;
+    }
     if starts(&["system", "top", "activity", "processes"]) {
         open.system();
         return true;

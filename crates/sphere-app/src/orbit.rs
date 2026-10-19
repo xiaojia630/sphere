@@ -27,7 +27,7 @@ pub struct Orb {
     pub open: bool,
     pub amt: Spring,
     pub a: Spring,
-    em: [Spring; 8],
+    pub(crate) em: [Spring; 8],
     kick: [Spring; 8],
     /// seconds since the last open/close (for the fan-out stagger)
     since: f32,
@@ -317,7 +317,8 @@ pub fn update(
             }
         }
     }
-    orb.since += dt;
+    let dt = crate::motion::dt(crate::motion::Pace::Big, dt);
+    orb.since += sim.dt;
     orb.amt.t = if orb.open { 1.0 } else { 0.0 };
     orb.amt.step(dt);
     if !orb.dragging {
@@ -330,6 +331,7 @@ pub fn update(
     for (k, off) in FAN.iter().enumerate() {
         let i = (front + off) % 8;
         let (tgt, delay) = if orb.open { (1.0, 0.16 + k as f32 * 0.075) } else { (0.0, (7 - k) as f32 * 0.035) };
+        let delay = crate::motion::stagger(delay);
         if orb.since >= delay && orb.em[i].t != tgt {
             orb.em[i].t = tgt;
             if tgt > 0.5 {

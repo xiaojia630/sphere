@@ -357,8 +357,9 @@ pub fn draw_say(time: Res<Time<Real>>, mut say: ResMut<Say>, mut q: Query<(&mut 
         say.age += dt;
         say.acc += dt;
         let n = say.text.chars().count();
-        while say.acc >= 0.03 && say.shown < n {
-            say.acc -= 0.03;
+        let per = crate::motion::delay(crate::motion::Pace::Big, 0.03);
+        while say.acc >= per && say.shown < n {
+            say.acc -= per;
             say.shown += 1;
             changed = true;
         }
