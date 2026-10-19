@@ -70,15 +70,20 @@ impl Toasts {
     }
 }
 
+/// A finished task that changed no files: a question answered, nothing to merge.
+pub fn answered(t: &TaskView) -> bool { t.state == TaskState::Done && t.files.is_empty() }
+
 fn row(t: &TaskView, merged: bool) -> Agent {
     let (state, chip) = match t.state {
         TaskState::Queued | TaskState::Working => (AState::Working, None),
         TaskState::NeedsYou => (AState::Needs, None),
-        TaskState::Done => (AState::Done, None),
+        TaskState::Done => (AState::Done, answered(t).then_some("ANSWERED")),
         TaskState::Failed => (AState::Failed, Some("FAILED")),
         TaskState::Stopped => (AState::Failed, Some("STOPPED")),
     };
-    let step = if merged && t.state == TaskState::Done {
+    let step = if answered(t) {
+        t.last_say.lines().next().unwrap_or("").to_string()
+    } else if merged && t.state == TaskState::Done {
         format!("Merged · {}", t.branch.as_deref().unwrap_or(""))
     } else if t.status.is_empty() {
         t.last_say.lines().next().unwrap_or("").to_string()
@@ -372,7 +377,10 @@ mod tests {
 
     #[test]
     fn a_merged_agent_reads_merged() {
-        let tasks = vec![task("t1", TaskState::Done, "2026-10-19T00:00:00Z"), task("t2", TaskState::Done, "2026-10-19T00:01:00Z")];
+        let mut tasks = vec![task("t1", TaskState::Done, "2026-10-19T00:00:00Z"), task("t2", TaskState::Done, "2026-10-19T00:01:00Z")];
+        for t in tasks.iter_mut() {
+            t.files = vec![sphere_proto::FileStat { path: "a.rs".into(), added: 1, removed: 0 }];
+        }
         let merged: HashSet<String> = ["t1".to_string()].into();
         let rows = pick(&tasks, &merged, NOW);
         let step = |n: &str| rows.iter().find(|a| a.name == n).unwrap().step.clone();
@@ -380,5 +388,18 @@ mod tests {
         assert_eq!(step("Task t2"), "Done: finished");
         assert_eq!(crate::appframe::finished(&tasks[0], &merged), "Merged");
         assert_eq!(crate::appframe::finished(&tasks[1], &merged), "Finished");
+    }
+
+    #[test]
+    fn a_done_task_without_files_reads_answered_with_the_answer_as_its_step() {
+        let mut t = task("q1", TaskState::Done, "2026-10-19T00:00:00Z");
+        t.last_say = "It is slow because of the N+1 query.\nMore detail.".into();
+        assert!(answered(&t));
+        let a = row(&t, false);
+        assert_eq!((a.chip, a.step.as_str()), (Some("ANSWERED"), "It is slow because of the N+1 query."));
+        t.files = vec![sphere_proto::FileStat { path: "a.rs".into(), added: 1, removed: 0 }];
+        assert!(!answered(&t));
+        assert_eq!(row(&t, false).chip, None);
+        assert!(!answered(&task("q2", TaskState::Working, "2026-10-19T00:00:00Z")));
     }
 }

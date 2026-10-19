@@ -552,15 +552,14 @@ impl Manager {
         let workdir: PathBuf = match &view.workdir {
             Some(w) => PathBuf::from(w),
             None => {
-                let (wt, repo, id, title, in_place) = (
+                let (wt, repo, id, in_place) = (
                     self.cfg.worktrees_dir(),
                     PathBuf::from(&view.repo),
                     task.to_string(),
-                    view.title.clone(),
                     view.in_place,
                 );
                 let ws = tokio::task::spawn_blocking(move || {
-                    workspace::prepare(&wt, &repo, &id, &title, in_place)
+                    workspace::prepare(&wt, &repo, &id, in_place)
                 })
                 .await??;
                 self.hub.publish(
@@ -871,19 +870,48 @@ impl Manager {
     }
 
     fn refresh_files(self: &Arc<Self>, task: &str) {
-        let Some((Some(workdir), Some(base))) = self
-            .hub
-            .view(|v| v.task(task).map(|t| (t.workdir.clone(), t.base.clone())))
-        else {
+        let Some((Some(workdir), Some(base), repo, title, branchless)) = self.hub.view(|v| {
+            v.task(task).map(|t| {
+                (
+                    t.workdir.clone(),
+                    t.base.clone(),
+                    t.repo.clone(),
+                    t.title.clone(),
+                    !t.in_place && t.branch.is_none(),
+                )
+            })
+        }) else {
             return;
         };
         let (this, task) = (self.clone(), task.to_string());
         tokio::spawn(async move {
-            let files = tokio::task::spawn_blocking(move || {
-                workspace::files_touched(Path::new(&workdir), &base)
+            let (wd, b) = (workdir.clone(), base.clone());
+            let res = tokio::task::spawn_blocking(move || {
+                let files = workspace::files_touched(Path::new(&wd), &b)?;
+                // the first change gives a detached task worktree its branch
+                let branch = if branchless && !files.is_empty() {
+                    Some(workspace::ensure_branch(
+                        Path::new(&wd),
+                        Path::new(&repo),
+                        &title,
+                    )?)
+                } else {
+                    None
+                };
+                anyhow::Ok((files, branch))
             })
             .await;
-            if let Ok(Ok(files)) = files {
+            if let Ok(Ok((files, branch))) = res {
+                if let Some(name) = branch {
+                    let _ = this.hub.publish(
+                        &task,
+                        EventBody::WorkspaceReady {
+                            workdir,
+                            branch: Some(name),
+                            base,
+                        },
+                    );
+                }
                 let same = this
                     .hub
                     .view(|v| v.task(&task).map(|t| t.files == files))

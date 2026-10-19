@@ -356,7 +356,7 @@ async fn a_worktree_copies_files_runs_setup_and_reports_touched_files() {
         workdir.ends_with(&task) || workdir.contains(&task),
         "{workdir}"
     );
-    assert_eq!(branch.as_deref(), Some("sphere/fix-the-parser"));
+    assert_eq!(branch, None, "no branch until files change");
     assert_eq!(
         std::fs::read_to_string(format!("{workdir}/.env")).unwrap(),
         "SECRET=1\n"
@@ -374,6 +374,19 @@ async fn a_worktree_copies_files_runs_setup_and_reports_touched_files() {
         _ => None,
     });
     let files = files.expect("files touched");
+    let branches: Vec<Option<String>> = w
+        .log
+        .iter()
+        .filter_map(|e| match &e.body {
+            EventBody::WorkspaceReady { branch, .. } => Some(branch.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        branches.last().cloned().flatten().as_deref(),
+        Some("sphere/fix-the-parser"),
+        "{branches:?}"
+    );
     let names: Vec<String> = files.iter().map(|f| f.path.clone()).collect();
     assert!(
         names.contains(&"notes.txt".to_string()) && names.contains(&"README.md".to_string()),

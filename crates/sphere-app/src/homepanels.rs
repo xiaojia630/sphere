@@ -264,11 +264,16 @@ pub fn update(
     args: Res<crate::Args>,
     sound: Res<crate::sound::Sound>,
     mut acc: Local<f32>,
+    mut last_voice: Local<Option<crate::sound::VoiceState>>,
     mut texts: ParamSet<(Query<(&SysRow, &mut Text, &mut TextColor)>, Query<(&MeterValue, &mut Text)>)>,
     mut segs: Query<(&Meter, &mut BackgroundColor)>,
 ) {
     *acc += time.delta_secs();
-    if *acc < 1.2 {
+    // the Voice row changes the moment the voice does, the rest every 1.2 s
+    let vs = sound.voice_state();
+    let voice_changed = *last_voice != Some(vs);
+    *last_voice = Some(vs);
+    if *acc < 1.2 && !voice_changed {
         return;
     }
     *acc = 0.0;
@@ -283,8 +288,10 @@ pub fn update(
             "Agents" => (format!("{} WORKING", agents.working()), role_color(Role::Hot)),
             "Needs you" => (if needs == 0 { "NONE".to_string() } else { format!("{needs} WAITING") }, if needs == 0 { role_color(Role::Hot) } else { role_color(Role::Acc) }),
             "Containers" => (s.docker.label(), if matches!(s.docker, crate::sysstats::Docker::Off) { role_color(Role::Dim) } else { role_color(Role::Hot) }),
-            "Voice" => (if sound.muted { "MUTED" } else { "SPEAKS" }.to_string(), if sound.muted { role_color(Role::Dim) } else { role_color(Role::Hot) }),
-            "Response" => (rtt.map(|ms| if ms < 1.0 { "<1 MS".to_string() } else if ms < 1000.0 { format!("{ms:.0} MS") } else { format!("{:.1} S", ms / 1000.0) }).unwrap_or_else(|| "—".into()), role_color(Role::Hot)),
+            "Voice" => {
+                (vs.row().to_string(), if vs == crate::sound::VoiceState::Muted { role_color(Role::Dim) } else { role_color(Role::Hot) })
+            }
+            "Response" => (rtt.map(|ms| crate::service::fmt_rtt(ms).to_uppercase()).unwrap_or_else(|| "—".into()), role_color(Role::Hot)),
             _ => continue,
         };
         if t.0 != v {
