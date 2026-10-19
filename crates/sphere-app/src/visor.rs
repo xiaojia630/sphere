@@ -26,7 +26,16 @@ pub enum DockBtn {
     Reset,
     Sound,
     Apps,
+    /// the swarm dock: orbit tilt, and every agent's step track
+    Tilt(crate::swarm::Tilt),
+    Tracks,
 }
+
+/// The View group (hidden while the swarm is open) and the swarm's Tilt group (shown instead).
+#[derive(Component)]
+pub struct ViewGroup;
+#[derive(Component)]
+pub struct TiltGroup;
 
 #[derive(Component)]
 pub struct BtnLabel;
@@ -96,12 +105,20 @@ pub fn setup(mut commands: Commands, f: Res<UiFonts>, dock: Query<Entity, With<D
     let Ok(dock) = dock.single() else { return };
     let ctrl = c.spawn(Node { flex_direction: FlexDirection::Row, flex_wrap: FlexWrap::Wrap, align_items: AlignItems::Center, justify_content: JustifyContent::Center, column_gap: px(18), row_gap: px(8), ..default() }).id();
     // View
-    let view = c.spawn(Node { flex_direction: FlexDirection::Row, align_items: AlignItems::Center, column_gap: px(4), ..default() }).id();
+    let view = c.spawn((ViewGroup, Node { flex_direction: FlexDirection::Row, align_items: AlignItems::Center, column_gap: px(4), ..default() })).id();
     let vl = c.spawn((Text::new("VIEW"), font(&f.ui600, 9.5, 3.8), TextColor(dim), LineHeight::Px(9.5), Node { margin: UiRect { right: px(6), ..default() }, ..default() })).id();
     c.entity(view).add_child(vl);
     for (l, b) in [("Flat", DockBtn::Mode(Mode::Flat)), ("Depth", DockBtn::Mode(Mode::Depth)), ("Orbit", DockBtn::Mode(Mode::Orbit)), ("Collapse", DockBtn::Collapse)] {
         let e = group_btn(c, &f, l, b);
         c.entity(view).add_child(e);
+    }
+    // Tilt (the swarm's dock group, in place of View while the swarm is open)
+    let tilt = c.spawn((TiltGroup, Node { display: Display::None, flex_direction: FlexDirection::Row, align_items: AlignItems::Center, column_gap: px(4), ..default() })).id();
+    let tl = c.spawn((Text::new("TILT"), font(&f.ui600, 9.5, 3.8), TextColor(dim), LineHeight::Px(9.5), Node { margin: UiRect { right: px(6), ..default() }, ..default() })).id();
+    c.entity(tilt).add_child(tl);
+    for (l, b) in [("Low", DockBtn::Tilt(crate::swarm::Tilt::Low)), ("Mid", DockBtn::Tilt(crate::swarm::Tilt::Mid)), ("High", DockBtn::Tilt(crate::swarm::Tilt::High)), ("Tracks", DockBtn::Tracks)] {
+        let e = group_btn(c, &f, l, b);
+        c.entity(tilt).add_child(e);
     }
     // Theme: swatch, name, caret; the menu pops above
     let tw = c.spawn(Node { flex_direction: FlexDirection::Row, ..default() }).id();
@@ -157,7 +174,7 @@ pub fn setup(mut commands: Commands, f: Res<UiFonts>, dock: Query<Entity, With<D
         let e = group_btn(c, &f, l, b);
         c.entity(tools).add_child(e);
     }
-    c.entity(ctrl).add_children(&[view, tw, tools]);
+    c.entity(ctrl).add_children(&[view, tilt, tw, tools]);
     c.entity(dock).add_child(ctrl);
 
     // corner brackets: 56 px, top 14, bottom 38 (above the ticker), sides 14
@@ -217,6 +234,8 @@ pub fn buttons(
     ctl: Res<CoreCtl>,
     mut pop: Query<&mut Visibility, With<ThemePop>>,
     mut orb: ResMut<crate::orbit::Orb>,
+    mut swarm: ResMut<crate::swarm::Swarm>,
+    mut toasts: ResMut<Toasts>,
 ) {
     for (i, b) in &q {
         match i {
@@ -237,6 +256,8 @@ pub fn buttons(
                     DockBtn::Reset => acts.0.push(Act::Reset),
                     DockBtn::Sound => acts.0.push(Act::Mute),
                     DockBtn::Apps => orb.toggle(&mut sound),
+                    DockBtn::Tilt(t) => crate::swarm::view::set_tilt(&mut swarm, t, &mut sound, &mut toasts),
+                    DockBtn::Tracks => crate::swarm::view::toggle_tracks(&mut swarm, &mut sound, &mut toasts),
                 }
                 if !matches!(b, DockBtn::ThemeMenu | DockBtn::Theme(_)) {
                     sound.play_q("click", 90);
@@ -256,6 +277,7 @@ pub fn draw_buttons(
     ctl: Res<CoreCtl>,
     theme: Res<Theme>,
     sound: Res<crate::sound::Sound>,
+    swarm: Res<crate::swarm::Swarm>,
     mut btns: Query<(&DockBtn, &Interaction, &mut BackgroundColor, &mut BorderColor, &Children)>,
     mut labels: Query<(&mut Text, &mut TextColor), With<BtnLabel>>,
 ) {
@@ -263,7 +285,7 @@ pub fn draw_buttons(
     let fill = crate::theme::now(Role::Fill);
     let hot = crate::theme::now(Role::Hot);
     for (b, i, mut bg, mut bd, kids) in &mut btns {
-        let pressed = matches!(b, DockBtn::Mode(m) if *m == ctl.mode) || (*b == DockBtn::Apps && ctl.orb > 0.5);
+        let pressed = matches!(b, DockBtn::Mode(m) if *m == ctl.mode) || (*b == DockBtn::Apps && ctl.orb > 0.5) || matches!(b, DockBtn::Tilt(t) if *t == swarm.tilt) || (*b == DockBtn::Tracks && swarm.tracks);
         let hover = *i == Interaction::Hovered;
         bg.set_if_neq(BackgroundColor(match b {
             DockBtn::Theme(_) if hover => with_alpha(line, 0.1),
@@ -400,5 +422,17 @@ pub fn toasts(
                 c.0 = crate::panel::with_alpha(role_color(Role::Hot), o);
             }
         }
+    }
+}
+
+/// While the swarm is open the dock shows the Tilt group in place of View.
+#[allow(clippy::type_complexity)]
+pub fn dock_groups(swarm: Res<crate::swarm::Swarm>, mut groups: ParamSet<(Query<&mut Node, With<ViewGroup>>, Query<&mut Node, With<TiltGroup>>)>) {
+    let (v, t) = if swarm.open { (Display::None, Display::Flex) } else { (Display::Flex, Display::None) };
+    for mut n in &mut groups.p0() {
+        n.set_if_neq(Node { display: v, ..n.clone() });
+    }
+    for mut n in &mut groups.p1() {
+        n.set_if_neq(Node { display: t, ..n.clone() });
     }
 }

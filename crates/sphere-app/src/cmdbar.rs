@@ -163,7 +163,7 @@ pub fn keys(
     mut toasts: ResMut<Toasts>,
     mut terms: ResMut<crate::term::Terms>,
     moment: Res<crate::moment::Moment>,
-    (mut acts, mut open, mut say, mut sound, mut working): (ResMut<crate::home::Acts>, ResMut<crate::apps::Open>, ResMut<crate::homepanels::Say>, ResMut<crate::sound::Sound>, ResMut<crate::working::Working>),
+    (mut acts, mut open, mut say, mut sound, mut working, mut swarm): (ResMut<crate::home::Acts>, ResMut<crate::apps::Open>, ResMut<crate::homepanels::Say>, ResMut<crate::sound::Sound>, ResMut<crate::working::Working>, ResMut<crate::swarm::Swarm>),
 ) {
     let cmd = super_down(&keys);
     for e in ev.read() {
@@ -199,7 +199,7 @@ pub fn keys(
                         other if !t.is_empty() || matches!(other, BarTarget::Commit(_, _, true)) => bar.out = Some((other, t.to_string())),
                         _ => {}
                     }
-                } else if !home_command(t, &mut acts, &mut open, &mut toasts) {
+                } else if !home_command(t, &mut acts, &mut open, &mut toasts, &mut swarm, &mut sound) {
                     run(t, &svc, &mut toasts, &mut terms, &mut focus, &mut say, &mut sound, &mut working);
                 }
             }
@@ -237,7 +237,7 @@ fn paste() -> Option<String> {
 }
 
 /// The prototype's typed commands: views, collapse, themes, fit, reset, opening apps. True when handled.
-fn home_command(t: &str, acts: &mut crate::home::Acts, open: &mut crate::apps::Open, toasts: &mut Toasts) -> bool {
+pub(crate) fn home_command(t: &str, acts: &mut crate::home::Acts, open: &mut crate::apps::Open, toasts: &mut Toasts, swarm: &mut crate::swarm::Swarm, sound: &mut crate::sound::Sound) -> bool {
     use crate::core::Mode;
     use crate::home::Act;
     use crate::theme::ThemeId;
@@ -251,6 +251,22 @@ fn home_command(t: &str, acts: &mut crate::home::Acts, open: &mut crate::apps::O
         motion::set(m);
         toasts.push(format!("Motion · {}", if m == Motion::Fast { "Fast" } else { "Cinematic" }));
         return true;
+    }
+    if starts(&["swarm", "agents swarm", "agent swarm", "all agents"]) {
+        open.swarm = true;
+        return true;
+    }
+    if swarm.open {
+        use crate::swarm::Tilt;
+        let tilt = if starts(&["low"]) { Some(Tilt::Low) } else if starts(&["mid"]) { Some(Tilt::Mid) } else if starts(&["high"]) { Some(Tilt::High) } else { None };
+        if let Some(t) = tilt {
+            crate::swarm::view::set_tilt(swarm, t, sound, toasts);
+            return true;
+        }
+        if starts(&["track", "tracks"]) {
+            crate::swarm::view::toggle_tracks(swarm, sound, toasts);
+            return true;
+        }
     }
     if starts(&["system", "top", "activity", "processes"]) {
         open.system();

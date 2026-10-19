@@ -548,13 +548,14 @@ pub fn update_panels(
                 trx *= 1.0 - big;
                 try_ *= 1.0 - big;
             }
-        } else if ctl.work.max(ctl.app) > 0.0 && p.id != PanelId::Brand && p.id != PanelId::Moment {
-            // the Working view or an app: the home draws back
+        } else if ctl.work.max(ctl.app).max(if matches!(p.id, PanelId::Say | PanelId::Terminal) { 0.0 } else { ctl.swarm }) > 0.0 && p.id != PanelId::Brand && p.id != PanelId::Moment {
+            // the Working view, an app or the Agent swarm: the home draws back (the swarm keeps Say and the brand)
             let wk = ctl.work.max(ctl.app);
             if p.id == PanelId::Say {
                 tx -= 170.0 * wk;
                 top *= 1.0 - ctl.app;
             } else {
+                let wk = if p.id == PanelId::Terminal { wk } else { wk.max(ctl.swarm) };
                 tx -= p.side * 200.0 * wk;
                 tz -= 300.0 * wk;
                 top *= 1.0 - 0.93 * wk;

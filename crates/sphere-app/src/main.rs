@@ -71,6 +71,8 @@ pub struct Args {
     pub apps: bool,
     /// open the Working view at start, for screenshots
     pub work: bool,
+    /// open the Agent swarm at start, for screenshots
+    pub swarm: bool,
     /// open the Code app at start, for screenshots
     pub code: bool,
     /// open the Git app at start
@@ -113,7 +115,7 @@ impl Args {
 }
 
 fn parse_args() -> Args {
-    let mut a = Args { cmd: None, bench: None, shot: None, record: None, record_frames: 180, frames: 120, depth: false, orbit: false, apps: false, work: false, code: false, git: false, open_app: None, icon: false, aa: std::env::var("SPHERE_AA").unwrap_or_else(|_| "smaa".into()), offscreen: false, collapsed: false, focus_term: false, msaa: true, size: (1600, 1000), dt: 1.0 / 20.0, demo: false, live: false, moment: false, theme: None, motion: None };
+    let mut a = Args { cmd: None, bench: None, shot: None, record: None, record_frames: 180, frames: 120, depth: false, orbit: false, apps: false, work: false, swarm: false, code: false, git: false, open_app: None, icon: false, aa: std::env::var("SPHERE_AA").unwrap_or_else(|_| "smaa".into()), offscreen: false, collapsed: false, focus_term: false, msaa: true, size: (1600, 1000), dt: 1.0 / 20.0, demo: false, live: false, moment: false, theme: None, motion: None };
     let mut it = std::env::args().skip(1);
     while let Some(s) = it.next() {
         match s.as_str() {
@@ -127,6 +129,7 @@ fn parse_args() -> Args {
             "--orbit" => a.orbit = true,
             "--apps" => a.apps = true,
             "--work" => a.work = true,
+            "--swarm" => a.swarm = true,
             "--code" => a.code = true,
             "--git" => a.git = true,
             "--app" => a.open_app = it.next(),

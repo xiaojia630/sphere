@@ -53,10 +53,11 @@ pub fn keys(
     keys: Res<ButtonInput<KeyCode>>,
     focus: Res<Focus>,
     moment: Res<crate::moment::Moment>,
+    swarm: Res<crate::swarm::Swarm>,
     mut acts: ResMut<Acts>,
     apps: (Res<crate::codeapp::CodeApp>, Res<crate::gitapp::GitApp>, Res<crate::containers::ContainersApp>, Res<crate::ports::PortsApp>, Res<crate::sysapp::SysApp>, Res<crate::filesapp::FilesApp>),
 ) {
-    if apps.0.open || apps.1.open || apps.2.open || apps.3.open || apps.4.open || apps.5.open {
+    if apps.0.open || apps.1.open || apps.2.open || apps.3.open || apps.4.open || apps.5.open || swarm.open {
         ev.clear();
         return;
     }
@@ -192,6 +193,7 @@ mod tests {
             .init_resource::<ButtonInput<KeyCode>>()
             .init_resource::<Focus>()
             .init_resource::<crate::moment::Moment>()
+            .init_resource::<crate::swarm::Swarm>()
             .init_resource::<Acts>()
             .init_resource::<crate::codeapp::CodeApp>()
             .init_resource::<crate::gitapp::GitApp>()

@@ -41,6 +41,9 @@ pub fn anchor(ax: char, x: f32, ay: char, y: f32, w: f32, h: f32) -> Vec3 {
 
 #[derive(Component)]
 pub struct SysRow(pub &'static str);
+/// The brand panel's sub line (it reads "Agent swarm" while the swarm is open).
+#[derive(Component)]
+pub struct BrandSub;
 #[derive(Component)]
 pub struct Meter(pub usize);
 #[derive(Component)]
@@ -139,7 +142,7 @@ pub fn setup(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut atlas
     let tt = c.spawn((Text::new("OS"), font(&f.ui700, 10.5, 2.52), TextColor(Color::BLACK), LineHeight::Px(10.5))).id();
     c.entity(tag).add_child(tt);
     c.entity(wm).add_children(&[t, tag]);
-    let sub = c.spawn((Text::new("AGENT OPERATING SYSTEM"), font(&f.ui600, 11.0, 5.72), TextColor(line), LineHeight::Px(11.0))).id();
+    let sub = c.spawn((BrandSub, Text::new("AGENT OPERATING SYSTEM"), font(&f.ui600, 11.0, 5.72), TextColor(line), LineHeight::Px(11.0))).id();
     c.entity(b).add_children(&[wm, sub]);
     spawn_panel_quad(c, &mut meshes, &mut pmats, &ui, &PanelSpec { id: PanelId::Brand, w, h, home: anchor('c', 800.0, 't', 20.0, w, h), home_scale: 1.0, side: 0.0, phase: 0.7, show_at: show_at(0), unframed: true });
 

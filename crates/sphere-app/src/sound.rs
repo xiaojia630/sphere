@@ -185,6 +185,13 @@ pub fn setup(mut commands: Commands, args: Res<crate::Args>) {
     });
 }
 
+#[cfg(test)]
+impl Default for Sound {
+    fn default() -> Self {
+        Sound { tx: None, queue: Vec::new(), last: vec![None; NAMES.len()], any_last: None, muted: false, off: true, voice: None }
+    }
+}
+
 /// Hands the queued sounds to the playback thread.
 pub fn flush(mut s: ResMut<Sound>) {
     if s.queue.is_empty() {

@@ -6,6 +6,7 @@
 pub mod hud;
 pub mod model;
 pub mod scene;
+pub mod view;
 
 use crate::util::Spring;
 use bevy::prelude::*;
@@ -112,5 +113,6 @@ impl Plugin for SwarmPlugin {
         model::build(app);
         scene::build(app);
         hud::build(app);
+        view::build(app);
     }
 }
