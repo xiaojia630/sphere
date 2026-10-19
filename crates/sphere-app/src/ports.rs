@@ -385,11 +385,11 @@ pub fn draw(mut commands: Commands, app: Res<PortsApp>, svc: Res<Service>, roots
     if app.amt.x < 0.001 && !app.open {
         return;
     }
-    let (agents, sver) = {
+    let (agents, merged, sver) = {
         let s = svc.shared.lock().unwrap();
         let mut v = s.tasks.clone();
         v.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
-        (v, s.version)
+        (v, s.merged.clone(), s.version)
     };
     let key = (app.version, sver, theme.version);
     if *seen == key {
@@ -412,7 +412,7 @@ pub fn draw(mut commands: Commands, app: Res<PortsApp>, svc: Res<Service>, roots
     };
     ui.corelab(c, ws.corelab, "Ports & logs", l2, l2c);
     ui.top(c, ws.panes[TOP], "Ports & logs", format!("{} LISTENING", all.len()), "listener and process lookup after listeners (MIT) · lsof");
-    ui.strip(c, ws.panes[STRIP], &agents, ["J STEP   , . PAGE   TAB FILTER   O OPEN   T TAIL LOGS", "K STOP PROCESS   ESC CLOSE"]);
+    ui.strip(c, ws.panes[STRIP], &agents, &merged, ["J STEP   , . PAGE   TAB FILTER   O OPEN   T TAIL LOGS", "K STOP PROCESS   ESC CLOSE"]);
     // summary and filters
     let r = c.spawn(Node { width: percent(100), height: percent(100), flex_direction: FlexDirection::Row, align_items: AlignItems::Center, column_gap: px(22), padding: UiRect::horizontal(px(16)), ..default() }).id();
     c.entity(ws.panes[SUM]).add_child(r);

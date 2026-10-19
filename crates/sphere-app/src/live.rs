@@ -4,6 +4,7 @@ use crate::core::{AState, Agent, Agents};
 use crate::service::{Link, Service};
 use bevy::prelude::*;
 use sphere_proto::{RequestView, TaskState, TaskView};
+use std::collections::HashSet;
 
 #[derive(Resource, Default)]
 pub struct Live {
@@ -46,7 +47,7 @@ impl Toasts {
     }
 }
 
-fn row(t: &TaskView) -> Agent {
+fn row(t: &TaskView, merged: bool) -> Agent {
     let (state, chip) = match t.state {
         TaskState::Queued | TaskState::Working => (AState::Working, None),
         TaskState::NeedsYou => (AState::Needs, None),
@@ -54,7 +55,13 @@ fn row(t: &TaskView) -> Agent {
         TaskState::Failed => (AState::Failed, Some("FAILED")),
         TaskState::Stopped => (AState::Failed, Some("STOPPED")),
     };
-    let step = if t.status.is_empty() { t.last_say.lines().next().unwrap_or("").to_string() } else { t.status.clone() };
+    let step = if merged && t.state == TaskState::Done {
+        format!("Merged · {}", t.branch.as_deref().unwrap_or(""))
+    } else if t.status.is_empty() {
+        t.last_say.lines().next().unwrap_or("").to_string()
+    } else {
+        t.status.clone()
+    };
     // Real agents have no percent: the bar fills with the step count and the figure shows it.
     let p = 1.0 - (-(t.steps as f32) / 14.0).exp();
     let figure = match state {
@@ -73,8 +80,9 @@ fn row(t: &TaskView) -> Agent {
     Agent { name, state, p: p.max(0.04), step, rate: 0.0, figure, chip }
 }
 
-/// The panel fits four rows: what needs you first, then working, then the most recent finished.
-fn pick(tasks: &[TaskView]) -> Vec<Agent> {
+/// Every agent for the panel: what needs you first, then working, then the most recent finished (the panel
+/// shows the first rows and counts the rest).
+fn pick(tasks: &[TaskView], merged: &HashSet<String>) -> Vec<Agent> {
     let rank = |t: &TaskView| match t.state {
         TaskState::NeedsYou => 0,
         TaskState::Working => 1,
@@ -83,7 +91,37 @@ fn pick(tasks: &[TaskView]) -> Vec<Agent> {
     };
     let mut v: Vec<&TaskView> = tasks.iter().collect();
     v.sort_by(|a, b| rank(a).cmp(&rank(b)).then_with(|| b.updated_at.cmp(&a.updated_at)));
-    v.into_iter().take(4).map(row).collect()
+    v.into_iter().map(|t| row(t, merged.contains(&t.id))).collect()
+}
+
+/// Finds the finished tasks whose branch is already merged (git, in the background, every few seconds) and
+/// puts them in `Shared::merged`, so they read "Merged" rather than "Finished".
+pub fn check_merged(time: Res<Time<Real>>, svc: Res<Service>, mut t: Local<f32>, mut busy: Local<Option<std::sync::Arc<std::sync::atomic::AtomicBool>>>) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    *t += time.delta_secs();
+    if *t < 4.0 || busy.as_ref().is_some_and(|b| b.load(Ordering::Relaxed)) {
+        return;
+    }
+    *t = 0.0;
+    let todo: Vec<(String, String, String)> = {
+        let s = svc.shared.lock().unwrap();
+        s.tasks.iter().filter(|t| t.state == TaskState::Done && !t.in_place && t.branch.is_some()).filter_map(|t| Some((t.id.clone(), t.workdir.clone()?, t.base.clone()?))).collect()
+    };
+    if todo.is_empty() && svc.shared.lock().unwrap().merged.is_empty() {
+        return;
+    }
+    let flag = busy.get_or_insert_with(|| std::sync::Arc::new(AtomicBool::new(false))).clone();
+    flag.store(true, Ordering::Relaxed);
+    let shared = svc.shared.clone();
+    std::thread::spawn(move || {
+        let ids: HashSet<String> = todo.into_iter().filter(|(_, wd, base)| crate::review::is_merged(wd, base)).map(|(id, _, _)| id).collect();
+        let mut s = shared.lock().unwrap();
+        if s.merged != ids {
+            s.merged = ids;
+            s.version += 1;
+        }
+        flag.store(false, Ordering::Relaxed);
+    });
 }
 
 pub fn sync(svc: Res<Service>, mut live: ResMut<Live>, mut agents: ResMut<Agents>, mut toasts: ResMut<Toasts>, args: Res<crate::Args>) {
@@ -107,7 +145,7 @@ pub fn sync(svc: Res<Service>, mut live: ResMut<Live>, mut agents: ResMut<Agents
         }
         live.link = s.link.clone();
     }
-    agents.set(pick(&s.tasks));
+    agents.set(pick(&s.tasks, &s.merged));
     agents.set_runs(
         s.tasks
             .iter()
@@ -218,5 +256,42 @@ pub fn tick_toasts(time: Res<Time<Real>>, mut toasts: ResMut<Toasts>, mut sound:
     toasts.list.retain(|t| t.1 > 0.0);
     if toasts.list.len() != before {
         toasts.version += 1;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn task(id: &str, state: TaskState, at: &str) -> TaskView {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "title": format!("Task {id}"), "prompt": "", "state": state, "status": "Done: finished",
+            "repo": "/r", "branch": format!("sphere/{id}"), "in_place": false, "budget_usd": 0.0, "cost_usd": 0.0,
+            "started_at": at, "updated_at": at,
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn every_agent_counts_and_the_panel_shows_three_and_more_past_four() {
+        let tasks: Vec<TaskView> = (0..6).map(|i| task(&format!("t{i}"), TaskState::Working, &format!("2026-10-19T00:0{i}:00Z"))).collect();
+        let mut agents = Agents::empty();
+        agents.set(pick(&tasks, &HashSet::new()));
+        assert_eq!(agents.working(), 6, "agents past the fourth still count");
+        assert_eq!(crate::panel::agent_rows(agents.list.len()), (3, 3));
+        assert_eq!(crate::panel::agent_rows(4), (4, 0));
+        assert_eq!(crate::panel::agent_rows(0), (0, 0));
+    }
+
+    #[test]
+    fn a_merged_agent_reads_merged() {
+        let tasks = vec![task("t1", TaskState::Done, "2026-10-19T00:00:00Z"), task("t2", TaskState::Done, "2026-10-19T00:01:00Z")];
+        let merged: HashSet<String> = ["t1".to_string()].into();
+        let rows = pick(&tasks, &merged);
+        let step = |n: &str| rows.iter().find(|a| a.name == n).unwrap().step.clone();
+        assert_eq!(step("Task t1"), "Merged · sphere/t1");
+        assert_eq!(step("Task t2"), "Done: finished");
+        assert_eq!(crate::appframe::finished(&tasks[0], &merged), "Merged");
+        assert_eq!(crate::appframe::finished(&tasks[1], &merged), "Finished");
     }
 }

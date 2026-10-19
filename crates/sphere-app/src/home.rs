@@ -45,8 +45,21 @@ pub fn step_view(sim: Res<crate::core::Sim>, mut v: ResMut<View>) {
 }
 
 /// Home keys (prototype v2): 1 Flat, 2/D Depth, 3/O Orbit, E Depth↔Flat, F fit, C theme, R/0 reset, X collapse,
-/// M mute. Not while the command bar, the terminal or the Agent moment card has the keyboard, nor with Cmd/Ctrl/Alt.
-pub fn keys(mut ev: MessageReader<KeyboardInput>, keys: Res<ButtonInput<KeyCode>>, focus: Res<Focus>, moment: Res<crate::moment::Moment>, mut acts: ResMut<Acts>) {
+/// M mute. Not while the command bar, the terminal or the Agent moment card has the keyboard, nor with Cmd/Ctrl/Alt,
+/// nor while an app is open: the apps use the same letters (M merges, D discards, E asks, R runs the tests).
+#[allow(clippy::type_complexity)]
+pub fn keys(
+    mut ev: MessageReader<KeyboardInput>,
+    keys: Res<ButtonInput<KeyCode>>,
+    focus: Res<Focus>,
+    moment: Res<crate::moment::Moment>,
+    mut acts: ResMut<Acts>,
+    apps: (Res<crate::codeapp::CodeApp>, Res<crate::gitapp::GitApp>, Res<crate::containers::ContainersApp>, Res<crate::ports::PortsApp>, Res<crate::sysapp::SysApp>, Res<crate::filesapp::FilesApp>),
+) {
+    if apps.0.open || apps.1.open || apps.2.open || apps.3.open || apps.4.open || apps.5.open {
+        ev.clear();
+        return;
+    }
     let mods = keys.any_pressed([KeyCode::SuperLeft, KeyCode::SuperRight, KeyCode::ControlLeft, KeyCode::ControlRight, KeyCode::AltLeft, KeyCode::AltRight]);
     for e in ev.read() {
         if e.state != ButtonState::Pressed || mods || focus.cmd || focus.terminal || moment.shown {
@@ -161,4 +174,66 @@ pub fn landed_sound(ctl: Res<CoreCtl>, mut was: Local<bool>, mut sound: ResMut<S
         sound.play_with("drop", 0.5, 0.0);
     }
     *was = ctl.landed;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bevy::input::keyboard::Key;
+
+    fn press(app: &mut App, code: KeyCode) {
+        app.world_mut().write_message(KeyboardInput { key_code: code, logical_key: Key::Unidentified(bevy::input::keyboard::NativeKey::Unidentified), state: ButtonState::Pressed, text: None, repeat: false, window: Entity::PLACEHOLDER });
+        app.update();
+    }
+
+    fn home() -> App {
+        let mut app = App::new();
+        app.add_message::<KeyboardInput>()
+            .init_resource::<ButtonInput<KeyCode>>()
+            .init_resource::<Focus>()
+            .init_resource::<crate::moment::Moment>()
+            .init_resource::<Acts>()
+            .init_resource::<crate::codeapp::CodeApp>()
+            .init_resource::<crate::gitapp::GitApp>()
+            .init_resource::<crate::containers::ContainersApp>()
+            .init_resource::<crate::ports::PortsApp>()
+            .init_resource::<crate::sysapp::SysApp>()
+            .init_resource::<crate::filesapp::FilesApp>()
+            .add_systems(Update, keys);
+        app
+    }
+
+    const LETTERS: [KeyCode; 10] = [KeyCode::KeyM, KeyCode::KeyD, KeyCode::KeyE, KeyCode::KeyR, KeyCode::KeyF, KeyCode::KeyC, KeyCode::KeyX, KeyCode::Digit1, KeyCode::Digit2, KeyCode::Digit3];
+
+    #[test]
+    fn home_keys_work_on_the_home() {
+        let mut app = home();
+        press(&mut app, KeyCode::KeyM);
+        assert_eq!(app.world().resource::<Acts>().0, vec![Act::Mute]);
+    }
+
+    #[test]
+    fn home_keys_stay_quiet_in_every_app() {
+        type Open = fn(&mut World, bool);
+        let opens: [(&str, Open); 6] = [
+            ("Code", |w, o| w.resource_mut::<crate::codeapp::CodeApp>().open = o),
+            ("Git", |w, o| w.resource_mut::<crate::gitapp::GitApp>().open = o),
+            ("Containers", |w, o| w.resource_mut::<crate::containers::ContainersApp>().open = o),
+            ("Ports", |w, o| w.resource_mut::<crate::ports::PortsApp>().open = o),
+            ("System", |w, o| w.resource_mut::<crate::sysapp::SysApp>().open = o),
+            ("Files", |w, o| w.resource_mut::<crate::filesapp::FilesApp>().open = o),
+        ];
+        for (name, set) in opens {
+            let mut app = home();
+            set(app.world_mut(), true);
+            for k in LETTERS {
+                press(&mut app, k);
+            }
+            assert!(app.world().resource::<Acts>().0.is_empty(), "{name}: home keys fired: {:?}", app.world().resource::<Acts>().0);
+            // and a key pressed in the app doesn't fire later, once it closes
+            set(app.world_mut(), false);
+            app.update();
+            assert!(app.world().resource::<Acts>().0.is_empty(), "{name}: a key leaked after closing");
+        }
+    }
 }

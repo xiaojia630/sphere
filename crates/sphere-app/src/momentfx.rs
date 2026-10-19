@@ -321,6 +321,7 @@ pub fn draw(
         Query<(&Sat, &mut Transform, &mut Visibility, &MeshMaterial3d<PanelMaterial>)>,
     )>,
     halo_mats: Query<&MeshMaterial3d<GlowMaterial>>,
+    cam: Query<&GlobalTransform, With<crate::CamPanels>>,
 ) {
     let t = sim.t;
     let h = clamp(fx.halo.x * 1.25, 0.0, 1.0);
@@ -452,6 +453,7 @@ pub fn draw(
     }
     // satellites: the other waiting requests on a tilted ellipse around the core, brighter in front
     let c = root.single().map(|g| g.translation()).unwrap_or(Vec3::ZERO);
+    let eye = cam.single().map(|g| g.translation()).unwrap_or(Vec3::new(0.0, 0.0, 1500.0));
     let w = waiting(&live, &m);
     let others: Vec<usize> = (0..w.len()).filter(|i| *i != m.index).collect();
     let amt = clamp(fx.amt.x, 0.0, 1.0);
@@ -462,8 +464,8 @@ pub fn draw(
         let p = c + Vec3::new(560.0 * a.cos(), -330.0 * a.sin(), 210.0 * a.sin() + 40.0);
         tr.translation = p;
         tr.scale = Vec3::ONE;
-        // a chip that would sit over the card hides
-        let over = (p.x - centre.x).abs() < hw + 150.0 && (p.y - centre.y).abs() < hh + 47.0 && p.z > centre.z - 200.0;
+        // a chip that would sit over the card on screen hides (in front of it or seen through the glass)
+        let over = covers_card(eye, p, &corners);
         let op = if show && !over { amt * (0.42 + 0.58 * (a.sin() + 1.0) / 2.0) } else { 0.0 };
         v.set_if_neq(if op > 0.004 { Visibility::Inherited } else { Visibility::Hidden });
         if let Some(mm) = pmats.get(&mh.0) {
@@ -474,6 +476,23 @@ pub fn draw(
             }
         }
     }
+}
+
+/// Where `p` lands on screen, in world units on the plane z = 0, for the camera at `eye` looking down -z.
+fn on_screen(eye: Vec3, p: Vec3) -> Vec2 {
+    let k = eye.z / (eye.z - p.z).max(1.0);
+    eye.truncate() + (p.truncate() - eye.truncate()) * k
+}
+
+/// Whether a satellite chip centred at `p` would cover any of the card (its four corners) on screen, with room
+/// to spare so its label never touches the card's edge or the hint in its corner.
+fn covers_card(eye: Vec3, p: Vec3, card: &[Vec3; 4]) -> bool {
+    const MARGIN: f32 = 18.0;
+    let pts = card.map(|c| on_screen(eye, c));
+    let (lo, hi) = pts.iter().fold((Vec2::splat(f32::MAX), Vec2::splat(f32::MIN)), |(lo, hi), q| (lo.min(*q), hi.max(*q)));
+    let half = Vec2::new(SAT_W, SAT_H) / 2.0;
+    let (a, b) = (on_screen(eye, p - half.extend(0.0)), on_screen(eye, p + half.extend(0.0)));
+    a.x < hi.x + MARGIN && b.x > lo.x - MARGIN && a.y < hi.y + MARGIN && b.y > lo.y - MARGIN
 }
 
 /// The satellites' text: title and where it came from.
@@ -506,5 +525,35 @@ pub fn draw_sats(mut commands: Commands, m: Res<Moment>, live: Res<Live>, roots:
         commands.entity(col).add_children(&[tt, st]);
         commands.entity(b).add_children(&[dot, col]);
         commands.entity(*root).add_child(b);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const EYE: Vec3 = Vec3::new(0.0, 0.0, 1500.0);
+
+    fn card() -> [Vec3; 4] {
+        let (hw, hh, z) = (crate::moment::CARD_W / 2.0, crate::moment::CARD_H / 2.0, 230.0);
+        [Vec3::new(-hw, hh, z), Vec3::new(hw, hh, z), Vec3::new(hw, -hh, z), Vec3::new(-hw, -hh, z)]
+    }
+
+    #[test]
+    fn a_chip_behind_the_glass_still_counts_as_over_the_card() {
+        // behind the card and near its bottom-right corner, where the "for the others" hint sits: the old check
+        // let chips this far back show through the glass
+        let hw = crate::moment::CARD_W / 2.0;
+        let hh = crate::moment::CARD_H / 2.0;
+        assert!(covers_card(EYE, Vec3::new(hw, -hh, -150.0), &card()));
+        // just past the top edge, the label straddling it
+        assert!(covers_card(EYE, Vec3::new(-180.0, hh + 30.0, -100.0), &card()));
+    }
+
+    #[test]
+    fn a_chip_well_clear_of_the_card_shows() {
+        let hw = crate::moment::CARD_W / 2.0;
+        assert!(!covers_card(EYE, Vec3::new(hw + SAT_W, 0.0, 200.0), &card()));
+        assert!(!covers_card(EYE, Vec3::new(-hw - SAT_W, 100.0, -150.0), &card()));
     }
 }

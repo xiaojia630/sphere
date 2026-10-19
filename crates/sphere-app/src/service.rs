@@ -31,6 +31,8 @@ pub struct Shared {
     pub rtt_ms: Option<f32>,
     /// each task's run as the Working view shows it: steps, what it said, files
     pub runs: std::collections::HashMap<String, Run>,
+    /// finished tasks whose branch is already in the repo (the app checks with git, see `live::check_merged`)
+    pub merged: std::collections::HashSet<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]

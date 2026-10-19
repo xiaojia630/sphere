@@ -107,6 +107,34 @@ const MAX_BYTES: u64 = 1_000_000;
 /// Longest diff line kept; the rest is cut.
 const MAX_LINE: usize = 400;
 
+/// The branch the repo's main checkout is on (the first worktree git lists), if `dir` is another worktree of it.
+pub fn main_branch(dir: &Path) -> Option<String> {
+    let out = git(dir, &["worktree", "list", "--porcelain"]).ok()?;
+    let first = out.split("\n\n").next()?;
+    // a checkout that is itself the main one has no other branch to be merged into
+    let main = std::fs::canonicalize(first.lines().find_map(|l| l.strip_prefix("worktree "))?).ok()?;
+    if std::fs::canonicalize(git_t(dir, &["rev-parse", "--show-toplevel"]).ok()?).ok()? == main {
+        return None;
+    }
+    first.lines().find_map(|l| l.strip_prefix("branch refs/heads/")).map(str::to_string)
+}
+
+/// Whether HEAD in `dir` has commits since `fork` and they are all in `base`. The base is a commit when sphered
+/// made the worktree: then "merged" means taken into the branch the main checkout is on.
+fn merged_from(dir: &Path, fork: &str, base: &str) -> bool {
+    let head = git_t(dir, &["rev-parse", "HEAD"]).unwrap_or_default();
+    !head.is_empty()
+        && head != fork
+        && (git(dir, &["merge-base", "--is-ancestor", "HEAD", base]).is_ok()
+            || main_branch(dir).is_some_and(|b| git(dir, &["merge-base", "--is-ancestor", "HEAD", &b]).is_ok()))
+}
+
+/// Whether an agent's worktree has work of its own that is already merged (a quick check, no diff read).
+pub fn is_merged(workdir: &str, base: &str) -> bool {
+    let dir = Path::new(workdir);
+    dir.is_dir() && git_t(dir, &["merge-base", "HEAD", base]).is_ok_and(|fork| merged_from(dir, &fork, base))
+}
+
 pub fn load(workdir: &str, base: &str) -> Review {
     let dir = Path::new(workdir);
     let mut r = Review { workdir: workdir.to_string(), base: base.to_string(), ..Default::default() };
@@ -138,8 +166,7 @@ pub fn load(workdir: &str, base: &str) -> Review {
             .lines()
             .filter_map(|l| l.split_once('\t').map(|(h, s)| (h.to_string(), s.to_string())))
             .collect();
-        let head = git_t(dir, &["rev-parse", "HEAD"]).unwrap_or_default();
-        r.merged = !head.is_empty() && head != fork && git(dir, &["merge-base", "--is-ancestor", "HEAD", base]).is_ok();
+        r.merged = merged_from(dir, &fork, base);
     }
     // the fork point against the working tree: commits and uncommitted edits together
     let raw = git(dir, &["diff", "--no-color", "--no-ext-diff", "-M", "-U3", &fork]).unwrap_or_default();

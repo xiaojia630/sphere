@@ -519,13 +519,21 @@ fn commit_rest(wd: &str, title: &str) -> Result<(), String> {
 /// Commits what's left in the worktree, then merges the branch into the base in the repo.
 fn merge(repo: &str, wd: &str, branch: Option<&str>, base: &str, title: &str, in_place: bool) -> Result<String, String> {
     let branch = branch.filter(|_| !in_place).ok_or("This agent worked in place: its changes are already in the repo")?;
-    if git(repo, &["rev-parse", "--verify", "-q", &format!("refs/heads/{base}")]).is_err() {
+    // sphered records the commit a task started from, not a branch: that one merges into whatever branch
+    // the repo is on; a named base must be the branch the repo is on
+    let cur = git(repo, &["symbolic-ref", "--short", "-q", "HEAD"]).unwrap_or_default();
+    let is_branch = git(repo, &["rev-parse", "--verify", "-q", &format!("refs/heads/{base}")]).is_ok();
+    let is_commit = !is_branch && git(repo, &["rev-parse", "--verify", "-q", &format!("{base}^{{commit}}")]).is_ok();
+    if !is_branch && !is_commit {
         return Err(format!("{base} isn't a branch in the repo: merge {branch} by hand"));
     }
-    let cur = git(repo, &["symbolic-ref", "--short", "-q", "HEAD"]).unwrap_or_default();
-    if cur != base {
-        return Err(format!("The repo is on {}, not {base}: switch to {base} to merge", if cur.is_empty() { "a detached HEAD" } else { &cur }));
+    if cur.is_empty() {
+        return Err(format!("The repo is on a detached HEAD: switch to {} to merge", if is_branch { base } else { "a branch" }));
     }
+    if is_branch && cur != base {
+        return Err(format!("The repo is on {cur}, not {base}: switch to {base} to merge"));
+    }
+    let base = cur.as_str();
     if !git(repo, &["status", "--porcelain", "--untracked-files=no"])?.is_empty() {
         return Err(format!("The repo has uncommitted changes on {base}: commit or stash them to merge"));
     }
@@ -780,9 +788,10 @@ pub fn draw(mut commands: Commands, app: Res<CodeApp>, svc: Res<Service>, roots:
         let s = svc.shared.lock().unwrap();
         let t = pick(&app, &s.tasks).cloned();
         let run = t.as_ref().and_then(|t| s.runs.get(&t.id).cloned()).unwrap_or_default();
-        let agents: Vec<TaskView> = t.as_ref().map(|t| repo_tasks(&s.tasks, &t.repo).into_iter().take(3).cloned().collect()).unwrap_or_default();
-        (t, run, agents, s.version, s.link.clone())
+        let agents: Vec<TaskView> = t.as_ref().map(|t| repo_tasks(&s.tasks, &t.repo).into_iter().cloned().collect()).unwrap_or_default();
+        (t, run, (agents, s.merged.clone()), s.version, s.link.clone())
     };
+    let (agents, merged) = agents;
     let key = (app.version, sver, theme.version, time.elapsed_secs() as i64 / 30);
     if *seen == key {
         return;
@@ -804,7 +813,7 @@ pub fn draw(mut commands: Commands, app: Res<CodeApp>, svc: Res<Service>, roots:
     c.entity(lab).add_children(&[l1, l2]);
     c.entity(roots.corelab).add_child(lab);
     draw_top(c, &ui, root(Pane::Top), task.as_ref());
-    draw_strip(c, &ui, root(Pane::Strip), &agents, task.as_ref());
+    draw_strip(c, &ui, root(Pane::Strip), &agents, &merged, task.as_ref());
     let Some(t) = task else {
         let b = ui.body(c, root(Pane::Diff));
         let h = ui.header(c, "Diff", "", ui.dim);
@@ -1274,15 +1283,30 @@ fn draw_acts(c: &mut Commands, ui: &Ui, root: Entity, app: &CodeApp) {
     }
 }
 
-fn draw_strip(c: &mut Commands, ui: &Ui, root: Entity, agents: &[TaskView], cur: Option<&TaskView>) {
+/// How many agent chips fit in the strip.
+const STRIP_CHIPS: usize = 3;
+
+/// The chips to draw out of `n` agents: a window of at most STRIP_CHIPS that always holds the selected one
+/// (Tab can reach every agent, so the selection must never be hidden).
+fn strip_window(n: usize, sel: Option<usize>) -> (usize, usize) {
+    let from = sel.map_or(0, |i| (i + 1).saturating_sub(STRIP_CHIPS)).min(n.saturating_sub(STRIP_CHIPS));
+    (from, (from + STRIP_CHIPS).min(n))
+}
+
+fn draw_strip(c: &mut Commands, ui: &Ui, root: Entity, agents: &[TaskView], merged: &std::collections::HashSet<String>, cur: Option<&TaskView>) {
     let r = c.spawn(Node { width: percent(100), height: percent(100), flex_direction: FlexDirection::Row, align_items: AlignItems::Center, column_gap: px(12), padding: UiRect { left: px(16), right: px(14), ..default() }, ..default() }).id();
     c.entity(root).add_child(r);
     let lab = ui.text(c, "AGENTS", &ui.f.ui600, 10.5, 3.2, ui.dim);
     c.entity(r).add_child(lab);
-    for (ai, t) in agents.iter().enumerate() {
+    let (from, to) = strip_window(agents.len(), cur.and_then(|c| agents.iter().position(|t| t.id == c.id)));
+    if from > 0 {
+        let m = ui.text(c, format!("+{from}"), &ui.f.ui600, 11.0, 0.8, ui.dim);
+        c.entity(r).add_child(m);
+    }
+    for (ai, t) in agents.iter().enumerate().take(to).skip(from) {
         let sel = cur.is_some_and(|c| c.id == t.id);
         let (col, sub) = match t.state {
-            TaskState::Done => (role_color(Role::Ok), "Finished".to_string()),
+            TaskState::Done => (role_color(Role::Ok), crate::appframe::finished(t, merged).to_string()),
             TaskState::NeedsYou => (role_color(Role::Acc), format!("Needs you · {}", clip(&t.status, 26))),
             TaskState::Failed => (role_color(Role::Bad), "Failed".to_string()),
             TaskState::Stopped => (ui.dim, "Stopped".to_string()),
@@ -1304,6 +1328,10 @@ fn draw_strip(c: &mut Commands, ui: &Ui, root: Entity, agents: &[TaskView], cur:
         c.entity(chip).add_children(&[dot, col2]);
         c.entity(r).add_child(chip);
     }
+    if to < agents.len() {
+        let m = ui.text(c, format!("+{}", agents.len() - to), &ui.f.ui600, 11.0, 0.8, ui.dim);
+        c.entity(r).add_child(m);
+    }
     if agents.is_empty() {
         let t = ui.text(c, "No agents on this repo", &ui.f.ui500, 12.0, 0.4, ui.dim);
         c.entity(r).add_child(t);
@@ -1318,6 +1346,17 @@ fn draw_strip(c: &mut Commands, ui: &Ui, root: Entity, agents: &[TaskView], cur:
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_strip_window_always_holds_the_selected_agent() {
+        assert_eq!(super::strip_window(0, None), (0, 0));
+        assert_eq!(super::strip_window(2, Some(1)), (0, 2));
+        assert_eq!(super::strip_window(5, Some(0)), (0, 3));
+        assert_eq!(super::strip_window(5, Some(2)), (0, 3));
+        assert_eq!(super::strip_window(5, Some(3)), (1, 4));
+        assert_eq!(super::strip_window(5, Some(4)), (2, 5));
+        assert_eq!(super::strip_window(5, None), (0, 3));
+    }
+
     use super::*;
 
     #[test]
@@ -1442,6 +1481,26 @@ mod tests {
     }
 
     #[test]
+    fn merges_when_the_base_is_the_commit_the_task_started_from() {
+        // sphered records a commit, not a branch
+        let (repo, wt) = repo_with_agent_branch("sha");
+        let sha = crate::gitdata::git_t(&repo, &["rev-parse", "HEAD"]).unwrap();
+        // a fresh branch with no work of its own is not "merged"
+        assert!(!crate::review::is_merged(wt.to_str().unwrap(), &sha));
+        std::fs::write(wt.join("b.txt"), "new\n").unwrap();
+        git_in(&wt, &["add", "."]);
+        git_in(&wt, &["commit", "-q", "-m", "Add b"]);
+        assert!(!crate::review::is_merged(wt.to_str().unwrap(), &sha), "committed but not merged yet");
+        let note = merge(repo.to_str().unwrap(), wt.to_str().unwrap(), Some("sphere/agent"), &sha, "Add b", false).unwrap();
+        assert_eq!(note, "Merged sphere/agent into main");
+        assert!(repo.join("b.txt").exists());
+        let r = crate::review::load(wt.to_str().unwrap(), &sha);
+        assert!(r.merged, "a branch taken into main is merged");
+        assert!(crate::review::is_merged(wt.to_str().unwrap(), &sha));
+        let _ = std::fs::remove_dir_all(repo.parent().unwrap());
+    }
+
+    #[test]
     fn a_conflicting_merge_is_aborted_and_names_the_files() {
         let (repo, wt) = repo_with_agent_branch("conflict");
         std::fs::write(wt.join("a.txt"), "agent\n").unwrap();
@@ -1461,6 +1520,9 @@ mod tests {
         let (r, w) = (repo.to_str().unwrap(), wt.to_str().unwrap());
         assert!(merge(r, w, Some("sphere/agent"), "main", "t", true).unwrap_err().contains("in place"));
         assert!(merge(r, w, Some("sphere/agent"), "abc1234", "t", false).unwrap_err().contains("isn't a branch"));
+        git_in(&repo, &["checkout", "-q", "--detach"]);
+        assert!(merge(r, w, Some("sphere/agent"), "main", "t", false).unwrap_err().contains("detached"));
+        git_in(&repo, &["checkout", "-q", "main"]);
         git_in(&repo, &["checkout", "-q", "-b", "other"]);
         assert!(merge(r, w, Some("sphere/agent"), "main", "t", false).unwrap_err().contains("switch to main"));
         git_in(&repo, &["checkout", "-q", "main"]);

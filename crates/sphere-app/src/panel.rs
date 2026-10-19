@@ -772,7 +772,8 @@ pub fn build_agents_ui(commands: &mut Commands, root: Entity, f: &UiFonts, agent
             .id();
         commands.entity(list).add_child(e);
     }
-    for a in &agents.list {
+    let (rows, more) = agent_rows(agents.list.len());
+    for a in agents.list.iter().take(rows) {
         let (name_c, op) = match a.state {
             AState::Needs => (acc, 1.0),
             AState::Done | AState::Failed => (hot, 0.6),
@@ -855,6 +856,27 @@ pub fn build_agents_ui(commands: &mut Commands, root: Entity, f: &UiFonts, agent
             .spawn((Text::new(a.step.clone()), font(&f.ui500, 13.0, 1.04), TextColor(with_alpha(line, op)), LineHeight::Px(16.9)))
             .id();
         commands.entity(row).add_children(&[top, bar, step]);
+    }
+    if more > 0 {
+        let m = commands
+            .spawn((
+                Text::new(format!("+{more} MORE")),
+                font(&f.ui600, 11.0, 2.2),
+                TextColor(dim),
+                LineHeight::Px(14.0),
+                Node { margin: UiRect { top: px(10), ..default() }, ..default() },
+            ))
+            .id();
+        commands.entity(list).add_child(m);
+    }
+}
+
+/// The Agents panel fits four rows: with more agents than that it shows three and a "+N more" line.
+pub fn agent_rows(n: usize) -> (usize, usize) {
+    if n <= 4 {
+        (n, 0)
+    } else {
+        (3, n - 3)
     }
 }
 
