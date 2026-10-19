@@ -53,6 +53,8 @@ pub struct SysApp {
     cpu: Option<f32>,
     cores: Option<Vec<f32>>,
     ticks_prev: Vec<(u64, u64)>,
+    /// the next reading only sets the baseline (the last one is from before the app was closed)
+    rebase: bool,
     /// disk bytes (read, written) last time and when, and the rates since
     disk_prev: Option<((u64, u64), Instant)>,
     disk_rw: Option<(f32, f32)>,
@@ -74,7 +76,7 @@ pub struct SysApp {
 impl Default for SysApp {
     fn default() -> Self {
         let (tx, rx) = mpsc::channel();
-        SysApp { open: false, amt: Spring::new(0.0, 26.0, 9.0), sys: None, cpu_h: Vec::new(), gpu_h: Vec::new(), in_h: Vec::new(), out_h: Vec::new(), cpu: None, cores: None, ticks_prev: Vec::new(), disk_prev: None, disk_rw: None, disk_h: Vec::new(), net_prev: None, net_rate: None, loading: false, load_t: -99.0, samples: 0, rx: None, sel_pid: None, by_mem: false, armed: None, notes: (tx, Mutex::new(rx)), version: 0 }
+        SysApp { open: false, amt: Spring::new(0.0, 26.0, 9.0), sys: None, cpu_h: Vec::new(), gpu_h: Vec::new(), in_h: Vec::new(), out_h: Vec::new(), cpu: None, cores: None, ticks_prev: Vec::new(), rebase: false, disk_prev: None, disk_rw: None, disk_h: Vec::new(), net_prev: None, net_rate: None, loading: false, load_t: -99.0, samples: 0, rx: None, sel_pid: None, by_mem: false, armed: None, notes: (tx, Mutex::new(rx)), version: 0 }
     }
 }
 
@@ -82,14 +84,11 @@ impl SysApp {
     pub fn open(&mut self) {
         self.open = true;
         self.load_t = -99.0;
-        // rates are measured between two readings taken while the app is open
-        self.ticks_prev.clear();
+        // rates are measured between two readings taken while the app is open; until the second one the last
+        // rates stay on screen rather than blanks
+        self.rebase = true;
         self.disk_prev = None;
         self.net_prev = None;
-        self.cpu = None;
-        self.cores = None;
-        self.disk_rw = None;
-        self.net_rate = None;
         self.version += 1;
     }
     pub fn close(&mut self) {
@@ -276,7 +275,7 @@ impl SysApp {
         self.samples += 1;
         let had_net = self.net_prev.is_some();
         self.net_prev = net_mark;
-        if self.ticks_prev.len() == s.cores_ticks.len() && !self.ticks_prev.is_empty() {
+        if self.ticks_prev.len() == s.cores_ticks.len() && !self.ticks_prev.is_empty() && !std::mem::take(&mut self.rebase) {
             let cpu = opsdata::total_use(&self.ticks_prev, &s.cores_ticks);
             push(&mut self.cpu_h, cpu);
             self.cpu = Some(cpu);

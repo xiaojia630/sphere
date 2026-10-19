@@ -99,6 +99,8 @@ pub struct GitApp {
     repo: Option<Repo>,
     cards: Vec<RepoCard>,
     loading: bool,
+    /// look for repos again on the next read (each open), keeping what is on screen until it's in
+    rediscover: bool,
     load_rx: Option<Mutex<mpsc::Receiver<Loaded>>>,
     load_t: f32,
     /// the selected change: staged first, then unstaged
@@ -134,6 +136,7 @@ impl Default for GitApp {
             repo: None,
             cards: Vec::new(),
             loading: false,
+            rediscover: false,
             load_rx: None,
             load_t: -99.0,
             cursor: 0,
@@ -159,16 +162,9 @@ impl GitApp {
     pub fn open(&mut self) {
         self.open = true;
         self.load_t = -99.0;
-        // look for repos again: agents may have started in new ones
-        if !self.loading {
-            self.repos.clear();
-            self.cards.clear();
-            self.repo = None;
-            self.sel = 0;
-            self.cursor = 0;
-            self.bcur = 0;
-            self.gcur = 0;
-        }
+        // look for repos again (agents may have started in new ones), but keep showing the last read until the
+        // new one is in, so the app opens on its content instead of "Reading…"
+        self.rediscover = true;
         self.version += 1;
     }
     /// Selects repo `i`.
@@ -592,7 +588,19 @@ pub fn update(sim: Res<crate::core::Sim>, mut atlases: ResMut<AppAtlases>, mut a
         app.loading = false;
         app.loads += 1;
         if app.repos != repos {
+            // the list changed (a new repo was found): stay on the repo that was selected
+            let cur = app.repos.get(app.sel).cloned();
             app.repos = repos;
+            match cur.and_then(|p| app.repos.iter().position(|r| *r == p)) {
+                Some(i) => app.sel = i,
+                None => {
+                    app.sel = 0;
+                    app.repo = None;
+                    app.cursor = 0;
+                    app.bcur = 0;
+                    app.gcur = 0;
+                }
+            }
         }
         // look tests: SPHERE_GIT_REPO=n starts on the nth repo
         if let Some(n) = std::env::var("SPHERE_GIT_REPO").ok().and_then(|v| v.parse::<usize>().ok()).filter(|n| *n != app.sel && app.repo.is_none() && *n < app.repos.len()) {
@@ -675,7 +683,8 @@ pub fn update(sim: Res<crate::core::Sim>, mut atlases: ResMut<AppAtlases>, mut a
     }
     app.load_t = sim.t;
     app.loading = true;
-    let agent_repos: Vec<String> = if app.repos.is_empty() {
+    let rediscover = std::mem::take(&mut app.rediscover);
+    let agent_repos: Vec<String> = if app.repos.is_empty() || rediscover {
         let s = svc.shared.lock().unwrap();
         let mut v: Vec<&TaskView> = s.tasks.iter().collect();
         v.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
@@ -684,12 +693,13 @@ pub fn update(sim: Res<crate::core::Sim>, mut atlases: ResMut<AppAtlases>, mut a
         Vec::new()
     };
     let (known, sel, old) = (app.repos.clone(), app.sel, app.cards.clone());
+    let sel_path = known.get(sel).cloned();
     let (tx, rx) = mpsc::channel();
     app.load_rx = Some(Mutex::new(rx));
     std::thread::spawn(move || {
         // finding the repos runs git in each, so it happens here, off the frame
-        let repos = if known.is_empty() { gitdata::discover(&agent_repos, REPOS_MAX) } else { known };
-        let sel = sel.min(repos.len().saturating_sub(1));
+        let repos = if known.is_empty() || rediscover { gitdata::discover(&agent_repos, REPOS_MAX) } else { known };
+        let sel = sel_path.and_then(|p| repos.iter().position(|r| *r == p)).unwrap_or(if rediscover { 0 } else { sel }).min(repos.len().saturating_sub(1));
         let Some(dir) = repos.get(sel) else {
             let _ = tx.send((repos, 0, Repo::default(), Vec::new()));
             return;
@@ -1229,6 +1239,15 @@ fn draw_strip(c: &mut Commands, ui: &Ui, root: Entity, agents: &[TaskView], merg
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reopening_keeps_the_last_read_on_screen() {
+        let mut a = GitApp { repos: vec![PathBuf::from("/r/one"), PathBuf::from("/r/two")], sel: 1, repo: Some(Repo::default()), ..Default::default() };
+        a.open();
+        assert_eq!(a.repos.len(), 2, "the repos stay until the new read is in");
+        assert!(a.repo.is_some() && a.sel == 1);
+        assert!(a.rediscover, "and the next read looks for new repos");
+    }
 
     #[test]
     fn wheel_targets_per_pane() {
