@@ -25,7 +25,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::{oneshot, watch};
 use tokio::task::AbortHandle;
 
@@ -51,6 +51,11 @@ type ApiResult<T> = Result<T, ApiError>;
 
 const MODES: &[&str] = &["default", "acceptEdits", "plan", "dontAsk"];
 
+/// The longest a wait for the end of the day sleeps before it looks at the
+/// clock again: timers stand still while a Mac sleeps, and the day may have
+/// ended meanwhile.
+const CAP_RECHECK: Duration = Duration::from_secs(60);
+
 #[derive(Debug, Clone)]
 struct CtlReply {
     ok: bool,
@@ -71,6 +76,8 @@ struct Rt {
     readers: HashMap<String, AbortHandle>,
     /// Tasks whose agent is being started right now.
     launching: HashSet<String>,
+    /// The wait for the daily cap to end, while queued tasks sit it out.
+    cap_wait: Option<AbortHandle>,
 }
 
 #[derive(Default)]
@@ -334,6 +341,14 @@ fn today() -> String {
     now_rfc3339()[..10].to_string()
 }
 
+/// How long `today()` stays the same: the time left in the UTC day.
+fn until_next_day() -> Duration {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    Duration::from_secs(86_400 - now.as_secs() % 86_400)
+}
+
 async fn wait_exit(rx: &mut watch::Receiver<bool>, dur: Duration) -> bool {
     tokio::time::timeout(dur, async {
         while !*rx.borrow() {
@@ -369,13 +384,6 @@ impl Manager {
         tokio::spawn(async move { this.check_install().await });
         self.host.get().await.context("start sphere-host")?;
         self.recover_all().await?;
-        let this = self.clone();
-        tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(Duration::from_secs(2)).await;
-                this.pump();
-            }
-        });
         self.pump();
         Ok(())
     }
@@ -465,6 +473,9 @@ impl Manager {
                 h.abort();
             }
         }
+        if let Some(h) = &rt.cap_wait {
+            h.abort();
+        }
     }
 
     // ---- scheduling ----------------------------------------------------------
@@ -476,9 +487,18 @@ impl Manager {
             .unwrap_or(false)
     }
 
+    fn has_queued(&self) -> bool {
+        self.hub.view(|v| !v.queued().is_empty())
+    }
+
     /// Start queued tasks while there are free slots. Idle agents hold none.
+    ///
+    /// Whatever can make room (a task arriving, a turn ending, an agent
+    /// exiting or failing to start) calls this itself; nothing polls. Only the
+    /// daily cap ends without an event.
     pub fn pump(self: &Arc<Self>) {
         if self.capped() {
+            self.wait_out_cap();
             return;
         }
         let start: Vec<String> = {
@@ -506,6 +526,28 @@ impl Manager {
             let this = self.clone();
             tokio::spawn(async move { this.launch(task, None).await });
         }
+    }
+
+    /// The cap ends with the UTC day, which nothing announces: queued tasks it
+    /// holds back sleep until then and pump again. With none queued, nothing
+    /// waits.
+    fn wait_out_cap(self: &Arc<Self>) {
+        if !self.has_queued() {
+            return;
+        }
+        let mut rt = self.rt.lock().unwrap();
+        if rt.cap_wait.as_ref().is_some_and(|h| !h.is_finished()) {
+            return;
+        }
+        let this = self.clone();
+        let wait = tokio::spawn(async move {
+            while this.capped() && this.has_queued() {
+                tokio::time::sleep(until_next_day().min(CAP_RECHECK)).await;
+            }
+            this.rt.lock().unwrap().cap_wait = None;
+            this.pump();
+        });
+        rt.cap_wait = Some(wait.abort_handle());
     }
 
     async fn launch(self: Arc<Self>, task: String, message: Option<String>) {
@@ -1717,6 +1759,7 @@ async fn run_capture(cmd: &[String]) -> Result<String> {
 mod tests {
     use super::*;
     use crate::policy::{AutoRule, Decision};
+    use crate::store::Store;
     use sphere_proto::views::OpenStep;
 
     fn view() -> TaskView {
@@ -2146,5 +2189,96 @@ mod tests {
                 && m.contains("Running cargo test")
                 && m.contains("skip the push")
         );
+    }
+
+    fn manager(daily_cap_usd: Option<f64>) -> Arc<Manager> {
+        let cfg = Config {
+            daily_cap_usd,
+            ..Config::default()
+        };
+        let hub = Hub::with_store(Store::open_in_memory().unwrap(), 16).unwrap();
+        Manager::new(Arc::new(cfg), Arc::new(hub))
+    }
+
+    fn queue(m: &Manager, task: &str) {
+        m.hub
+            .publish(
+                task,
+                EventBody::TaskCreated {
+                    title: "t".into(),
+                    prompt: "p".into(),
+                    repo: "/r".into(),
+                    in_place: false,
+                    budget_usd: 1.0,
+                    mode: None,
+                    model: None,
+                    allow_rewrites: false,
+                    resume_session: None,
+                },
+            )
+            .unwrap();
+    }
+
+    fn spend(m: &Manager, task: &str, usd: f64) {
+        m.hub
+            .publish(
+                task,
+                EventBody::Turn {
+                    ok: true,
+                    interrupted: false,
+                    summary: String::new(),
+                    turns: None,
+                    duration_ms: None,
+                    cost_usd: Some(usd),
+                    cost_delta_usd: usd,
+                },
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn the_day_has_one_to_86400_seconds_left() {
+        let left = until_next_day();
+        assert!((Duration::from_secs(1)..=Duration::from_secs(86_400)).contains(&left));
+    }
+
+    #[tokio::test]
+    async fn pumping_with_nothing_queued_waits_for_nothing() {
+        let m = manager(None);
+        m.pump();
+        assert!(m.rt.lock().unwrap().cap_wait.is_none());
+        // Spent to the cap with nothing queued is the same: no clock to watch.
+        let m = manager(Some(0.5));
+        queue(&m, "t1");
+        spend(&m, "t1", 0.5);
+        assert!(m.capped());
+        m.pump();
+        assert!(m.rt.lock().unwrap().cap_wait.is_none());
+    }
+
+    #[tokio::test]
+    async fn tasks_held_back_by_the_daily_cap_wait_once_for_the_end_of_the_day() {
+        let m = manager(Some(0.5));
+        queue(&m, "t1");
+        spend(&m, "t1", 0.5);
+        queue(&m, "t2");
+        m.pump();
+        let wait = m.rt.lock().unwrap().cap_wait.clone().expect("a wait");
+        assert!(!wait.is_finished());
+        assert!(m.rt.lock().unwrap().launching.is_empty(), "nothing starts");
+        // More events while it waits do not pile up more waits.
+        m.pump();
+        m.pump();
+        let again =
+            m.rt.lock()
+                .unwrap()
+                .cap_wait
+                .clone()
+                .expect("the same wait");
+        assert_eq!(again.id(), wait.id());
+        m.abort_all();
+        while !wait.is_finished() {
+            tokio::task::yield_now().await;
+        }
     }
 }
