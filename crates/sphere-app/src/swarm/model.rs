@@ -190,6 +190,8 @@ pub fn from_shared(s: &Shared, prev: &Model, now: i64) -> Model {
             TaskState::NeedsYou => State::Needs,
             // until the app knows which finished branches are merged, finished agents wait off screen (otherwise
             // a launch shows old merged work as ready, then plays its merge again)
+            // a question answered changed no files: nothing to merge, so it is not on the ring
+            TaskState::Done if crate::live::answered(t) => continue,
             TaskState::Done if !s.merged_checked => continue,
             TaskState::Done => {
                 if s.merged.contains(&t.id) {
@@ -994,6 +996,10 @@ mod tests {
             "repo": "/work/api-server", "workdir": format!("/wt/{id}"), "branch": format!("sphere/{id}"), "in_place": false,
             "budget_usd": 0.0, "cost_usd": 0.5, "started_at": started, "updated_at": started,
         });
+        // a finished task that touched nothing is an answered question (not on the ring), so finished fixtures change a file
+        if state == TaskState::Done {
+            v["files"] = serde_json::json!([{"path": "a.rs", "added": 1, "removed": 0}]);
+        }
         if let (Some(o), Some(e)) = (v.as_object_mut(), extra.as_object()) {
             for (k, x) in e {
                 o.insert(k.clone(), x.clone());
@@ -1048,6 +1054,14 @@ mod tests {
         assert_eq!(m.repos.len(), 1);
         assert_eq!(m.repos[0].key, "api-server");
         assert_eq!(m.repos[0].branch, "main");
+    }
+
+    #[test]
+    fn an_answered_task_is_not_in_the_model() {
+        let s = shared(vec![task("q", TaskState::Done, &t_ago(100), serde_json::json!({"files": []})), task("ok", TaskState::Done, &t_ago(100), serde_json::json!({}))]);
+        let m = from_shared(&s, &Model::default(), now());
+        assert_eq!(state_of(&m, "q"), None);
+        assert_eq!(state_of(&m, "ok"), Some(State::Done));
     }
 
     #[test]
