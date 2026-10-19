@@ -16,7 +16,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       # sphere-app keeps its own wide formatting; the other crates follow rustfmt
       - name: Format
-        run: cargo fmt -p sphere-proto -p sphere-host -p sphered -p sphere-client -p sphere-cli -p fake-claude --check
+        run: cargo fmt -p sphere-proto -p sphere-host -p sphered -p sphere-client -p sphere-cli -p fake-claude -p sphere-voice --check
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Test

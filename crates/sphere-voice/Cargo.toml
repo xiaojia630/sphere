@@ -1,0 +1,18 @@
+[package]
+name = "sphere-voice"
+description = "Sphere's spoken voice: Kokoro-82M (bm_george) through ONNX Runtime, with misaki's British lexicons for phonemes"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish = false
+
+[dependencies]
+# ONNX Runtime (MIT), prebuilt and linked statically; CPU only.
+ort = { version = "=2.0.0-rc.15", default-features = false, features = ["std", "download-binaries", "tls-native", "copy-dylibs", "api-31"] }
+sha2 = "=0.10.9"
+serde_json.workspace = true
+
+[dev-dependencies]
+hound = "=3.5.1"
