@@ -140,6 +140,9 @@ pub struct Snapshot {
     pub cost_today_usd: f64,
     #[serde(default)]
     pub daily_cap_usd: Option<f64>,
+    /// How many agents run at once; the rest wait queued. `None` from an older sphered.
+    #[serde(default)]
+    pub max_concurrent: Option<usize>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

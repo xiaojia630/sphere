@@ -33,6 +33,9 @@ pub struct Shared {
     pub runs: std::collections::HashMap<String, Run>,
     /// finished tasks whose branch is already in the repo (the app checks with git, see `live::check_merged`)
     pub merged: std::collections::HashSet<String>,
+    /// what today's agents have cost, and how many sphered runs at once (from the snapshot)
+    pub cost_today_usd: f64,
+    pub max_concurrent: Option<usize>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -164,6 +167,8 @@ fn apply(sh: &Mutex<Shared>, snap: Snapshot) {
     let mut s = sh.lock().unwrap();
     s.tasks = snap.tasks;
     s.requests = snap.requests;
+    s.cost_today_usd = snap.cost_today_usd;
+    s.max_concurrent = snap.max_concurrent;
     s.version += 1;
 }
 
@@ -243,10 +248,12 @@ async fn session(sh: &Arc<Mutex<Shared>>, c: &Client, rx: &mut mpsc::UnboundedRe
     c.hello(ClientKind::App).await.map_err(|e| e.to_string())?;
     let snap = c.snapshot().await.map_err(|e| e.to_string())?;
     let seq = snap.seq;
-    // backfill the runs of the most recent tasks up to the snapshot, then the subscription carries on
+    // backfill the runs of every active task and the most recent others up to the snapshot (the swarm shows each
+    // active agent's steps), then the subscription carries on
     let mut recent: Vec<&TaskView> = snap.tasks.iter().collect();
     recent.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
-    let ids: Vec<String> = recent.iter().take(8).map(|t| t.id.clone()).collect();
+    let active = |t: &TaskView| matches!(t.state, sphere_proto::TaskState::Queued | sphere_proto::TaskState::Working | sphere_proto::TaskState::NeedsYou);
+    let ids: Vec<String> = recent.iter().enumerate().filter(|(i, t)| *i < 8 || active(t)).map(|(_, t)| t.id.clone()).collect();
     let mut runs = std::collections::HashMap::new();
     for id in ids {
         let p = sphere_client::HistoryParams { task: Some(id.clone()), before: Some(seq + 1), limit: Some(2000) };
