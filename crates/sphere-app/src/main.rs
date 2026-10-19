@@ -29,6 +29,7 @@ mod panel;
 mod service;
 mod sound;
 mod summon;
+mod swarm;
 mod sysapp;
 mod sysstats;
 mod theme;
@@ -208,6 +209,7 @@ fn main() {
         .init_resource::<working::Working>()
         .init_resource::<momentfx::MomentFx>()
         .init_resource::<hud::FrameStats>()
+        .add_plugins(swarm::SwarmPlugin)
         .add_systems(Startup, (sound::setup, setup_core, setup_cameras, hud::setup_panels, hud::setup_backdrop, hud::setup_overlay, cmdbar::setup, visor::setup, fx::setup, homepanels::setup, orbit::setup, working::setup, (codeapp::setup, gitapp::setup, containers::setup, ports::setup, sysapp::setup, filesapp::setup).chain(), momentfx::setup, callouts::setup, mouse::setup, mouse::setup_reticle).chain())
         .add_systems(First, (tick_sim, theme::animate))
         .add_systems(PreUpdate, hud::script)
