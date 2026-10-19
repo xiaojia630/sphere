@@ -1,6 +1,7 @@
 //! Sphere OS look test (M0): proves the approved HUD look can be matched natively in Rust.
 mod appframe;
 mod apps;
+mod calendar;
 mod callouts;
 mod codeapp;
 mod editors;
@@ -105,6 +106,8 @@ pub struct Args {
     pub moment: bool,
     /// `--elsewhere`: the demo has Claude sessions running outside Sphere (the Agents panel, the swarm's ghosts)
     pub elsewhere: bool,
+    /// `--calendar`: the demo's Next 24h rail shows sample events (screenshots never read the real Calendar)
+    pub calendar: bool,
     /// `--takeover card|armed|ambiguous|list|after`: the demo opens the take-over card, or plays a take-over
     pub takeover: Option<String>,
     /// `--theme <name>`: balanced, full, cyan, black, red
@@ -124,7 +127,7 @@ impl Args {
 }
 
 fn parse_args() -> Args {
-    let mut a = Args { cmd: None, bench: None, shot: None, record: None, record_frames: 180, frames: 120, depth: false, orbit: false, apps: false, work: false, swarm: false, code: false, git: false, open_app: None, icon: false, aa: std::env::var("SPHERE_AA").unwrap_or_else(|_| "smaa".into()), offscreen: false, collapsed: false, focus_term: false, msaa: true, size: (1600, 1000), dt: 1.0 / 20.0, demo: false, live: false, moment: false, elsewhere: false, takeover: None, theme: None, motion: None };
+    let mut a = Args { cmd: None, bench: None, shot: None, record: None, record_frames: 180, frames: 120, depth: false, orbit: false, apps: false, work: false, swarm: false, code: false, git: false, open_app: None, icon: false, aa: std::env::var("SPHERE_AA").unwrap_or_else(|_| "smaa".into()), offscreen: false, collapsed: false, focus_term: false, msaa: true, size: (1600, 1000), dt: 1.0 / 20.0, demo: false, live: false, moment: false, elsewhere: false, calendar: false, takeover: None, theme: None, motion: None };
     let mut it = std::env::args().skip(1);
     while let Some(s) = it.next() {
         match s.as_str() {
@@ -155,6 +158,7 @@ fn parse_args() -> Args {
             "--live" => a.live = true,
             "--moment" => a.moment = true,
             "--elsewhere" => a.elsewhere = true,
+            "--calendar" => a.calendar = true,
             "--takeover" => {
                 a.takeover = it.next();
                 a.elsewhere = true;
@@ -171,7 +175,7 @@ fn parse_args() -> Args {
                 }
             }
             "-h" | "--help" => {
-                println!("sphere-app [--demo] [--live] [--moment] [--elsewhere] [--takeover card|armed|ambiguous|list|after] [--theme name] [--motion fast|cinematic] [--cmd \"<command>\"] [--bench <seconds>] [--shot <png> [--frames N] [--depth] [--term]] [--size WxH] [--no-msaa]");
+                println!("sphere-app [--demo] [--live] [--moment] [--elsewhere] [--calendar] [--takeover card|armed|ambiguous|list|after] [--theme name] [--motion fast|cinematic] [--cmd \"<command>\"] [--bench <seconds>] [--shot <png> [--frames N] [--depth] [--term]] [--size WxH] [--no-msaa]");
                 std::process::exit(0);
             }
             other => eprintln!("ignoring unknown argument {other}"),
@@ -208,6 +212,8 @@ fn main() {
         .init_resource::<takeover::TakeOver>()
         .insert_resource(service::start(args.offline()))
         .insert_resource(sysstats::start(args.offline()))
+        // this Mac's Calendar only in the windowed app: screenshots, benches and demos never ask for access
+        .insert_resource(calendar::start(!(args.demo || args.headless() || args.bench.is_some() || args.icon), args.calendar))
         .insert_resource(theme::Theme::new(args.theme.unwrap_or_else(|| if args.offline() { theme::ThemeId::Balanced } else { theme::saved() })))
         .init_resource::<live::Live>()
         .init_resource::<live::Toasts>()
@@ -239,7 +245,7 @@ fn main() {
             (
                 (keys, stage_view, camera_rig, update_core, spin_system, update_materials, panel::update_panels, hud::update_readout, hud::update_backdrop)
                     .chain(),
-                (takeover::sync, live::check_merged, live::sync, live::transitions, moment::update, summon::notify, summon::from_notifications, live::tick_toasts, panel::rebuild_agents_ui, hud::update_readout_text, hud::update_clock, panel::blink_system, homepanels::update, homepanels::draw_rolodex, homepanels::draw_say).chain(),
+                (takeover::sync, live::check_merged, live::sync, live::transitions, moment::update, summon::notify, summon::from_notifications, live::tick_toasts, panel::rebuild_agents_ui, hud::update_readout_text, hud::update_clock, panel::blink_system, homepanels::update, homepanels::draw_rail, homepanels::draw_rolodex, homepanels::draw_say).chain(),
                 (term::pump, cmdbar::keys, takeover::keys, moment::keys, term::read_keys, home::keys, orbit::keys, working::keys, (codeapp::keys, gitapp::keys, containers::keys, ports::keys, sysapp::keys, filesapp::keys).chain(), momentfx::keys, visor::buttons, takeover::buttons, mouse::update, takeover::commands, appframe::test_click, appframe::test_wheel, appframe::route_clicks, home::apply, apps::apply).chain(),
                 (working::update, working::place_panels, working::draw, (codeapp::update, codeapp::place, codeapp::draw, gitapp::update, gitapp::place, gitapp::draw, containers::update, containers::place, containers::draw, ports::update, ports::place, ports::draw, sysapp::update, sysapp::place, sysapp::draw, filesapp::update, filesapp::place, filesapp::draw).chain(), momentfx::flows, momentfx::draw, momentfx::draw_sats, callouts::update).chain(),
                 (orbit::update, mouse::draw_reticle, visor::draw_buttons, visor::ticker, visor::toasts, home::landed_sound, home::step_view, fx::update, term::draw, cmdbar::draw, takeover::script, takeover::draw, takeover::hover_look, moment::draw).chain(),

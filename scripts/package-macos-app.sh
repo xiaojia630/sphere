@@ -28,6 +28,8 @@ cat > "$app/Contents/Info.plist" <<PLIST
   <key>LSApplicationCategoryType</key><string>public.app-category.developer-tools</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>NSSupportsAutomaticGraphicsSwitching</key><true/>
+  <key>NSCalendarsUsageDescription</key><string>Sphere shows your next 24 hours of events on its home screen.</string>
+  <key>NSCalendarsFullAccessUsageDescription</key><string>Sphere shows your next 24 hours of events on its home screen.</string>
 </dict>
 </plist>
 PLIST

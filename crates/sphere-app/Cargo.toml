@@ -40,10 +40,12 @@ bevy = { version = "=0.20.0", default-features = false, features = ["x11"] }
 [target.'cfg(target_os = "macos")'.dependencies]
 global-hotkey = "=0.9.0"
 objc2 = "=0.6.5"
-objc2-app-kit = { version = "=0.3.2", default-features = false, features = ["std", "NSApplication", "NSResponder", "NSRunningApplication"] }
+objc2-app-kit = { version = "=0.3.2", default-features = false, features = ["std", "objc2-core-foundation", "NSApplication", "NSResponder", "NSRunningApplication", "NSColor", "NSColorSpace"] }
 objc2-foundation = { version = "=0.3.2", default-features = false, features = ["std", "NSString", "NSBundle", "NSError", "NSSet", "NSArray", "NSDictionary", "NSObject"] }
 objc2-user-notifications = { version = "=0.3.2", default-features = false, features = ["std", "block2", "UNUserNotificationCenter", "UNNotificationContent", "UNNotificationRequest", "UNNotificationTrigger", "UNNotificationSound", "UNNotification", "UNNotificationAction", "UNNotificationCategory", "UNNotificationResponse"] }
 block2 = "=0.6.2"
+# the home's Next 24h rail: Calendar events through EventKit
+objc2-event-kit = { version = "=0.3.2", default-features = false, features = ["std", "block2", "objc2-app-kit", "EKEventStore", "EKEvent", "EKCalendarItem", "EKCalendar", "EKObject", "EKTypes"] }
 
 [features]
 # Linux Wayland sessions: build with `--features wayland` (needs libwayland-dev).

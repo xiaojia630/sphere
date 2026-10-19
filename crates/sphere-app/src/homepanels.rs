@@ -62,6 +62,18 @@ pub struct MeterValue(pub usize);
 pub struct RoloRow;
 #[derive(Component)]
 pub struct SayText;
+#[derive(Component)]
+pub struct RailEmpty;
+#[derive(Component)]
+pub struct RailHint;
+#[derive(Component)]
+pub struct RailRow(pub usize);
+#[derive(Component)]
+pub struct RailTime(pub usize);
+#[derive(Component)]
+pub struct RailTitle(pub usize);
+#[derive(Component)]
+pub struct RailDot(pub usize);
 
 #[derive(Resource, Default)]
 pub struct Rolodex {
@@ -238,15 +250,25 @@ pub fn setup(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut atlas
     c.entity(b).add_child(meters);
     spawn_panel_quad(c, &mut meshes, &mut pmats, &ui, &PanelSpec { id: PanelId::Tele, w, h, home: anchor('l', 54.0, 'b', 962.0, w, h), home_scale: 1.0, side: 1.0, phase: 5.3, show_at: show_at(3), unframed: false });
 
-    // ---- rail: right 1546, top 236, "Next 24h" (no calendar source yet: an empty state)
+    // ---- rail: right 1546, top 236, "Next 24h": Calendar events (calendar.rs), else an empty state
     let (w, h) = (336.0, 120.0);
     let ui = spawn_ui_panel(c, &mut atlas, w, h);
     let b = c.spawn(Node { width: percent(100), height: percent(100), flex_direction: FlexDirection::Column, row_gap: px(8), align_items: AlignItems::FlexEnd, ..default() }).id();
     c.entity(ui.root).add_child(b);
     let rh = c.spawn((Text::new("NEXT 24H"), font(&f.ui600, 11.5, 4.6), TextColor(dim), LineHeight::Px(13.8), Node { margin: UiRect { right: px(52), ..default() }, ..default() })).id();
-    let empty = c.spawn((Text::new("NOTHING SCHEDULED"), font(&f.ui500, 12.5, 2.5), TextColor(with_alpha(line, 0.55)), LineHeight::Px(16.0), Node { margin: UiRect { right: px(52), top: px(6), ..default() }, ..default() })).id();
-    let hint = c.spawn((Text::new("Calendar arrives with a later app"), font(&f.ui500, 12.0, 1.0), TextColor(with_alpha(dim, 0.8)), LineHeight::Px(15.0), Node { margin: UiRect { right: px(52), ..default() }, ..default() })).id();
+    let empty = c.spawn((RailEmpty, Text::new("NOTHING SCHEDULED"), font(&f.ui500, 12.5, 2.5), TextColor(with_alpha(line, 0.55)), LineHeight::Px(16.0), Node { margin: UiRect { right: px(52), top: px(6), ..default() }, ..default() })).id();
+    let hint = c.spawn((RailHint, Text::new("No calendar connected"), font(&f.ui500, 12.0, 1.0), TextColor(with_alpha(dim, 0.8)), LineHeight::Px(15.0), Node { margin: UiRect { right: px(52), ..default() }, ..default() })).id();
     c.entity(b).add_children(&[rh, empty, hint]);
+    // event rows, hidden until there are events: the time, the title, the calendar's colour as a square
+    for i in 0..crate::calendar::SLOTS {
+        // a fixed row and time slot (wide enough for "TMRW 09:00"), so times and titles line up in columns
+        let row = c.spawn((RailRow(i), Node { display: Display::None, flex_direction: FlexDirection::Row, align_items: AlignItems::Center, column_gap: px(9), width: px(RAIL_ROW_W), margin: UiRect { right: px(52), ..default() }, ..default() })).id();
+        let tm = c.spawn((RailTime(i), Text::new(""), font(&f.mono, 11.5, 0.46), TextColor(dim), LineHeight::Px(16.0), TextLayout { justify: Justify::Right, linebreak: LineBreak::NoWrap }, Node { width: px(RAIL_TIME_W), flex_shrink: 0.0, ..default() })).id();
+        let tt = c.spawn((RailTitle(i), Text::new(""), font(&f.ui500, 12.5, 0.6), TextColor(with_alpha(line, 0.85)), LineHeight::Px(16.0), TextLayout { linebreak: LineBreak::NoWrap, ..default() }, Node { flex_grow: 1.0, flex_shrink: 1.0, overflow: Overflow::clip(), ..default() })).id();
+        let sq = c.spawn((RailDot(i), Node { width: px(6), height: px(6), ..default() }, BackgroundColor(fill))).id();
+        c.entity(row).add_children(&[tm, tt, sq]);
+        c.entity(b).add_child(row);
+    }
     spawn_panel_quad(c, &mut meshes, &mut pmats, &ui, &PanelSpec { id: PanelId::Rail, w, h, home: anchor('r', 1546.0, 't', 236.0, w, h), home_scale: 1.0, side: -1.0, phase: 0.2, show_at: show_at(5), unframed: true });
 
     // ---- say: centre 800, top 886, 780 wide
@@ -342,6 +364,82 @@ pub fn update(
         let (i, j) = (m.0 / 100, m.0 % 100);
         let on = (j as f32) < (vals[i] * 22.0).round();
         bg.set_if_neq(BackgroundColor(if on { fill } else { with_alpha(line, 0.13) }));
+    }
+}
+
+/// The Next 24h rail's row width and time slot: "TMRW 09:00" in the 11.5px mono face, with a little room.
+const RAIL_ROW_W: f32 = 270.0;
+const RAIL_TIME_W: f32 = 82.0;
+
+/// The Next 24h rail: Calendar events when the feed changes and as the minute turns (times read NOW, then pass),
+/// else "Nothing scheduled" and why.
+#[allow(clippy::type_complexity)]
+pub fn draw_rail(
+    cal: Res<crate::calendar::Calendar>,
+    mut seen: Local<(u64, i64)>,
+    mut nodes: ParamSet<(Query<(&RailRow, &mut Node)>, Query<&mut Node, With<RailEmpty>>, Query<&mut Node, With<RailHint>>)>,
+    mut texts: ParamSet<(Query<(&RailTime, &mut Text)>, Query<(&RailTitle, &mut Text)>, Query<&mut Text, With<RailEmpty>>, Query<&mut Text, With<RailHint>>)>,
+    mut dots: Query<(&RailDot, &mut BackgroundColor)>,
+) {
+    let now = crate::core::unix_now();
+    let (ver, feed) = cal.get();
+    if *seen == (ver + 1, now / 60) {
+        return;
+    }
+    *seen = (ver + 1, now / 60);
+    let r = crate::calendar::rail(&feed, now, crate::core::local_offset, crate::calendar::SLOTS);
+    let show = |on: bool| if on { Display::Flex } else { Display::None };
+    for (i, mut n) in &mut nodes.p0() {
+        let d = show(i.0 < r.rows.len());
+        if n.display != d {
+            n.display = d;
+        }
+    }
+    for (i, mut t) in &mut texts.p0() {
+        let v = r.rows.get(i.0).map(|x| x.time.clone()).unwrap_or_default();
+        if t.0 != v {
+            t.0 = v;
+        }
+    }
+    for (i, mut t) in &mut texts.p1() {
+        let v = r.rows.get(i.0).map(|x| x.title.clone()).unwrap_or_default();
+        if t.0 != v {
+            t.0 = v;
+        }
+    }
+    for mut t in &mut texts.p2() {
+        let v = r.empty.unwrap_or("");
+        if t.0 != v {
+            t.0 = v.into();
+        }
+    }
+    for mut t in &mut texts.p3() {
+        let v = r.hint.unwrap_or("");
+        if t.0 != v {
+            t.0 = v.into();
+        }
+    }
+    let fill = role_color(Role::Fill);
+    for (i, mut bg) in &mut dots {
+        // the calendar's own colour; the theme's fill when it has none; no square on the "+N more" row
+        let c = match r.rows.get(i.0) {
+            Some(x) if x.time.is_empty() => Color::NONE,
+            Some(x) => x.color.map(|[r, g, b]| Color::srgb(r, g, b)).unwrap_or(fill),
+            None => Color::NONE,
+        };
+        bg.set_if_neq(BackgroundColor(c));
+    }
+    for mut n in &mut nodes.p1() {
+        let d = show(r.empty.is_some());
+        if n.display != d {
+            n.display = d;
+        }
+    }
+    for mut n in &mut nodes.p2() {
+        let d = show(r.hint.is_some());
+        if n.display != d {
+            n.display = d;
+        }
     }
 }
 
