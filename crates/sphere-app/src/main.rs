@@ -35,6 +35,7 @@ mod theme;
 mod review;
 mod stats;
 mod term;
+mod motion;
 mod util;
 mod visor;
 mod working;
@@ -96,6 +97,7 @@ pub struct Args {
     pub moment: bool,
     /// `--theme <name>`: balanced, full, cyan, black, red
     pub theme: Option<theme::ThemeId>,
+    pub motion: Option<motion::Motion>,
 }
 
 impl Args {
@@ -110,7 +112,7 @@ impl Args {
 }
 
 fn parse_args() -> Args {
-    let mut a = Args { cmd: None, bench: None, shot: None, record: None, record_frames: 180, frames: 120, depth: false, orbit: false, apps: false, work: false, code: false, git: false, open_app: None, icon: false, aa: std::env::var("SPHERE_AA").unwrap_or_else(|_| "smaa".into()), offscreen: false, collapsed: false, focus_term: false, msaa: true, size: (1600, 1000), dt: 1.0 / 20.0, demo: false, live: false, moment: false, theme: None };
+    let mut a = Args { cmd: None, bench: None, shot: None, record: None, record_frames: 180, frames: 120, depth: false, orbit: false, apps: false, work: false, code: false, git: false, open_app: None, icon: false, aa: std::env::var("SPHERE_AA").unwrap_or_else(|_| "smaa".into()), offscreen: false, collapsed: false, focus_term: false, msaa: true, size: (1600, 1000), dt: 1.0 / 20.0, demo: false, live: false, moment: false, theme: None, motion: None };
     let mut it = std::env::args().skip(1);
     while let Some(s) = it.next() {
         match s.as_str() {
@@ -140,6 +142,7 @@ fn parse_args() -> Args {
             "--live" => a.live = true,
             "--moment" => a.moment = true,
             "--theme" => a.theme = it.next().and_then(|v| theme::ThemeId::from_key(&v)),
+            "--motion" => a.motion = it.next().and_then(|v| motion::Motion::from_key(&v)),
             "--dt" => a.dt = it.next().and_then(|v| v.parse().ok()).unwrap_or(0.05),
             "--size" => {
                 if let Some(v) = it.next() {
@@ -150,7 +153,7 @@ fn parse_args() -> Args {
                 }
             }
             "-h" | "--help" => {
-                println!("sphere-app [--demo] [--live] [--moment] [--theme name] [--cmd \"<command>\"] [--bench <seconds>] [--shot <png> [--frames N] [--depth] [--term]] [--size WxH] [--no-msaa]");
+                println!("sphere-app [--demo] [--live] [--moment] [--theme name] [--motion fast|cinematic] [--cmd \"<command>\"] [--bench <seconds>] [--shot <png> [--frames N] [--depth] [--term]] [--size WxH] [--no-msaa]");
                 std::process::exit(0);
             }
             other => eprintln!("ignoring unknown argument {other}"),
@@ -169,6 +172,8 @@ fn main() {
     let args = parse_args();
     interactive_qos();
     let mut app = App::new();
+    // screenshots and demos play Fast unless told otherwise; the app plays what was chosen last
+    motion::use_motion(args.motion.unwrap_or_else(|| if args.offline() { motion::Motion::Fast } else { motion::saved() }));
     app.insert_resource(args.clone())
         .insert_resource(ClearColor(Color::BLACK))
         .add_plugins(default_plugins(&args))
@@ -338,7 +343,7 @@ fn tick_sim(time: Res<Time<Real>>, mut sim: ResMut<Sim>) {
     let dt = if sim.frozen { 0.0 } else { dt };
     sim.dt = dt;
     sim.t += dt;
-    sim.boot_t += dt;
+    sim.boot_t += motion::dt(motion::Pace::Big, dt);
 }
 
 /// How the three window cameras (core, panels, overlay) share textures and reach the window.

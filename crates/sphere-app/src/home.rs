@@ -39,7 +39,7 @@ impl Default for View {
 }
 
 pub fn step_view(sim: Res<crate::core::Sim>, mut v: ResMut<View>) {
-    let dt = sim.dt;
+    let dt = crate::motion::dt(crate::motion::Pace::Ui, sim.dt);
     v.px.step(dt);
     v.py.step(dt);
 }

@@ -298,7 +298,7 @@ pub fn update(
         Query<(&Chip, &mut Transform, &mut Visibility, &MeshMaterial3d<PanelMaterial>)>,
     )>,
 ) {
-    let dt = sim.dt;
+    let dt = crate::motion::dt(crate::motion::Pace::Big, sim.dt);
     w.amt.t = if w.open { 1.0 } else { 0.0 };
     w.amt.step(dt);
     w.big.step(dt);

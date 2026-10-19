@@ -317,6 +317,11 @@ pub fn update(
                                 Hit::Ring(CORE) => orb.set(false, &mut sound),
                                 _ => {}
                             }
+                        } else if matches!(hit, Hit::Panel(_, PanelId::Apps | PanelId::Terminal | PanelId::Agents)) {
+                            // these panels have no double-click: open now instead of waiting to rule one out
+                            ms.last_click = None;
+                            ms.pending_click = None;
+                            single_click(hit, pos, &panels.p0(), &mut rolo, &mut open, &mut sound, &mut toasts, &mut acts);
                         } else if dbl {
                             ms.last_click = None;
                             ms.pending_click = None;
