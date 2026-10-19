@@ -158,7 +158,9 @@ done
 say "- $(grep -h 'stats: entities' "$OUT"/startup-*.log | head -1 | sed 's/stats: //')"
 say ""
 
-# 4. the live System figures: Sphere runs these every 2 s (docker every 6 s) whenever it is open, outside --demo
+# 4. what the live System figures used to cost: up to 0.1.3 Sphere ran these every 2 s (docker every 6 s) while open,
+# outside --demo. It now reads CPU, memory, GPU and network in process, only while on screen, and runs `docker ps`
+# only at start and when `docker events` reports a change, so this table is the "before" for that change.
 cost() { # label, every-n-seconds, command...: CPU ms per call (user + system, children included), over 10 calls
     local what=$1 every=$2
     shift 2
@@ -166,7 +168,7 @@ cost() { # label, every-n-seconds, command...: CPU ms per call (user + system, c
     ms=$({ /usr/bin/time -p bash -c 'for i in 1 2 3 4 5 6 7 8 9 10; do "$@" >/dev/null 2>&1; done' _ "$@"; } 2>&1 | awk '/^(user|sys) / { s += $2 } END { printf "%.1f", s * 100 }')
     say "| $what | $ms | every ${every} s | $(awk -v m="$ms" -v e="$every" 'BEGIN { printf "%.2f", m / e / 10 }') |"
 }
-say "## What the live System figures cost (outside --demo)"
+say "## What the live System figures cost up to 0.1.3 (now read in process; docker ps only on a container change)"
 say ""
 say "| command | CPU ms per call | how often | % of one core |"
 say "| --- | --- | --- | --- |"
