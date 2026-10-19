@@ -39,6 +39,7 @@ mod review;
 mod stats;
 mod term;
 mod motion;
+mod uilayout;
 mod util;
 mod visor;
 mod working;
@@ -255,6 +256,7 @@ fn main() {
         r.add_systems(bevy::render::Render, render_thread_qos);
     }
     app.add_plugins(lean::LeanPlugin);
+    app.add_plugins(uilayout::UiLayoutPlugin);
     app.run();
 }
 
