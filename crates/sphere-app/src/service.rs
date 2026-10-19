@@ -81,6 +81,8 @@ pub struct Shared {
     pub hidden: bool,
     /// take-overs that came back, for `takeover::finish` to pick up: (the session id asked for, the outcome)
     pub taken: Vec<(String, Result<sphere_proto::api::TakeOverResult, String>)>,
+    /// seconds agents waited on you today over requests already closed (the snapshot's; `Live` adds the open ones)
+    pub waited_today_secs: u64,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -162,7 +164,8 @@ impl Run {
 
 pub enum Cmd {
     Start { repo: String, prompt: String },
-    Answer { request: String, answer: AnswerKind, text: Option<String> },
+    /// `always`: also save the rule the agent suggested (a yes only)
+    Answer { request: String, answer: AnswerKind, text: Option<String>, always: bool },
     Send { task: String, text: String },
     Interrupt { task: String },
     Stop { task: String },
@@ -179,6 +182,13 @@ pub struct Service {
 impl Service {
     pub fn send(&self, c: Cmd) {
         let _ = self.tx.send(c);
+    }
+
+    /// A service with no link thread, whose commands can be read back from the receiver (tests).
+    #[cfg(test)]
+    pub fn with_receiver() -> (Service, mpsc::UnboundedReceiver<Cmd>) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        (Service { shared: Arc::new(Mutex::new(Shared::default())), tx }, rx)
     }
 }
 
@@ -219,6 +229,7 @@ fn apply(sh: &Mutex<Shared>, snap: Snapshot) {
     s.requests = snap.requests;
     s.cost_today_usd = snap.cost_today_usd;
     s.max_concurrent = snap.max_concurrent;
+    s.waited_today_secs = snap.waited_today_secs;
     s.version += 1;
 }
 
@@ -455,6 +466,7 @@ fn set_outside(sh: &Mutex<Shared>, list: Vec<sphere_proto::api::OutsideSession>)
 }
 
 async fn command(c: &Client, cmd: Cmd, sh: &Mutex<Shared>) -> Result<(), String> {
+    use sphere_proto::api::kind;
     match cmd {
         Cmd::TakeOver { session_id } => {
             let r = c.take_over(&session_id).await.map_err(|e| e.to_string());
@@ -476,11 +488,12 @@ async fn command(c: &Client, cmd: Cmd, sh: &Mutex<Shared>) -> Result<(), String>
             };
             c.start_task(p).await.map(|_| ()).map_err(|e| format!("could not start: {e}"))
         }
-        Cmd::Answer { request, answer, text } => {
-            let p = sphere_client::AnswerParams { request, answer, text, input: None, always: false };
+        Cmd::Answer { request, answer, text, always } => {
+            let p = sphere_client::AnswerParams { request, answer, text, input: None, always };
             match c.answer(p).await {
                 Ok(()) => Ok(()),
-                Err(e) if e.is_already_answered() => Ok(()),
+                // answered elsewhere (the card, the CLI, a notification) or gone: nothing left to answer, so not an error
+                Err(e) if matches!(e.kind(), Some(k) if k == kind::ALREADY_ANSWERED || k == kind::NOT_FOUND || k == kind::WITHDRAWN) => Ok(()),
                 Err(e) => Err(format!("could not answer: {e}")),
             }
         }
