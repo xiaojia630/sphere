@@ -538,7 +538,8 @@ pub fn build_agents_dyn(list: &[Agent]) -> [Geo; 4] {
     let mut work = Geo::new();
     let mut need = Geo::new();
     let mut done = Geo::new();
-    for (i, a) in list.iter().enumerate() {
+    // four sectors: the first four agents (the panel's order)
+    for (i, a) in list.iter().take(4).enumerate() {
         let (a0, a1) = sector(i);
         ring_geo(&mut track, 247.0, 1.0, RingOpt { a0, a1, ..Default::default() });
         for t in [a0, a1] {

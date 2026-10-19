@@ -484,11 +484,11 @@ pub fn draw(mut commands: Commands, app: Res<ContainersApp>, svc: Res<Service>, 
     if app.amt.x < 0.001 && !app.open {
         return;
     }
-    let (agents, sver) = {
+    let (agents, merged, sver) = {
         let s = svc.shared.lock().unwrap();
         let mut v = s.tasks.clone();
         v.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
-        (v, s.version)
+        (v, s.merged.clone(), s.version)
     };
     let key = (app.version, sver, theme.version);
     if *seen == key {
@@ -514,7 +514,7 @@ pub fn draw(mut commands: Commands, app: Res<ContainersApp>, svc: Res<Service>, 
     };
     ui.corelab(c, ws.corelab, "Containers", clip(&l2, 34), l2c);
     ui.top(c, ws.panes[TOP], "Containers", format!("{} CONTAINERS · {up} UP", all.len()), "container model and actions after oxker (MIT) · docker");
-    ui.strip(c, ws.panes[STRIP], &agents, ["J K / ↑ ↓ SELECT   , . PAGE   S START / STOP   R RESTART   P PULL", "D REMOVE   F FOLLOW   [ ] SCROLL LOGS   ESC CLOSE"]);
+    ui.strip(c, ws.panes[STRIP], &agents, &merged, ["J K / ↑ ↓ SELECT   , . PAGE   S START / STOP   R RESTART   P PULL", "D REMOVE   F FOLLOW   [ ] SCROLL LOGS   ESC CLOSE"]);
     // summary
     let r = c.spawn(Node { width: percent(100), height: percent(100), flex_direction: FlexDirection::Row, align_items: AlignItems::Center, column_gap: px(22), padding: UiRect::horizontal(px(16)), ..default() }).id();
     c.entity(ws.panes[SUM]).add_child(r);

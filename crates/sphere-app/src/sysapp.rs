@@ -345,11 +345,11 @@ pub fn draw(mut commands: Commands, app: Res<SysApp>, svc: Res<Service>, roots: 
     if app.amt.x < 0.001 && !app.open {
         return;
     }
-    let (agents, sver) = {
+    let (agents, merged, sver) = {
         let s = svc.shared.lock().unwrap();
         let mut v = s.tasks.clone();
         v.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
-        (v, s.version)
+        (v, s.merged.clone(), s.version)
     };
     let key = (app.version, sver, theme.version);
     if *seen == key {
@@ -375,7 +375,7 @@ pub fn draw(mut commands: Commands, app: Res<SysApp>, svc: Res<Service>, roots: 
     let used = s.mem[0] + s.mem[1] + s.mem[2];
     ui.corelab(c, ws.corelab, "System", format!("cpu {} · memory {:.0}%", pct_or_dash(app.cpu), 100.0 * used / s.mem_total.max(1.0)), ui.line);
     ui.top(c, ws.panes[TOP], "System", s.chip.to_uppercase(), "sampled from ps, vm_stat, sysctl, netstat, ioreg, pmset");
-    ui.strip(c, ws.panes[STRIP], &agents, ["↑ ↓ SELECT   S SORT CPU / MEMORY", "K STOP PROCESS   ESC CLOSE"]);
+    ui.strip(c, ws.panes[STRIP], &agents, &merged, ["↑ ↓ SELECT   S SORT CPU / MEMORY", "K STOP PROCESS   ESC CLOSE"]);
     // processor
     let b = ui.body(c, ws.panes[CPU]);
     let ncores = app.ticks_prev.len();

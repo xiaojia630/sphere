@@ -737,12 +737,12 @@ pub fn draw(mut commands: Commands, app: Res<GitApp>, svc: Res<Service>, roots: 
     if app.amt.x < 0.001 && !app.open {
         return;
     }
-    let (agents, sver) = {
+    let (agents, merged, sver) = {
         let s = svc.shared.lock().unwrap();
         let mut v: Vec<TaskView> = s.tasks.clone();
         v.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
         v.truncate(3);
-        (v, s.version)
+        (v, s.merged.clone(), s.version)
     };
     let key = (app.version, sver, theme.version);
     if *seen == key {
@@ -769,7 +769,7 @@ pub fn draw(mut commands: Commands, app: Res<GitApp>, svc: Res<Service>, roots: 
     for i in 0..REPOS {
         draw_card(c, &ui, root(Pane::Repo(i as u8)), app.cards.get(first + i), first + i == app.sel, first + i);
     }
-    draw_strip(c, &ui, root(Pane::Strip), &agents);
+    draw_strip(c, &ui, root(Pane::Strip), &agents, &merged);
     let empty_panes = |c: &mut Commands, except_graph: bool| {
         for p in [Pane::Branches, Pane::Commit, Pane::Status, Pane::Remote].into_iter().chain((!except_graph).then_some(Pane::Graph)) {
             let b = ui.body(c, root(p));
@@ -1196,14 +1196,14 @@ fn draw_remote(c: &mut Commands, ui: &Ui, root: Entity, r: &Repo, busy: bool) {
     c.entity(inner).add_children(&[row, info]);
 }
 
-fn draw_strip(c: &mut Commands, ui: &Ui, root: Entity, agents: &[TaskView]) {
+fn draw_strip(c: &mut Commands, ui: &Ui, root: Entity, agents: &[TaskView], merged: &std::collections::HashSet<String>) {
     let r = c.spawn(Node { width: percent(100), height: percent(100), flex_direction: FlexDirection::Row, align_items: AlignItems::Center, column_gap: px(12), padding: UiRect { left: px(16), right: px(14), ..default() }, ..default() }).id();
     c.entity(root).add_child(r);
     let lab = ui.text(c, "AGENTS", &ui.f.ui600, 10.5, 3.2, ui.dim);
     c.entity(r).add_child(lab);
     for t in agents {
         let (col, sub) = match t.state {
-            TaskState::Done => (role_color(Role::Ok), format!("Finished · {}", clip(t.branch.as_deref().unwrap_or("in place"), 22))),
+            TaskState::Done => (role_color(Role::Ok), format!("{} · {}", crate::appframe::finished(t, merged), clip(t.branch.as_deref().unwrap_or("in place"), 22))),
             TaskState::NeedsYou => (role_color(Role::Acc), format!("Needs you · {}", clip(&t.status, 24))),
             TaskState::Failed => (role_color(Role::Bad), "Failed".to_string()),
             TaskState::Stopped => (ui.dim, "Stopped".to_string()),

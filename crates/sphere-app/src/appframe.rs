@@ -156,7 +156,7 @@ impl Ui<'_> {
         c.entity(r).add_children(&[n, s, sp, cr, esc]);
     }
     /// The agents strip with the key legend on the right.
-    pub fn strip(&self, c: &mut Commands, root: Entity, agents: &[sphere_proto::TaskView], legend: [&str; 2]) {
+    pub fn strip(&self, c: &mut Commands, root: Entity, agents: &[sphere_proto::TaskView], merged: &std::collections::HashSet<String>, legend: [&str; 2]) {
         use sphere_proto::TaskState;
         let r = c.spawn(Node { width: percent(100), height: percent(100), flex_direction: FlexDirection::Row, align_items: AlignItems::Center, column_gap: px(12), padding: UiRect { left: px(16), right: px(14), ..default() }, ..default() }).id();
         c.entity(root).add_child(r);
@@ -164,7 +164,7 @@ impl Ui<'_> {
         c.entity(r).add_child(lab);
         for t in agents.iter().take(3) {
             let (col, sub) = match t.state {
-                TaskState::Done => (role_color(Role::Ok), "Finished".to_string()),
+                TaskState::Done => (role_color(Role::Ok), finished(t, merged).to_string()),
                 TaskState::NeedsYou => (role_color(Role::Acc), format!("Needs you · {}", clip(&t.status, 24))),
                 TaskState::Failed => (role_color(Role::Bad), "Failed".to_string()),
                 TaskState::Stopped => (self.dim, "Stopped".to_string()),
@@ -414,6 +414,15 @@ impl Ui<'_> {
     }
 }
 
+/// What a finished agent's chip says: "Merged" once its branch is in the repo, "Finished" before.
+pub fn finished(t: &sphere_proto::TaskView, merged: &std::collections::HashSet<String>) -> &'static str {
+    if merged.contains(&t.id) {
+        "Merged"
+    } else {
+        "Finished"
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -446,3 +455,4 @@ mod tests {
         assert_eq!(keys, vec![KeyCode::KeyJ, KeyCode::KeyJ, KeyCode::KeyK]);
     }
 }
+
