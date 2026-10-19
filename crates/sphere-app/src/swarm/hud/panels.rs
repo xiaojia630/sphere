@@ -43,7 +43,7 @@ pub struct Pulse {
     phase: f32,
 }
 
-pub const STRIP: (f32, f32) = (690.0, 42.0);
+pub const STRIP: (f32, f32) = (790.0, 42.0);
 pub const ORBITS: (f32, f32) = (316.0, 232.0);
 pub const SLOTS: (f32, f32) = (316.0, 290.0);
 pub const FOCUS: (f32, f32) = (478.0, 470.0);
@@ -330,7 +330,7 @@ fn build_strip(c: &mut Commands, ui: &Ui, root: Entity, m: &Model, cur: Option<&
     }
     let cost = row(c, 6.0);
     let ct = mono(ui, c, model::strip_cost(m), hot());
-    let td = ui.text(c, "TODAY", &ui.f.ui500, 10.5, 1.0, dim());
+    let td = ui.text(c, "TODAY · API EST.", &ui.f.ui500, 10.5, 1.0, dim());
     c.entity(cost).add_children(&[ct, td]);
     c.entity(segs).add_child(cost);
     // the dots: one per agent, clickable
@@ -470,7 +470,7 @@ fn build_focus(c: &mut Commands, ui: &Ui, root: Entity, m: &Model, a: &Agent, no
     // meta: branch / running / cost
     let meta = c.spawn(Node { flex_direction: FlexDirection::Row, align_items: AlignItems::Center, column_gap: px(18), margin: UiRect::top(px(10)), ..default() }).id();
     let running = if a.state == State::Queued { "queued".to_string() } else { model::fmt_dur(now - a.started_at) };
-    for (k, v) in [("Branch", clip(&a.branch, 26)), ("Running", running), ("Cost", format!("${:.2}", a.cost))] {
+    for (k, v) in [("Branch", clip(&a.branch, 26)), ("Running", running), ("API est.", format!("≈ ${:.2}", a.cost))] {
         let p = row(c, 8.0);
         let kt = ui.text(c, k.to_uppercase(), &ui.f.ui600, 9.0, 1.8, dim());
         let vt = mono(ui, c, v, hot());

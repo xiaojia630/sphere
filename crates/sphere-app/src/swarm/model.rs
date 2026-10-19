@@ -634,11 +634,12 @@ pub fn pct(a: &Agent) -> String {
 }
 
 /// "$0.12", queued "".
+/// An agent's cost as Claude Code reports it: an estimate at API prices (a subscription isn't billed it).
 pub fn cost(a: &Agent) -> String {
     if a.state == State::Queued {
         String::new()
     } else {
-        format!("${:.2}", a.cost)
+        format!("≈ ${:.2}", a.cost)
     }
 }
 
@@ -707,8 +708,9 @@ pub fn strip(m: &Model) -> Vec<(String, String, Option<State>)> {
 }
 
 /// "$1.89"
+/// Today's total, an estimate at API prices like each agent's (the strip follows it with "today · API est.").
 pub fn strip_cost(m: &Model) -> String {
-    format!("${:.2}", m.cost_today)
+    format!("≈ ${:.2}", m.cost_today)
 }
 
 /// The run slots panel: one row per slot (title, "48%" or "WAIT", progress 0..1, needs you) or None for Free,
@@ -1184,7 +1186,7 @@ mod tests {
         assert_eq!(pct(get("rate")), "34%");
         assert_eq!(pct(get("react")), "—");
         assert_eq!(pct(get("json")), "100%");
-        assert_eq!(cost(get("rate")), "$0.12");
+        assert_eq!(cost(get("rate")), "≈ $0.12");
         assert_eq!(cost(get("cold")), "");
         assert_eq!(fmt_dur(198), "3:18");
         assert_eq!(fmt_dur(5), "0:05");
@@ -1212,7 +1214,7 @@ mod tests {
         assert_eq!(sg[2], ("0".to_string(), "needs you".to_string(), Some(State::Needs)));
         assert_eq!(sg[3], ("1".to_string(), "ready".to_string(), Some(State::Done)));
         assert_eq!(sg[4], ("2".to_string(), "queued".to_string(), None));
-        assert_eq!(strip_cost(&m), "$1.84");
+        assert_eq!(strip_cost(&m), "≈ $1.84");
         assert_eq!(strip(&one)[0].1, "agents");
         let (rows, q) = slots(&m);
         assert_eq!(rows[0], Some(("Add rate limiting to /login".to_string(), "34%".to_string(), 0.34, false)));

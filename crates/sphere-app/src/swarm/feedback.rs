@@ -158,7 +158,7 @@ pub fn feedback(
 pub fn ticker_items(events: &[(String, String, bool)], m: &Model) -> Vec<String> {
     let mut items: Vec<String> = events.iter().map(|(k, v, _)| format!("{k} {v}")).collect();
     items.push(format!("SWARM {} of {} slots busy · {} queued", m.running().len(), m.limit, m.count(State::Queued)));
-    items.push(format!("COST ${:.2} today", m.cost_today));
+    items.push(format!("COST ≈ ${:.2} today · API est.", m.cost_today));
     items
 }
 
@@ -171,7 +171,7 @@ pub fn idle_hint(mode: &Mode) -> &'static str {
     }
 }
 
-/// SPEC 6.2: "6 agents: 3 working, 1 ready to merge, 2 queued. Spent $1.89 today." (the clauses after
+/// SPEC 6.2: "6 agents: 3 working, 1 ready to merge, 2 queued. About $1.89 today, API estimate." (the clauses after
 /// "working" only when there are some).
 pub fn status_line(m: &Model) -> String {
     let n = m.agents.iter().filter(|a| !matches!(a.state, State::Merged | State::Stopped)).count();
@@ -181,7 +181,7 @@ pub fn status_line(m: &Model) -> String {
             s.push_str(&format!(", {c} {what}"));
         }
     }
-    s.push_str(&format!(". Spent ${:.2} today.", m.cost_today));
+    s.push_str(&format!(". About ${:.2} today, API estimate.", m.cost_today));
     s
 }
 
@@ -201,11 +201,11 @@ mod tests {
     #[test]
     fn status_line_matches_the_spec() {
         use State::*;
-        assert_eq!(status_line(&m(&[Working, Working, Working, Done, Queued, Queued], 1.89)), "6 agents: 3 working, 1 ready to merge, 2 queued. Spent $1.89 today.");
-        assert_eq!(status_line(&m(&[Working, Needs, Done, Queued], 0.0)), "4 agents: 1 working, 1 needs you, 1 ready to merge, 1 queued. Spent $0.00 today.");
-        assert_eq!(status_line(&m(&[Working], 12.5)), "1 agent: 1 working. Spent $12.50 today.");
-        assert_eq!(status_line(&m(&[Working, Merged, Stopped], 1.0)), "1 agent: 1 working. Spent $1.00 today.");
-        assert_eq!(status_line(&Model::default()), "0 agents: 0 working. Spent $0.00 today.");
+        assert_eq!(status_line(&m(&[Working, Working, Working, Done, Queued, Queued], 1.89)), "6 agents: 3 working, 1 ready to merge, 2 queued. About $1.89 today, API estimate.");
+        assert_eq!(status_line(&m(&[Working, Needs, Done, Queued], 0.0)), "4 agents: 1 working, 1 needs you, 1 ready to merge, 1 queued. About $0.00 today, API estimate.");
+        assert_eq!(status_line(&m(&[Working], 12.5)), "1 agent: 1 working. About $12.50 today, API estimate.");
+        assert_eq!(status_line(&m(&[Working, Merged, Stopped], 1.0)), "1 agent: 1 working. About $1.00 today, API estimate.");
+        assert_eq!(status_line(&Model::default()), "0 agents: 0 working. About $0.00 today, API estimate.");
     }
 
     #[test]
@@ -249,7 +249,7 @@ mod tests {
         use State::*;
         let model = m(&[Working, Needs, Queued], 1.84);
         let ev = vec![("API-SERVER".to_string(), "x · y".to_string(), true)];
-        assert_eq!(ticker_items(&ev, &model), vec!["API-SERVER x · y", "SWARM 2 of 3 slots busy · 1 queued", "COST $1.84 today"]);
+        assert_eq!(ticker_items(&ev, &model), vec!["API-SERVER x · y", "SWARM 2 of 3 slots busy · 1 queued", "COST ≈ $1.84 today · API est."]);
     }
 
     #[test]

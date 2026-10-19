@@ -1053,7 +1053,7 @@ mod tests {
         let mut app = world();
         app.world_mut().resource_mut::<Open>().swarm_cmds.push(SwarmCmd::Status);
         app.update();
-        assert_eq!(app.world().resource::<crate::homepanels::Say>().text, "4 agents: 1 working, 2 needs you, 1 ready to merge. Spent $0.00 today.");
+        assert_eq!(app.world().resource::<crate::homepanels::Say>().text, "4 agents: 1 working, 2 needs you, 1 ready to merge. About $0.00 today, API estimate.");
     }
 
     #[test]
