@@ -1359,7 +1359,8 @@ fn draw_pr_detail(c: &mut Commands, ui: &Ui, root: Entity, app: &GitApp) {
     };
     let armed = app.arm.is_some_and(|(n, _)| n == p.number);
     let h = ui.header(c, &format!("#{} · {}", p.number, clip(&p.title, 60)), if armed { "PRESS M AGAIN TO MERGE" } else { "" }, role_color(Role::Bad));
-    let inner = c.spawn(Node { flex_direction: FlexDirection::Row, column_gap: px(18), padding: UiRect { left: px(16), right: px(16), top: px(10), bottom: px(6) }, flex_grow: 1.0, overflow: Overflow::clip(), ..default() }).id();
+    // min height 0: the diff gives way (clipped) so the action row below always shows
+    let inner = c.spawn(Node { flex_direction: FlexDirection::Row, column_gap: px(18), padding: UiRect { left: px(16), right: px(16), top: px(10), bottom: px(6) }, flex_grow: 1.0, flex_shrink: 1.0, flex_basis: px(0), min_height: px(0), overflow: Overflow::clip(), ..default() }).id();
     c.entity(b).add_children(&[h, inner]);
     let d = app.detail.as_ref().filter(|d| d.number == p.number);
     let left = c.spawn(Node { flex_direction: FlexDirection::Column, row_gap: px(3), width: px(230), flex_shrink: 0.0, ..default() }).id();
@@ -1427,8 +1428,8 @@ fn draw_pr_detail(c: &mut Commands, ui: &Ui, root: Entity, app: &GitApp) {
             c.entity(right).add_child(pv);
         }
     }
-    // the actions, as buttons for the keys
-    let acts = c.spawn(Node { position_type: PositionType::Absolute, right: px(16), bottom: px(10), column_gap: px(8), ..default() }).id();
+    // the actions, as buttons for the keys: their own row under the diff (not over it)
+    let acts = c.spawn(Node { justify_content: JustifyContent::FlexEnd, column_gap: px(8), padding: UiRect { left: px(16), right: px(16), top: px(4), bottom: px(10) }, flex_shrink: 0.0, ..default() }).id();
     for (label, key, hot) in [("ENTER  OPEN ON GITHUB", KeyCode::Enter, false), ("C  CHECK OUT", KeyCode::KeyC, false), (if armed { "M  MERGE NOW" } else { "M  MERGE" }, KeyCode::KeyM, armed)] {
         let colr = if hot { role_color(Role::Bad) } else { ui.line };
         let btn = c.spawn((Node { padding: UiRect { left: px(8), right: px(8), top: px(4), bottom: px(3) }, border: UiRect::all(px(1)), ..default() }, BorderColor::all(with_alpha(colr, 0.6)), BackgroundColor(if hot { with_alpha(colr, 0.15) } else { with_alpha(ui.line, 0.05) }), Click::Key(key))).id();

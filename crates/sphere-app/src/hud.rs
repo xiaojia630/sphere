@@ -28,6 +28,7 @@ pub fn setup_panels(
     mut fonts_a: ResMut<Assets<Font>>,
     mut pmats: ResMut<Assets<PanelMaterial>>,
     agents: Res<Agents>,
+    outside: Res<crate::takeover::Outside>,
     decks: Res<Decks>,
     args: Res<Args>,
 ) {
@@ -38,7 +39,7 @@ pub fn setup_panels(
     // ---- Agents panel: right column, bottom aligned like the prototype (x 1546, y 962)
     let (aw, ah) = (356.0, 351.0);
     let ui = spawn_ui_panel(&mut commands, &mut atlas, aw, ah);
-    build_agents_ui(&mut commands, ui.root, &f, &agents, 0.0);
+    build_agents_ui(&mut commands, ui.root, &f, &agents, &outside, 0.0);
     let home = stage_to_world(1546.0 - aw / 2.0, 962.0 - ah / 2.0);
     spawn_panel_quad(
         &mut commands,
@@ -689,7 +690,7 @@ mod tests {
     }
 
     fn args() -> Args {
-        Args { cmd: None, bench: None, shot: None, record: None, record_frames: 180, frames: 120, depth: false, orbit: false, apps: false, work: false, swarm: false, code: false, git: false, open_app: None, icon: false, aa: "smaa".into(), offscreen: false, collapsed: false, focus_term: false, msaa: true, size: (1600, 1000), dt: 0.05, demo: false, live: false, moment: false, theme: None, motion: None }
+        Args { cmd: None, bench: None, shot: None, record: None, record_frames: 180, frames: 120, depth: false, orbit: false, apps: false, work: false, swarm: false, code: false, git: false, open_app: None, icon: false, aa: "smaa".into(), offscreen: false, collapsed: false, focus_term: false, msaa: true, size: (1600, 1000), dt: 0.05, demo: false, live: false, moment: false, elsewhere: false, takeover: None, theme: None, motion: None }
     }
 
     /// The readout only follows what changed (`Agents` and `Live` are no longer marked changed every frame), so the

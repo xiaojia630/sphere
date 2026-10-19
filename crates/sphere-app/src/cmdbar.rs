@@ -262,6 +262,10 @@ pub(crate) fn home_command(t: &str, acts: &mut crate::home::Acts, open: &mut cra
         toasts.push(format!("Motion · {}", if m == Motion::Fast { "Fast" } else { "Cinematic" }));
         return true;
     }
+    if let Some(w) = crate::takeover::parse_words(&l) {
+        open.takeover = Some(w);
+        return true;
+    }
     // `code` opens the Code app; `code <path>` opens a folder in it (`code .` is the last repo used). Words that
     // aren't a folder ("code review this") are a task, as before
     if starts(&["code"]) {

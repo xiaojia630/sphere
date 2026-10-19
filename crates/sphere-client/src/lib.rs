@@ -296,6 +296,21 @@ impl Client {
         self.call(method::SESSION_LIST, serde_json::json!({})).await
     }
 
+    pub async fn session_outside(&self) -> Result<Vec<api::OutsideSession>> {
+        self.call(method::SESSION_OUTSIDE, serde_json::json!({}))
+            .await
+    }
+
+    pub async fn take_over(&self, session_id: &str) -> Result<api::TakeOverResult> {
+        self.call(
+            method::SESSION_TAKE_OVER,
+            api::TakeOverParams {
+                session_id: session_id.into(),
+            },
+        )
+        .await
+    }
+
     pub async fn bring_in(&self, p: BringInParams) -> Result<String> {
         Ok(self
             .call::<api::StartResult>(method::SESSION_BRING_IN, p)

@@ -413,6 +413,17 @@ fn main() {
                 .unwrap_or_else(|| r#"{"loggedIn":true,"authMethod":"fake"}"#.into());
             return print!("{text}");
         }
+        // Stands in for a person's terminal session: stays alive until its
+        // folder is gone (a finished test) or ten minutes pass.
+        _ if args.raw.iter().any(|a| a == "--idle-forever") => {
+            let dir = std::env::current_dir().ok();
+            let end = Instant::now() + Duration::from_secs(600);
+            while Instant::now() < end && dir.as_ref().is_some_and(|d| d.exists()) {
+                std::thread::sleep(Duration::from_millis(500));
+            }
+            return;
+        }
+        Some("stop") => return,
         _ => {}
     }
     let Some(path) = args.fixture.clone() else {

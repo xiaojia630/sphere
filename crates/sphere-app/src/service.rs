@@ -85,6 +85,12 @@ pub struct Shared {
     pub roster: u64,
     pub states: u64,
     pub spans: u64,
+    /// Claude sessions running outside Sphere (`session.outside`), polled while the window is visible
+    pub outside: Vec<sphere_proto::api::OutsideSession>,
+    /// the window is hidden, minimised or fully covered: nothing polls (set by `takeover::watch_visibility`)
+    pub hidden: bool,
+    /// take-overs that came back, for `takeover::finish` to pick up: (the session id asked for, the outcome)
+    pub taken: Vec<(String, Result<sphere_proto::api::TakeOverResult, String>)>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -112,6 +118,8 @@ pub struct Run {
     seq: u64,
     pub files: Vec<sphere_proto::FileStat>,
     pub version: u64,
+    /// where the session ran before it was taken over (`herdr`, `Terminal`, ...)
+    pub taken_from: Option<String>,
 }
 
 impl Run {
@@ -147,6 +155,7 @@ impl Run {
                 self.says_seq.push(self.seq);
             }
             B::FilesTouched { files } => self.files = files.clone(),
+            B::TakenOver { from } => self.taken_from = Some(from.clone()),
             _ => return,
         }
         // keep it bounded
@@ -167,8 +176,11 @@ pub enum Cmd {
     Send { task: String, text: String },
     Interrupt { task: String },
     Stop { task: String },
-    /// Sphere is on screen again: the link starts pinging (it stops while the window is hidden).
+    /// Sphere is on screen again: the link starts pinging and looking for outside sessions (both stop while the
+    /// window is hidden).
     Shown,
+    /// Stop an outside session where it runs and resume it here (`session.take_over`).
+    TakeOver { session_id: String },
 }
 
 #[derive(Resource, Clone)]
@@ -387,9 +399,9 @@ const PING: Duration = Duration::from_secs(2);
 
 /// One connection: take a snapshot, subscribe from its seq, then fold every event into the shared slot as it arrives
 /// and serve commands. A snapshot is taken again only if an event was missed (or one is not understood): the mirror
-/// starts over from it and goes on. Sphered dropping us ends the session and the next one starts afresh. No timer runs
-/// while nothing happens, and the ping runs only while Sphere is on screen (the window coming back wakes it with
-/// `Cmd::Shown`).
+/// starts over from it and goes on. Sphered dropping us ends the session and the next one starts afresh. The two
+/// timers, the ping and the look for Claude sessions running outside Sphere, run only while Sphere is on screen (the
+/// window coming back wakes them with `Cmd::Shown`).
 async fn session(sh: &Arc<Mutex<Shared>>, c: &Client, rx: &mut mpsc::UnboundedReceiver<Cmd>) -> Result<(), String> {
     c.hello(ClientKind::App).await.map_err(|e| e.to_string())?;
     let snap = c.snapshot().await.map_err(|e| e.to_string())?;
@@ -420,6 +432,12 @@ async fn session(sh: &Arc<Mutex<Shared>>, c: &Client, rx: &mut mpsc::UnboundedRe
     let ping = tokio::time::sleep(PING);
     tokio::pin!(ping);
     let mut armed = crate::summon::on_screen();
+    // Claude sessions running outside Sphere: asked at once, then every `OUTSIDE_EVERY` while the window can be seen
+    let outside = tokio::time::sleep(Duration::ZERO);
+    tokio::pin!(outside);
+    let mut outside_on = true;
+    let mut outside_at: Option<std::time::Instant> = None;
+    let outside_busy = Arc::new(std::sync::atomic::AtomicBool::new(false));
     loop {
         tokio::select! {
             u = sub.next() => match u {
@@ -438,6 +456,29 @@ async fn session(sh: &Arc<Mutex<Shared>>, c: &Client, rx: &mut mpsc::UnboundedRe
                 Some(Update::Lagged(e)) => return Err(format!("resyncing: {}", e.message)),
                 Some(Update::Closed) | None => return Err("sphered closed the connection".into()),
             },
+            _ = &mut outside, if outside_on => {
+                let busy = outside_busy.load(std::sync::atomic::Ordering::Relaxed);
+                let hidden = sh.lock().unwrap().hidden || !crate::summon::on_screen();
+                if outside_due(hidden, busy, outside_at.map(|t| t.elapsed())) {
+                    outside_at = Some(std::time::Instant::now());
+                    outside_busy.store(true, std::sync::atomic::Ordering::Relaxed);
+                    let (c, sh, busy) = (c.clone(), sh.clone(), outside_busy.clone());
+                    tokio::spawn(async move {
+                        if let Ok(list) = c.session_outside().await {
+                            set_outside(&sh, list);
+                        }
+                        busy.store(false, std::sync::atomic::Ordering::Relaxed);
+                    });
+                }
+                if hidden {
+                    // nobody sees the list: the timer stays off until `Shown`, and the first look then is at once
+                    outside_on = false;
+                    outside_at = None;
+                } else {
+                    // the last ask still out: look again shortly
+                    outside.as_mut().reset(tokio::time::Instant::now() + if busy { Duration::from_millis(250) } else { OUTSIDE_EVERY });
+                }
+            }
             _ = &mut ping, if armed => {
                 if crate::summon::on_screen() {
                     // the System panel's response time
@@ -458,13 +499,17 @@ async fn session(sh: &Arc<Mutex<Shared>>, c: &Client, rx: &mut mpsc::UnboundedRe
                         armed = true;
                         ping.as_mut().reset(tokio::time::Instant::now());
                     }
+                    if !outside_on {
+                        outside_on = true;
+                        outside.as_mut().reset(tokio::time::Instant::now());
+                    }
                     continue;
                 }
                 let c = c.clone();
                 let sh = sh.clone();
                 // Commands run beside the loop so a slow start never stalls updates.
                 tokio::spawn(async move {
-                    if let Err(e) = command(&c, cmd).await {
+                    if let Err(e) = command(&c, cmd, &sh).await {
                         note(&sh, e);
                     }
                 });
@@ -473,8 +518,32 @@ async fn session(sh: &Arc<Mutex<Shared>>, c: &Client, rx: &mut mpsc::UnboundedRe
     }
 }
 
-async fn command(c: &Client, cmd: Cmd) -> Result<(), String> {
+/// How often `session.outside` is asked while the window is visible.
+pub const OUTSIDE_EVERY: Duration = Duration::from_secs(5);
+
+/// Whether to ask for the outside sessions now: never while the window is hidden, minimised or covered, not while
+/// the last ask is still out, and then once at the start and every `OUTSIDE_EVERY`.
+pub fn outside_due(hidden: bool, busy: bool, since_last: Option<Duration>) -> bool {
+    !hidden && !busy && since_last.is_none_or(|d| d >= OUTSIDE_EVERY)
+}
+
+fn set_outside(sh: &Mutex<Shared>, list: Vec<sphere_proto::api::OutsideSession>) {
+    let mut s = sh.lock().unwrap();
+    if s.outside != list {
+        s.outside = list;
+        s.version += 1;
+    }
+}
+
+async fn command(c: &Client, cmd: Cmd, sh: &Mutex<Shared>) -> Result<(), String> {
     match cmd {
+        Cmd::TakeOver { session_id } => {
+            let r = c.take_over(&session_id).await.map_err(|e| e.to_string());
+            let mut s = sh.lock().unwrap();
+            s.taken.push((session_id, r));
+            s.version += 1;
+            Ok(())
+        }
         Cmd::Start { repo, prompt } => {
             let p = StartParams {
                 repo,
@@ -507,6 +576,29 @@ async fn command(c: &Client, cmd: Cmd) -> Result<(), String> {
 mod tests {
     use super::*;
     use sphere_proto::StepKind;
+
+    #[test]
+    fn the_outside_sessions_are_asked_only_while_the_window_is_visible() {
+        let s = Duration::from_secs;
+        // visible: at once, then every five seconds
+        assert!(outside_due(false, false, None));
+        assert!(!outside_due(false, false, Some(s(2))));
+        assert!(outside_due(false, false, Some(s(5))));
+        // hidden, minimised or covered: never, however long ago it was
+        assert!(!outside_due(true, false, None));
+        assert!(!outside_due(true, false, Some(s(60))));
+        // not while the last ask is still out
+        assert!(!outside_due(false, true, Some(s(60))));
+    }
+
+    #[test]
+    fn a_taken_over_event_marks_the_run() {
+        let mut r = Run::default();
+        let v = r.version;
+        r.apply(&ev(EventBody::TakenOver { from: "herdr".into() }));
+        assert_eq!(r.taken_from.as_deref(), Some("herdr"));
+        assert!(r.version > v);
+    }
 
     fn ev(body: EventBody) -> Event {
         Event { seq: 0, task: "t1".into(), at: "2026-10-17T00:00:00.000Z".into(), body }

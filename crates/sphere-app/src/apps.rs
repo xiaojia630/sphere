@@ -20,6 +20,10 @@ pub struct Open {
     pub code_dir: Option<std::path::PathBuf>,
     /// the command bar's words while the swarm is open (next, merge, stop, a number, back), for `swarm::input`
     pub swarm_cmds: Vec<crate::swarm::input::SwarmCmd>,
+    /// typed "take over" / "elsewhere": `takeover::commands` opens the card
+    pub takeover: Option<crate::takeover::Words>,
+    /// a click on the Agents panel (panel px): an "elsewhere" row opens its card, anywhere else opens the Working view
+    pub agents_click: Option<bevy::math::Vec2>,
 }
 
 /// The Code app's tile.

@@ -23,6 +23,8 @@ pub mod method {
     pub const TASK_STOP: &str = "task.stop";
     pub const SESSION_LIST: &str = "session.list";
     pub const SESSION_BRING_IN: &str = "session.bring_in";
+    pub const SESSION_OUTSIDE: &str = "session.outside";
+    pub const SESSION_TAKE_OVER: &str = "session.take_over";
     pub const REQUEST_ANSWER: &str = "request.answer";
 }
 
@@ -286,6 +288,55 @@ pub struct SessionInfo {
     /// Already a Sphere task.
     #[serde(default)]
     pub task: Option<String>,
+    /// For a running one: where it runs, e.g. `herdr`, `Terminal`, `Claude background`.
+    #[serde(default, rename = "where", skip_serializing_if = "Option::is_none")]
+    pub where_: Option<String>,
+    /// For a running one: `working`, `waiting`, `idle` or `unknown`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
+}
+
+/// A Claude session running outside Sphere, in a terminal or in the background.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OutsideSession {
+    /// None when it cannot be told apart from another one in the same folder.
+    #[serde(default)]
+    pub session_id: Option<String>,
+    #[serde(default)]
+    pub pid: Option<u32>,
+    #[serde(default)]
+    pub cwd: Option<String>,
+    #[serde(default)]
+    pub title: Option<String>,
+    /// Where it runs: `herdr`, `tmux`, `Terminal`, `over SSH`, `a terminal`,
+    /// `Claude background`, ...
+    #[serde(rename = "where")]
+    pub where_: String,
+    /// `working`, `waiting` (a permission prompt or a running tool), `idle` or `unknown`.
+    pub state: String,
+    /// Two or more live sessions share its folder and cannot be told apart; not takeable.
+    #[serde(default)]
+    pub ambiguous: bool,
+    /// The last assistant text in its transcript, short.
+    #[serde(default)]
+    pub last_message: Option<String>,
+    #[serde(default)]
+    pub updated_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TakeOverParams {
+    pub session_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TakeOverResult {
+    pub task: String,
+    pub title: String,
+    /// Where it ran before, as in `OutsideSession::where_`.
+    pub from: String,
+    /// It was idle, so it was resumed with no message and waits for the user's.
+    pub idle: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

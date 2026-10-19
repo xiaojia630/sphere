@@ -88,6 +88,13 @@ impl Working {
         self.reveal = 0.0;
         self.version += 1;
     }
+    /// Opens the view on this task (a take-over: the session just became an agent).
+    pub fn open_task(&mut self, id: String) {
+        self.open = true;
+        self.task = Some(id);
+        self.reveal = 0.0;
+        self.version += 1;
+    }
     pub fn close(&mut self) {
         self.open = false;
         self.big.t = 0.0;
@@ -654,6 +661,8 @@ fn build_run(c: &mut Commands, root: Entity, f: &UiFonts, t: &TaskView, run: &Ru
     let repo = std::path::Path::new(&t.repo).file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
     let meta = format!("Agent · Claude Code · {} · {}", t.branch.clone().unwrap_or_else(|| "in place".into()), repo);
     let m = c.spawn((Text::new(meta), font(&f.ui500, 12.0, 0.96), TextColor(line), LineHeight::Px(15.0))).id();
+    // a session taken over from a terminal says where it came from
+    let from = run.taken_from.as_ref().map(|w| c.spawn((Text::new(format!("Taken over from {}", crate::takeover::from_label(w))), font(&f.ui500, 12.0, 0.96), TextColor(role_color(Role::Fill)), LineHeight::Px(15.0))).id());
     // progress: the plan's completed share when there is a plan, else a curve on the step count
     let done_plan = t.plan.iter().filter(|p| p.status == "completed").count();
     let p = if !t.plan.is_empty() {
@@ -672,7 +681,11 @@ fn build_run(c: &mut Commands, root: Entity, f: &UiFonts, t: &TaskView, run: &Ru
     let label = if !t.plan.is_empty() || t.state == TaskState::Done { format!("{:.0}%", p * 100.0) } else { format!("{} STEP{}", run.steps.len(), if run.steps.len() == 1 { "" } else { "S" }) };
     let pct = c.spawn((Text::new(label), font(&f.mono, 11.5, 0.46), TextColor(hot), LineHeight::Px(12.0))).id();
     c.entity(pr).add_children(&[track, pct]);
-    c.entity(b).add_children(&[hdr, m, pr]);
+    c.entity(b).add_children(&[hdr, m]);
+    if let Some(from) = from {
+        c.entity(b).add_child(from);
+    }
+    c.entity(b).add_child(pr);
     // steps: the last eight
     let list = c.spawn(Node { flex_direction: FlexDirection::Column, margin: UiRect { top: px(4), ..default() }, ..default() }).id();
     let n = run.steps.len();

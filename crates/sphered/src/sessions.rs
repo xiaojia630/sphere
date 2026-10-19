@@ -21,6 +21,16 @@ const LIVE_STATES: &[&str] = &[
     "waiting",
 ];
 
+/// A background session's own state word as `working`, `waiting`, `idle` or `unknown`.
+fn agent_state(state: &str) -> &'static str {
+    match state {
+        "needs_input" | "blocked" | "waiting" => "waiting",
+        "running" | "active" | "working" | "busy" | "starting" => "working",
+        "idle" => "idle",
+        _ => "unknown",
+    }
+}
+
 fn pid_alive(pid: u32) -> bool {
     pid > 0 && unsafe { libc::kill(pid as i32, 0) } == 0
 }
@@ -55,26 +65,29 @@ pub fn parse_agents_json(text: &str) -> Result<Vec<SessionInfo>> {
             let state = get(e, &["state", "status"])
                 .unwrap_or_default()
                 .to_ascii_lowercase();
+            let running = LIVE_STATES.contains(&state.as_str()) || pid.is_some_and(pid_alive);
             Some(SessionInfo {
                 session_id,
                 cwd: get(e, &["cwd", "workingDirectory"]),
                 title: get(e, &["name", "intent", "title", "summary"]),
                 updated_at: get(e, &["updatedAt", "updated_at"]),
-                running: LIVE_STATES.contains(&state.as_str()) || pid.is_some_and(pid_alive),
+                running,
                 pid,
                 task: None,
+                where_: running.then(|| "Claude background".to_string()),
+                state: Some(agent_state(&state).to_string()),
             })
         })
         .collect())
 }
 
-fn rfc3339(t: SystemTime) -> Option<String> {
+pub(crate) fn rfc3339(t: SystemTime) -> Option<String> {
     let ms = t.duration_since(SystemTime::UNIX_EPOCH).ok()?.as_millis() as u64;
     Some(sphere_proto::event::rfc3339_from_unix_ms(ms))
 }
 
 /// The session summarised from the head of a transcript file.
-fn read_transcript(path: &Path) -> Option<SessionInfo> {
+pub(crate) fn read_transcript(path: &Path) -> Option<SessionInfo> {
     use std::io::BufRead;
     let session_id = path.file_stem()?.to_string_lossy().to_string();
     let file = std::fs::File::open(path).ok()?;
@@ -116,6 +129,8 @@ fn read_transcript(path: &Path) -> Option<SessionInfo> {
         running: false,
         pid: None,
         task: None,
+        where_: None,
+        state: None,
     })
 }
 
@@ -138,7 +153,7 @@ pub fn scan_transcripts(projects: &Path) -> Vec<SessionInfo> {
     out
 }
 
-async fn run_json(cmd: &[String]) -> Result<String> {
+pub(crate) async fn run_json(cmd: &[String]) -> Result<String> {
     let Some((prog, args)) = cmd.split_first() else {
         bail!("empty command")
     };

@@ -1,6 +1,7 @@
 //! The swarm's 3D scene (SPEC section 2, 3, 4.1, 5): the repo rings and the ready ring, the satellites, the step
 //! tracks and the conflict arcs. Rings hang under one root that follows the core; satellites, tracks, marks and
 //! arcs live in world space (a node can fly toward the camera). Everything draws on the core's layer (bloom).
+mod ghosts;
 mod mesh;
 
 use super::model::State;
@@ -61,6 +62,8 @@ pub struct SceneOut {
     /// per agent: where each of its last steps landed, index i = `steps[i]`: (world pos on the track, alpha 0..1;
     /// 0 when that step is farther behind than the track reaches)
     pub marks: Vec<(String, Vec<(Vec3, f32)>)>,
+    /// the swarm's frame this frame (the rings' centre, rotation and scale), for the ghosts of sessions elsewhere
+    pub sw: Option<(Vec3, Quat, f32)>,
 }
 
 // ---------------------------------------------------------------- pure math
@@ -324,6 +327,7 @@ pub struct Scene {
 
 pub fn build(app: &mut App) {
     app.init_resource::<SceneOut>().add_systems(Startup, spawn).add_systems(Update, update.after(crate::core::update_core));
+    ghosts::build(app);
 }
 
 struct Gfx<'a, 'w, 's> {
@@ -490,6 +494,7 @@ pub fn update(
     let compact = sv.w < 820.0 || sv.w / sv.h.max(1.0) < 1.05;
     let focus_amt = clamp(swarm.focus_amt.x, 0.0, 1.0);
     let sw = Sw { pos: core, rot: tilt * (Quat::from_rotation_y((t * 0.13).sin() * 0.05) * Quat::from_rotation_x(-swarm.orbit_tilt.x * DEG)), s: if compact { 0.3 } else { 1.0 } * (1.0 - 0.08 * focus_amt) };
+    out.sw = Some((sw.pos, sw.rot, sw.s));
     put(&mut tfs, sc.root, |tr| {
         tr.translation = sw.pos;
         tr.rotation = sw.rot;

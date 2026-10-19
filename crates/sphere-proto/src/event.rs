@@ -160,6 +160,11 @@ pub enum EventBody {
     Warning {
         message: String,
     },
+    /// The session was running outside Sphere and was stopped there and moved here.
+    TakenOver {
+        /// Where it ran: `herdr`, `Terminal`, `Claude background`, ...
+        from: String,
+    },
 }
 
 impl EventBody {
@@ -189,6 +194,7 @@ impl EventBody {
             EventBody::Stopped {} => "stopped",
             EventBody::Failed { .. } => "failed",
             EventBody::Warning { .. } => "warning",
+            EventBody::TakenOver { .. } => "taken_over",
         }
     }
 }
