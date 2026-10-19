@@ -217,12 +217,16 @@ struct SatGfx {
     marks: Entity,
     marks_mesh: Handle<Mesh>,
     marks_m: H,
+    /// the discs the marks mesh was built from
+    marks_built: Vec<(Vec3, f32, f32)>,
 }
 
 struct ArcGfx {
     e: Entity,
     mesh: Handle<Mesh>,
     mat: H,
+    /// what the ribbon was built from: its ends and bend, its width, its pulse and its age
+    built: Option<(Vec3, Vec3, Vec3, f32, f32, f32)>,
 }
 
 /// One agent's satellite: the prototype's per-agent state (angle, springs, colour).
@@ -400,12 +404,12 @@ fn spawn(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut mats: Res
         let (_, halo) = g.part(sroot, mesh::halo_mesh(HALO_R), Kind::Ring, Role::Line, 0.26, tf);
         let (trail, trail_mesh, trail_m) = g.loose(mesh::trail_mesh(REPOS[0].rad, 1.0), Role::Fill);
         let (marks, marks_mesh, marks_m) = g.loose(mesh::discs_mesh(&[]), Role::Hot);
-        sats.push(SatGfx { root: sroot, shell, ico, edges, fill, gy1, gy1_m, gy2, gy2_m, track, prog, pulse, pulse_m, hov, hov_m, halo, trail, trail_mesh, trail_m, built: None, marks, marks_mesh, marks_m });
+        sats.push(SatGfx { root: sroot, shell, ico, edges, fill, gy1, gy1_m, gy2, gy2_m, track, prog, pulse, pulse_m, hov, hov_m, halo, trail, trail_mesh, trail_m, built: None, marks, marks_mesh, marks_m, marks_built: Vec::new() });
     }
     let mut arcs = Vec::new();
     for _ in 0..NARC {
         let (e, mesh, mat) = g.loose(mesh::ribbon_mesh(&[Vec3::ZERO, Vec3::X], 0.5, &[0.0, 0.0]), Role::Acc);
-        arcs.push(ArcGfx { e, mesh, mat });
+        arcs.push(ArcGfx { e, mesh, mat, built: None });
     }
     commands.insert_resource(Scene { root, rings, ready, sats, arcs, slots: (0..NSAT).map(|_| Slot::blank()).collect(), conf: Vec::new(), spin_mul: 1.0, hidden: true });
 }
@@ -790,8 +794,13 @@ pub fn update(
             show(&mut vis, g.trail, false);
         }
         if shown && !discs.is_empty() {
-            if let Some(mut m) = meshes.get_mut(&g.marks_mesh) {
-                *m = mesh::discs_mesh(&discs);
+            // a rebuilt mesh makes the renderer queue its entity again, which reorders the draws it ties with (so a
+            // still frame keeps changing): rebuilt only when the discs moved
+            if g.marks_built != discs {
+                if let Some(mut m) = meshes.get_mut(&g.marks_mesh) {
+                    *m = mesh::discs_mesh(&discs);
+                }
+                g.marks_built = discs;
             }
             gslots.update(&mut mats, &g.marks_m, |u| {
                 u.color = hot;
@@ -823,14 +832,19 @@ pub fn update(
         }
         let (pa, pb) = (sa.pos, sb.pos);
         let m = arc_ctrl(pa, pb, core, *age);
-        let n = 20;
-        let pts: Vec<Vec3> = (0..=n).map(|i| bez(pa, m, pb, i as f32 / n as f32)).collect();
-        let ks: Vec<f32> = (0..=n).map(|i| (0.18 + 0.82 * (std::f32::consts::PI * i as f32 / n as f32).sin()) * pulse * *age).collect();
-        let g = &sc.arcs[used];
+        let g = &mut sc.arcs[used];
         used += 1;
         let mid = bez(pa, m, pb, 0.5);
-        if let Some(mut mm) = meshes.get_mut(&g.mesh) {
-            *mm = mesh::ribbon_mesh(&pts, 1.0 / kpx(mid.z), &ks);
+        // rebuilt only when it moved or pulsed, like the marks
+        let want = (pa, m, pb, 1.0 / kpx(mid.z), pulse, *age);
+        if g.built != Some(want) {
+            g.built = Some(want);
+            let n = 20;
+            let pts: Vec<Vec3> = (0..=n).map(|i| bez(pa, m, pb, i as f32 / n as f32)).collect();
+            let ks: Vec<f32> = (0..=n).map(|i| (0.18 + 0.82 * (std::f32::consts::PI * i as f32 / n as f32).sin()) * pulse * *age).collect();
+            if let Some(mut mm) = meshes.get_mut(&g.mesh) {
+                *mm = mesh::ribbon_mesh(&pts, want.3, &ks);
+            }
         }
         let f = amt * sa.fade.min(sb.fade).max(0.0) * (1.0 - 0.55 * dim);
         gslots.update(&mut mats, &g.mat, |u| {
