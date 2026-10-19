@@ -144,8 +144,8 @@ pub fn update(
     gts: Query<&GlobalTransform>,
     mut ctl: ResMut<CoreCtl>,
     mut ms: ResMut<MouseState>,
-    (mut acts, mut sound, mut toasts, swarm): (ResMut<Acts>, ResMut<crate::sound::Sound>, ResMut<crate::live::Toasts>, Res<crate::swarm::Swarm>),
-    (mut rolo, mut fx, mut open, sv, mut pclicks, mut scrolls, parts, wpanels, mut work, heads, svc): (ResMut<crate::homepanels::Rolodex>, ResMut<crate::fx::Fx>, ResMut<crate::apps::Open>, Res<crate::core::StageView>, ResMut<crate::appframe::PanelClicks>, ResMut<crate::appframe::AppScrolls>, Query<&crate::appframe::AppPart>, Query<&crate::working::WorkPanel>, ResMut<crate::working::Working>, Query<&GlobalTransform, With<crate::working::Head>>, Res<crate::service::Service>),
+    (mut acts, mut sound, mut toasts, swarm, mut working, live, svc, args): (ResMut<Acts>, ResMut<crate::sound::Sound>, ResMut<crate::live::Toasts>, Res<crate::swarm::Swarm>, ResMut<crate::working::Working>, Res<crate::live::Live>, Res<crate::service::Service>, Res<crate::Args>),
+    (mut rolo, mut fx, mut open, sv, mut pclicks, mut scrolls, parts, wpanels, heads): (ResMut<crate::homepanels::Rolodex>, ResMut<crate::fx::Fx>, ResMut<crate::apps::Open>, Res<crate::core::StageView>, ResMut<crate::appframe::PanelClicks>, ResMut<crate::appframe::AppScrolls>, Query<&crate::appframe::AppPart>, Query<&crate::working::WorkPanel>, Query<&GlobalTransform, With<crate::working::Head>>),
 ) {
     let dt = time.delta_secs();
     ms.t += dt;
@@ -171,7 +171,7 @@ pub fn update(
     ms.pos = Some(pos);
     ms.swarm = swarm.open;
     // the head of the track, on screen, while the Working view is open
-    let head = if work.amt.x > 0.5 { heads.single().ok().and_then(|g| cam.0.world_to_viewport(cam.1, g.translation()).ok()) } else { None };
+    let head = if working.amt.x > 0.5 { heads.single().ok().and_then(|g| cam.0.world_to_viewport(cam.1, g.translation()).ok()) } else { None };
     let hit = if ms.drag == Drag::None { pick(w, pos, cam, &panels.p0(), &tiles, &decks, &gts, head) } else { ms.hit.unwrap_or(Hit::None) };
     if ms.hit != Some(hit) && matches!(hit, Hit::Ring(_)) && !swarm.open {
         sound.play("hover");
@@ -226,7 +226,7 @@ pub fn update(
                 while ms.wheel_acc.abs() >= 19.0 {
                     let up = ms.wheel_acc > 0.0;
                     ms.wheel_acc -= ms.wheel_acc.signum() * 19.0;
-                    work.out_scroll = if up { work.out_scroll + 1 } else { work.out_scroll.saturating_sub(1) };
+                    working.out_scroll = if up { working.out_scroll + 1 } else { working.out_scroll.saturating_sub(1) };
                 }
             }
             Hit::Panel(e, _) if !ctrl => {
@@ -352,12 +352,12 @@ pub fn update(
                                 Hit::Panel(e, _) => panel_point(cam, &panels.p0(), e, pos),
                                 _ => None,
                             };
-                            single_click(hit, at, &mut rolo, &mut open, &mut sound, &mut toasts);
+                            single_click(hit, at, &mut rolo, &mut open, &mut sound, &mut toasts, &mut working, &signal_line(&live, &svc, &args));
                         } else if hit == Hit::Head {
                             // the head: a finished task that changed files opens in Code to review
                             ms.last_click = None;
                             ms.pending_click = None;
-                            let review = { let s = svc.shared.lock().unwrap(); crate::working::pick(&work, &s.tasks).filter(|t| t.state == sphere_proto::TaskState::Done && !t.files.is_empty()).map(|t| t.id.clone()) };
+                            let review = { let s = svc.shared.lock().unwrap(); crate::working::pick(&working, &s.tasks).filter(|t| t.state == sphere_proto::TaskState::Done && !t.files.is_empty()).map(|t| t.id.clone()) };
                             if let Some(id) = review {
                                 open.code_task = Some(id);
                                 open.app(2, &mut toasts);
@@ -388,7 +388,7 @@ pub fn update(
     if let Some((h, t0)) = ms.pending_click {
         if now - t0 > 0.26 {
             ms.pending_click = None;
-            single_click(h, None, &mut rolo, &mut open, &mut sound, &mut toasts);
+            single_click(h, None, &mut rolo, &mut open, &mut sound, &mut toasts, &mut working, &signal_line(&live, &svc, &args));
         }
     }
 }
@@ -418,7 +418,8 @@ fn panel_point(cam: (&Camera, &GlobalTransform), panels: &PanelPick, e: Entity, 
 }
 
 /// `at` is where on the panel it was clicked (panel px), when known.
-fn single_click(hit: Hit, at: Option<Vec2>, rolo: &mut crate::homepanels::Rolodex, open: &mut crate::apps::Open, sound: &mut crate::sound::Sound, toasts: &mut crate::live::Toasts) {
+#[allow(clippy::too_many_arguments)]
+fn single_click(hit: Hit, at: Option<Vec2>, rolo: &mut crate::homepanels::Rolodex, open: &mut crate::apps::Open, sound: &mut crate::sound::Sound, toasts: &mut crate::live::Toasts, working: &mut crate::working::Working, signal: &str) {
     match hit {
         Hit::Panel(_, PanelId::Apps) => {
             // the row under the pointer turns to the band and opens; the heading and the hint open the selected one
@@ -433,9 +434,53 @@ fn single_click(hit: Hit, at: Option<Vec2>, rolo: &mut crate::homepanels::Rolode
         }
         Hit::Panel(_, PanelId::Terminal) => open.app(0, toasts),
         Hit::Panel(_, PanelId::Agents) => open.app(1, toasts),
-        Hit::Ring(crate::core::AGENTS) => open.app(1, toasts),
+        Hit::Ring(i) => match ring_action(i) {
+            Some(RingAction::Agents) => open.app(1, toasts),
+            Some(RingAction::System) => {
+                open.system();
+                sound.play_q("click", 90);
+            }
+            Some(RingAction::Working) => {
+                working.open_latest();
+                sound.play_q("click", 90);
+            }
+            Some(RingAction::LinkStatus) => {
+                toasts.push(signal.to_string());
+                sound.play_q("click", 90);
+            }
+            None => {}
+        },
         _ => {}
     }
+}
+
+/// What a click on a ring does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RingAction {
+    /// the Agents app
+    Agents,
+    /// the System app
+    System,
+    /// the Working view, on the latest run
+    Working,
+    /// a toast with the link status
+    LinkStatus,
+}
+
+pub fn ring_action(ring: usize) -> Option<RingAction> {
+    match ring {
+        crate::core::AGENTS => Some(RingAction::Agents),
+        crate::core::LOAD => Some(RingAction::System),
+        crate::core::TIME => Some(RingAction::Working),
+        crate::core::SIGNAL => Some(RingAction::LinkStatus),
+        _ => None,
+    }
+}
+
+/// The Signal ring's status line: link and response time.
+fn signal_line(live: &crate::live::Live, svc: &crate::service::Service, args: &crate::Args) -> String {
+    let rtt = svc.shared.lock().unwrap().rtt_ms;
+    crate::service::link_line(live.link.as_ref(), rtt, args.offline())
 }
 
 #[derive(Component)]
@@ -493,9 +538,8 @@ pub fn draw_reticle(
     agents: Res<crate::core::Agents>,
     stats: Res<crate::sysstats::SysStats>,
     swarm: Res<crate::swarm::Swarm>,
-    args: Res<crate::Args>,
+    (sound, live, svc, args, work): (Res<crate::sound::Sound>, Res<crate::live::Live>, Res<crate::service::Service>, Res<crate::Args>, Res<crate::working::Working>),
     mut cursor: Query<&mut CursorOptions, With<PrimaryWindow>>,
-    (svc, work): (Res<crate::service::Service>, Res<crate::working::Working>),
     mut at: Local<Vec2>,
     mut q: ParamSet<(Query<(&mut Node, &mut UiTransform, &mut Visibility), With<Reticle>>, Query<(&mut Node, &mut Visibility), With<Tip>>, Query<(&TipText, &mut Text)>)>,
 ) {
@@ -565,11 +609,11 @@ pub fn draw_reticle(
                     None => ("AGENT".to_string(), String::new()),
                 }
             }
-            crate::core::TIME => ("TIMELINE · TODAY".to_string(), "Now on the ring at 12 o'clock is midnight".to_string()),
-            crate::core::LOAD => ("SYSTEM LOAD".to_string(), format!("CPU {:.0}% · memory {:.0}% · GPU {:.0}%", s.cpu * 100.0, s.mem * 100.0, s.gpu * 100.0)),
+                        crate::core::TIME => ("TIMELINE · TODAY".to_string(), format!("{} · click to open", crate::core::timeline_line(agents.time_spans(crate::core::now_minutes()).len(), crate::core::now_minutes()))),
+            crate::core::LOAD => ("SYSTEM LOAD".to_string(), format!("CPU {:.0}% · memory {:.0}% · GPU {:.0}% · click to open", s.cpu * 100.0, s.mem * 100.0, s.gpu * 100.0)),
             crate::core::AGENTS => ("AGENTS".to_string(), format!("{} · click to open", agents.summary())),
-            crate::core::SIGNAL => ("SIGNAL".to_string(), "sphered link and services".to_string()),
-            crate::core::VOICE => ("VOICE".to_string(), "Voice arrives with M5 · / to type".to_string()),
+            crate::core::SIGNAL => ("SIGNAL".to_string(), format!("{} · click for status", signal_line(&live, &svc, &args))),
+            crate::core::VOICE => ("VOICE".to_string(), sound.voice_state().tip().to_string()),
             _ => ("SPHERE CORE".to_string(), "Drag rotate · double-click to collapse · double-click empty space to fit".to_string()),
         };
         for (tt, mut t) in &mut q.p2() {
@@ -584,6 +628,16 @@ pub fn draw_reticle(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rings_click_to_the_right_place() {
+        assert_eq!(ring_action(crate::core::LOAD), Some(RingAction::System));
+        assert_eq!(ring_action(crate::core::TIME), Some(RingAction::Working));
+        assert_eq!(ring_action(crate::core::SIGNAL), Some(RingAction::LinkStatus));
+        assert_eq!(ring_action(crate::core::AGENTS), Some(RingAction::Agents));
+        assert_eq!(ring_action(crate::core::VOICE), None);
+        assert_eq!(ring_action(5), None);
+    }
 
     #[test]
     fn a_cursor_always_shows() {

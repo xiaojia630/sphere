@@ -228,11 +228,11 @@ fn tile_text(i: usize, now: Option<&TileState>) -> (String, String, String) {
         }),
         3 => match now.and_then(|n| n.prs.as_ref()) {
             Some((open, line)) => (format!("{open} open"), "Branches and PRs".into(), line.clone()),
-            None => ("live".into(), "Branches and PRs".into(), "Status, branches and pull requests".into()),
+            None => ("live".into(), "Branches and PRs".into(), now.and_then(|n| n.git.clone()).unwrap_or_else(|| "Status, branches and pull requests".into())),
         },
         4 => ("live".into(), now.map(|n| n.docker.clone()).unwrap_or_else(|| "Docker".into()), now.map(|n| n.docker_detail.clone()).unwrap_or_else(|| "Start, stop, restart, logs".into())),
-        5 => ("live".into(), "Ports and logs".into(), "What's listening, and its output".into()),
-        6 => ("live".into(), "Files".into(), "Browse, preview, quick edit".into()),
+        5 => ("live".into(), "Ports and logs".into(), now.and_then(|n| n.ports).map(|p| format!("{p} listening · and their output")).unwrap_or_else(|| "What's listening, and its output".into())),
+        6 => ("live".into(), "Files".into(), now.and_then(|n| n.files.clone()).unwrap_or_else(|| "Browse, preview, quick edit".into())),
         _ => ("soon".into(), "Music".into(), "Not built yet".into()),
     }
 }
@@ -245,6 +245,10 @@ struct TileState {
     tasks: usize,
     docker: String,
     docker_detail: String,
+    /// "main · 3 changed", ports listening and "Projects · 24 items", once those apps have read them
+    git: Option<String>,
+    ports: Option<usize>,
+    files: Option<String>,
     prs: Option<(usize, String)>,
 }
 
@@ -304,11 +308,11 @@ pub fn update(
     mut pmats: ResMut<Assets<PanelMaterial>>,
     mut gmats: ResMut<Assets<GlowMaterial>>,
     mut feet: Query<(&TileFoot, &mut Text, &mut TextColor)>,
-    (mut words, agents, live, stats, terms): (Query<(&TileText, &mut Text), Without<TileFoot>>, Res<crate::core::Agents>, Res<crate::live::Live>, Res<crate::sysstats::SysStats>, Res<crate::term::Terms>),
+    (mut words, agents, live, stats, terms, git, ports, files): (Query<(&TileText, &mut Text), Without<TileFoot>>, Res<crate::core::Agents>, Res<crate::live::Live>, Res<crate::sysstats::SysStats>, Res<crate::term::Terms>, Res<crate::gitapp::GitApp>, Res<crate::ports::PortsApp>, Res<crate::filesapp::FilesApp>),
 ) {
     let dt = sim.dt;
     if orb.amount() > 0.01 {
-        let st = TileState { tabs: terms.tabs.len(), agents: agents.list.len(), working: agents.working(), needs: live.requests.len().max(agents.waiting()), tasks: live.titles.len(), docker: stats.get().docker.label(), docker_detail: stats.get().docker.detail(), prs: crate::prs::SUMMARY.lock().ok().and_then(|g| g.clone()) };
+        let st = TileState { tabs: terms.tabs.len(), agents: agents.list.len(), working: agents.working(), needs: live.requests.len().max(agents.waiting()), tasks: live.titles.len(), docker: stats.get().docker.label(), docker_detail: stats.get().docker.detail(), git: git.caption(), ports: ports.listening(), files: files.caption(), prs: crate::prs::SUMMARY.lock().ok().and_then(|g| g.clone()) };
         for (t, mut tx) in &mut words {
             let (r, m, s) = tile_text(t.0, Some(&st));
             let want = match t.1 {
