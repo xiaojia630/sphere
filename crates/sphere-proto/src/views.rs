@@ -17,6 +17,9 @@ pub struct OpenStep {
     pub detail: String,
 }
 
+/// The status of a resumed session that waits for the user's first message.
+pub const WAITING_FOR_YOU: &str = "Waiting for your message";
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TaskView {
     pub id: String,
@@ -67,6 +70,12 @@ pub struct TaskView {
     /// Cumulative cost last reported by the current agent process.
     #[serde(default)]
     pub last_total_cost: f64,
+    /// How many agent processes this task has started.
+    #[serde(default)]
+    pub starts: u32,
+    /// Where the session ran before it was taken over into Sphere.
+    #[serde(default)]
+    pub taken_over_from: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -254,6 +263,8 @@ impl Views {
                         allow_rewrites: *allow_rewrites,
                         resume_session: resume_session.clone(),
                         last_total_cost: 0.0,
+                        starts: 0,
+                        taken_over_from: None,
                     },
                 );
                 return;
@@ -331,8 +342,16 @@ impl Views {
                 t.pid = Some(*pid);
                 t.state = TaskState::Working;
                 t.last_total_cost = 0.0;
-                t.status = "Working".into();
+                if t.starts == 0 && t.prompt.trim().is_empty() {
+                    // Resumed with no message: it waits for the user's.
+                    t.state = TaskState::Done;
+                    t.status = WAITING_FOR_YOU.into();
+                } else {
+                    t.status = "Working".into();
+                }
+                t.starts += 1;
             }
+            EventBody::TakenOver { from } => t.taken_over_from = Some(from.clone()),
             EventBody::AgentExited { .. } => {
                 t.child = None;
                 t.pid = None;
@@ -388,6 +407,7 @@ impl Views {
                 ok,
                 interrupted,
                 summary,
+                turns,
                 cost_usd,
                 cost_delta_usd,
                 ..
@@ -398,7 +418,10 @@ impl Views {
                 if let Some(c) = cost_usd {
                     t.last_total_cost = *c;
                 }
-                if *ok || *interrupted {
+                // a resumed session reporting in with no turn still waits for the user
+                if *ok && *turns == Some(0) && t.status == WAITING_FOR_YOU {
+                    t.state = TaskState::Done;
+                } else if *ok || *interrupted {
                     t.state = TaskState::Done;
                     let s = first_line(summary, 120);
                     t.status = if *interrupted {
@@ -521,6 +544,65 @@ mod tests {
             agent_request: Some("a1".into()),
             revises: revises.map(str::to_string),
         }
+    }
+
+    #[test]
+    fn a_session_resumed_with_no_message_waits_for_the_user() {
+        let mut v = Views::default();
+        v.apply(&ev(
+            1,
+            "t1",
+            EventBody::TaskCreated {
+                title: "t".into(),
+                prompt: String::new(),
+                repo: "/r".into(),
+                in_place: true,
+                budget_usd: 1.0,
+                mode: None,
+                model: None,
+                allow_rewrites: false,
+                resume_session: Some("s1".into()),
+            },
+        ));
+        v.apply(&ev(
+            2,
+            "t1",
+            EventBody::TakenOver {
+                from: "herdr".into(),
+            },
+        ));
+        v.apply(&started(3, "t1"));
+        let t = v.task("t1").unwrap();
+        assert_eq!(
+            (t.state, t.status.as_str()),
+            (TaskState::Done, WAITING_FOR_YOU)
+        );
+        assert_eq!(t.taken_over_from.as_deref(), Some("herdr"));
+        // the resumed agent reports in with no turn: still waiting, nothing spent
+        let turn = |seq, turns| {
+            ev(
+                seq,
+                "t1",
+                EventBody::Turn {
+                    ok: true,
+                    interrupted: false,
+                    summary: String::new(),
+                    turns,
+                    duration_ms: None,
+                    cost_usd: Some(0.26),
+                    cost_delta_usd: 0.0,
+                },
+            )
+        };
+        v.apply(&turn(4, Some(0)));
+        let t = v.task("t1").unwrap();
+        assert_eq!(
+            (t.state, t.status.as_str()),
+            (TaskState::Done, WAITING_FOR_YOU)
+        );
+        assert_eq!((t.cost_usd, t.last_total_cost), (0.0, 0.26));
+        v.apply(&turn(5, Some(1)));
+        assert_eq!(v.task("t1").unwrap().status, "Done");
     }
 
     #[test]

@@ -32,6 +32,8 @@ pub struct Config {
     pub check_version: bool,
     /// Lists Claude sessions as JSON. Default: `<agent> agents --json`.
     pub session_list_command: Option<Vec<String>>,
+    /// Stops a background session; the session id is appended. Default: `<agent> stop`.
+    pub session_stop_command: Option<Vec<String>>,
     /// Reports sign-in as JSON. Default: `<agent> auth status`.
     pub auth_status_command: Option<Vec<String>>,
     /// Where Claude Code keeps transcripts. Default: `~/.claude/projects`.
@@ -59,6 +61,7 @@ impl Default for Config {
             idle_ttl_ms: 10 * 60 * 1000,
             check_version: true,
             session_list_command: None,
+            session_stop_command: None,
             auth_status_command: None,
             claude_projects_dir: None,
             subscriber_queue: 1024,
@@ -129,6 +132,15 @@ impl Config {
         self.session_list_command
             .clone()
             .unwrap_or_else(|| vec![self.agent_command.clone(), "agents".into(), "--json".into()])
+    }
+
+    pub fn session_stop_cmd(&self, session_id: &str) -> Vec<String> {
+        let mut cmd = self
+            .session_stop_command
+            .clone()
+            .unwrap_or_else(|| vec![self.agent_command.clone(), "stop".into()]);
+        cmd.push(session_id.to_string());
+        cmd
     }
 
     pub fn auth_status_cmd(&self) -> Vec<String> {

@@ -202,6 +202,8 @@ async fn dispatch(
                 "rewind is not implemented yet",
             ))),
             method::SESSION_LIST => Ok(ok(mgr.session_list().await?)?),
+            method::SESSION_OUTSIDE => Ok(ok(mgr.session_outside().await?)?),
+            method::SESSION_TAKE_OVER => Ok(ok(mgr.take_over(parse(params)?).await?)?),
             method::SESSION_BRING_IN => Ok(ok(mgr.bring_in(parse(params)?).await?)?),
             method::REQUEST_ANSWER => {
                 let p: api::AnswerParams = parse(params)?;

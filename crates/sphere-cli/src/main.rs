@@ -84,6 +84,8 @@ enum Command {
     Model { task: String, model: String },
     /// List Claude sessions that can be brought into Sphere.
     Sessions,
+    /// Move a Claude session running in a terminal (or the background) into Sphere.
+    TakeOver { session: String },
     /// Resume an existing Claude session as a Sphere task.
     BringIn {
         session: String,
@@ -320,10 +322,15 @@ async fn run() -> Result<ExitCode> {
         Command::Model { task, model } => client.set_model(&task, &model).await?,
         Command::Sessions => {
             for s in client.session_list().await? {
+                let running = match (&s.where_, &s.state) {
+                    (Some(w), Some(st)) if s.running => format!("running in {w}, {st}"),
+                    _ if s.running => "running".to_string(),
+                    _ => "idle   ".to_string(),
+                };
                 println!(
                     "{}  {}  {}{}  {}",
                     s.session_id,
-                    if s.running { "running" } else { "idle   " },
+                    running,
                     s.cwd.as_deref().unwrap_or("-"),
                     s.task
                         .as_ref()
@@ -331,6 +338,13 @@ async fn run() -> Result<ExitCode> {
                         .unwrap_or_default(),
                     s.title.as_deref().unwrap_or("")
                 );
+            }
+        }
+        Command::TakeOver { session } => {
+            let r = client.take_over(&session).await?;
+            println!("Took over {} from {} as task {}", r.title, r.from, r.task);
+            if r.idle {
+                println!("it is waiting for your message");
             }
         }
         Command::BringIn {

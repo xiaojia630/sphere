@@ -11,7 +11,7 @@ use crate::host_link::HostLink;
 use crate::hub::Hub;
 use crate::policy::{self, Ctx, Policy, Verdict};
 use crate::store::OffsetUpdate;
-use crate::{sessions, workspace};
+use crate::{outside, sessions, workspace};
 use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
 use sphere_host::{ExitStatus, FollowItem, SpawnParams, Stream};
@@ -89,7 +89,12 @@ pub struct Manager {
     ctl: Mutex<HashMap<String, oneshot::Sender<CtlReply>>>,
     ctl_seq: AtomicU64,
     info: Mutex<Info>,
+    /// The last scan for sessions outside Sphere, and when it ran.
+    outside: tokio::sync::Mutex<Option<(std::time::Instant, Vec<outside::Found>)>>,
 }
+
+/// How long a scan for sessions outside Sphere is reused.
+const OUTSIDE_TTL: Duration = Duration::from_secs(4);
 
 /// What one line of agent output turns into.
 #[derive(Debug, Default)]
@@ -222,7 +227,10 @@ pub fn plan_line(cx: &LineCtx, inc: Incoming) -> Plan {
                     reason: "turn ended".into(),
                 });
             }
+            // A result with no turns did no work: a resumed session reports what
+            // it cost before (outside Sphere, say) and that becomes the baseline.
             let delta = total_cost_usd
+                .filter(|_| turns != Some(0))
                 .map(|c| (c - cx.view.last_total_cost).max(0.0))
                 .unwrap_or(0.0);
             plan.events.push(EventBody::Turn {
@@ -357,6 +365,7 @@ impl Manager {
             ctl: Mutex::new(HashMap::new()),
             ctl_seq: AtomicU64::new(0),
             info: Mutex::new(Info::default()),
+            outside: tokio::sync::Mutex::new(None),
         })
     }
 
@@ -577,10 +586,13 @@ impl Manager {
         std::fs::write(&settings_path, serde_json::to_vec_pretty(&settings)?)?;
 
         let resume = view.session_id.clone();
-        let text = match (&message, &resume) {
-            (Some(m), _) => m.clone(),
-            (None, Some(_)) => "continue".to_string(),
-            (None, None) => view.prompt.clone(),
+        // The first launch sends the task's prompt (none: a resumed session waits
+        // for the user); a later one, after a restart, just says continue.
+        let first = view.starts == 0;
+        let text: Option<String> = match (&message, &resume) {
+            (Some(m), _) => Some(m.clone()),
+            (None, Some(_)) if !first => Some("continue".to_string()),
+            (None, _) => Some(view.prompt.clone()).filter(|p| !p.trim().is_empty()),
         };
         let gen = proto::build_args(&proto::AgentArgs {
             settings: &settings_path.to_string_lossy(),
@@ -639,6 +651,10 @@ impl Manager {
             }),
         )?;
         self.attach(task, &spawned.id, 0);
+        let Some(text) = text else {
+            self.start_idle_timer(task);
+            return Ok(());
+        };
         self.host
             .write(&spawned.id, proto::user_message(&text).as_bytes())
             .await?;
@@ -1141,15 +1157,19 @@ impl Manager {
     // ---- API ---------------------------------------------------------------------
 
     pub async fn start_task(self: &Arc<Self>, p: api::StartParams) -> ApiResult<api::StartResult> {
-        self.start_task_inner(p, None).await
+        self.start_task_inner(p, None, vec![]).await
     }
 
+    /// `extra` events are committed with the creation, before anything else.
+    /// Only a resumed session may start with an empty prompt: it then waits
+    /// for the user's first message.
     async fn start_task_inner(
         self: &Arc<Self>,
         p: api::StartParams,
         resume_session: Option<String>,
+        extra: Vec<EventBody>,
     ) -> ApiResult<api::StartResult> {
-        if p.prompt.trim().is_empty() {
+        if p.prompt.trim().is_empty() && resume_session.is_none() {
             return Err(ApiError(RpcError {
                 code: api::code::INVALID_PARAMS,
                 message: "the prompt is empty".into(),
@@ -1190,22 +1210,19 @@ impl Manager {
             .filter(|t| !t.trim().is_empty())
             .unwrap_or_else(|| truncate(p.prompt.lines().next().unwrap_or("task"), 60));
         let id = self.hub.new_task_id();
-        self.hub
-            .publish(
-                &id,
-                EventBody::TaskCreated {
-                    title,
-                    prompt: p.prompt,
-                    repo: top.to_string_lossy().to_string(),
-                    in_place: p.in_place,
-                    budget_usd: budget,
-                    mode: p.mode,
-                    model: p.model,
-                    allow_rewrites: p.allow_rewrites,
-                    resume_session,
-                },
-            )
-            .map_err(ApiError::from)?;
+        let mut bodies = vec![EventBody::TaskCreated {
+            title,
+            prompt: p.prompt,
+            repo: top.to_string_lossy().to_string(),
+            in_place: p.in_place,
+            budget_usd: budget,
+            mode: p.mode,
+            model: p.model,
+            allow_rewrites: p.allow_rewrites,
+            resume_session,
+        }];
+        bodies.extend(extra);
+        self.hub.commit(&id, bodies, None).map_err(ApiError::from)?;
         self.pump();
         Ok(api::StartResult { task: id })
     }
@@ -1645,7 +1662,174 @@ impl Manager {
                 .filter_map(|t| t.session_id.clone().map(|s| (s, t.id.clone())))
                 .collect()
         });
-        Ok(sessions::list(&self.cfg, &known).await?)
+        let mut list = sessions::list(&self.cfg, &known).await?;
+        for f in self.outside_found(false).await {
+            let Some(id) = &f.info.session_id else {
+                continue;
+            };
+            if let Some(s) = list.iter_mut().find(|s| &s.session_id == id) {
+                s.running = true;
+                s.pid = f.info.pid.or(s.pid);
+                s.where_ = Some(f.info.where_.clone());
+                s.state = Some(f.info.state.clone());
+            }
+        }
+        Ok(list)
+    }
+
+    /// Sessions running outside Sphere, minus the ones a Sphere task owns.
+    /// Reuses a scan under a few seconds old unless `fresh`.
+    async fn outside_found(&self, fresh: bool) -> Vec<outside::Found> {
+        let mut cache = self.outside.lock().await;
+        let all = match cache.as_ref() {
+            Some((at, found)) if !fresh && at.elapsed() < OUTSIDE_TTL => found.clone(),
+            _ => {
+                let found = outside::scan(&self.cfg, self.agent_roots().await).await;
+                *cache = Some((std::time::Instant::now(), found.clone()));
+                found
+            }
+        };
+        let owned: HashSet<String> = self.hub.view(|v| {
+            v.tasks()
+                .into_iter()
+                .filter(|t| owns_session(t))
+                .filter_map(|t| t.session_id.clone())
+                .collect()
+        });
+        all.into_iter()
+            .filter(|f| {
+                f.info
+                    .session_id
+                    .as_ref()
+                    .is_none_or(|s| !owned.contains(s))
+            })
+            .collect()
+    }
+
+    pub async fn session_outside(&self) -> ApiResult<Vec<api::OutsideSession>> {
+        Ok(self
+            .outside_found(false)
+            .await
+            .into_iter()
+            .map(|f| f.info)
+            .collect())
+    }
+
+    /// Move a session running outside Sphere into Sphere: stop it there, wait
+    /// for its transcript to settle, and resume it in place as a task.
+    pub async fn take_over(
+        self: &Arc<Self>,
+        p: api::TakeOverParams,
+    ) -> ApiResult<api::TakeOverResult> {
+        let id = p.session_id;
+        let owner = self.hub.view(|v| {
+            v.tasks()
+                .into_iter()
+                .find(|t| t.session_id.as_deref() == Some(id.as_str()) && owns_session(t))
+                .map(|t| t.id.clone())
+        });
+        if let Some(t) = owner {
+            return Err(api_err(
+                kind::INVALID_STATE,
+                format!("session {id} is already running as task {t}"),
+            ));
+        }
+        let found = self.outside_found(true).await;
+        let Some(f) = found
+            .iter()
+            .find(|f| f.info.session_id.as_deref() == Some(id.as_str()))
+            .cloned()
+        else {
+            let projects = self.cfg.projects_dir();
+            let cwd = outside::find_transcript(&projects, &id, None)
+                .and_then(|p| sessions::read_transcript(&p))
+                .and_then(|s| s.cwd);
+            if let Some(c) = cwd.filter(|c| {
+                found
+                    .iter()
+                    .any(|f| f.info.ambiguous && f.info.cwd.as_deref() == Some(c.as_str()))
+            }) {
+                return Err(api_err(
+                    kind::INVALID_STATE,
+                    format!(
+                        "several Claude sessions run in {c} and session {id} cannot be told apart; close the others first"
+                    ),
+                ));
+            }
+            return Err(api_err(
+                kind::NOT_FOUND,
+                format!("session {id} is not running outside Sphere"),
+            ));
+        };
+        let Some(cwd) = f.info.cwd.clone() else {
+            return Err(api_err(
+                kind::NOT_FOUND,
+                format!("no folder known for session {id}"),
+            ));
+        };
+        // Refuse before stopping anything that Sphere could not resume.
+        if self.capped() {
+            return Err(api_err(
+                kind::DAILY_CAP,
+                "the daily cost cap is reached; raise it or wait for tomorrow",
+            ));
+        }
+        let repo = PathBuf::from(&cwd);
+        tokio::task::spawn_blocking(move || workspace::repo_toplevel(&repo))
+            .await
+            .map_err(|e| anyhow!(e))?
+            .map_err(|e| api_err(kind::BAD_REPO, format!("{cwd} is not a git folder: {e:#}")))?;
+
+        outside::stop(&self.cfg, &f)
+            .await
+            .map_err(|e| api_err(kind::AGENT_ERROR, format!("could not stop it there: {e:#}")))?;
+        *self.outside.lock().await = None;
+        let projects = self.cfg.projects_dir();
+        let path = outside::find_transcript(&projects, &id, Some(&cwd));
+        let (mut state, mut last) = ("unknown", None);
+        if let Some(path) = &path {
+            outside::wait_quiet(path, Duration::from_millis(300), Duration::from_secs(5)).await;
+            (state, last) = outside::transcript_state(path);
+        }
+        let where_ = f.info.where_.clone();
+        // Settled for good now that nothing writes: idle needs no first message.
+        let idle = state == "idle";
+        let prompt = if idle {
+            String::new()
+        } else {
+            format!(
+                "continue\n\nThis session was moved into Sphere from {where_} in the middle of a turn: it was stopped there. \
+                 Check what already happened before repeating anything with side effects."
+            )
+        };
+        let title = f
+            .info
+            .title
+            .clone()
+            .or(last)
+            .map(|t| truncate(&t, 60))
+            .unwrap_or_else(|| format!("Session {}", truncate(&id, 8)));
+        let started = self
+            .start_task_inner(
+                api::StartParams {
+                    repo: cwd,
+                    prompt,
+                    title: Some(title.clone()),
+                    in_place: true,
+                    ..Default::default()
+                },
+                Some(id),
+                vec![EventBody::TakenOver {
+                    from: where_.clone(),
+                }],
+            )
+            .await?;
+        Ok(api::TakeOverResult {
+            task: started.task,
+            title,
+            from: where_,
+            idle,
+        })
     }
 
     pub async fn bring_in(self: &Arc<Self>, p: api::BringInParams) -> ApiResult<api::StartResult> {
@@ -1695,6 +1879,7 @@ impl Manager {
                 ..Default::default()
             },
             Some(p.session_id),
+            vec![],
         )
         .await
     }
@@ -1711,6 +1896,14 @@ impl Manager {
         }
         roots
     }
+}
+
+/// Does the task hold its session: queued, working, or with an agent alive?
+fn owns_session(t: &TaskView) -> bool {
+    !matches!(
+        t.state,
+        TaskState::Done | TaskState::Failed | TaskState::Stopped
+    ) || t.child.is_some()
 }
 
 /// The message an agent gets when it is resumed after a restart.
@@ -2001,6 +2194,23 @@ mod tests {
         assert!(
             matches!(&plan.events[0], EventBody::Turn { cost_delta_usd, .. } if *cost_delta_usd == 0.0)
         );
+        // A resumed session reporting in with no turn: its total is what it
+        // cost before (outside Sphere), not spend of this task.
+        let plan = plan_line(
+            &cx(&view(), &p, &[], &id),
+            Incoming::Result {
+                ok: true,
+                subtype: "success".into(),
+                text: String::new(),
+                turns: Some(0),
+                duration_ms: None,
+                total_cost_usd: Some(0.26),
+            },
+        );
+        assert!(matches!(
+            &plan.events[0],
+            EventBody::Turn { cost_delta_usd, cost_usd: Some(c), .. } if *cost_delta_usd == 0.0 && *c == 0.26
+        ));
     }
 
     #[test]

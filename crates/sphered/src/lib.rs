@@ -6,6 +6,7 @@ pub mod envpath;
 pub mod host_link;
 pub mod hub;
 pub mod manager;
+pub mod outside;
 pub mod peer;
 pub mod policy;
 pub mod server;
