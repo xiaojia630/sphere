@@ -145,6 +145,10 @@ pub struct Snapshot {
     /// How many agents run at once; the rest wait queued. `None` from an older sphered.
     #[serde(default)]
     pub max_concurrent: Option<usize>,
+    /// Seconds agents spent waiting on a person today, over requests closed today. Requests still
+    /// waiting aren't included: clients add `now - opened_at` for those. 0 from an older sphered.
+    #[serde(default)]
+    pub waited_today_secs: u64,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -409,6 +413,17 @@ mod tests {
         let p: AnswerParams = serde_json::from_str(r#"{"request":"r1","answer":"yes"}"#).unwrap();
         assert_eq!(p.answer, AnswerKind::Yes);
         assert!(!p.always && p.text.is_none() && p.input.is_none());
+    }
+
+    #[test]
+    fn a_snapshot_from_an_older_sphered_has_no_waited_time() {
+        let old = r#"{"seq":7,"tasks":[],"requests":[],"cost_today_usd":1.5}"#;
+        let s: Snapshot = serde_json::from_str(old).unwrap();
+        assert_eq!(s.waited_today_secs, 0);
+        let new =
+            r#"{"seq":7,"tasks":[],"requests":[],"cost_today_usd":1.5,"waited_today_secs":95}"#;
+        let s: Snapshot = serde_json::from_str(new).unwrap();
+        assert_eq!(s.waited_today_secs, 95);
     }
 
     #[test]

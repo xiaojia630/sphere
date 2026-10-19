@@ -48,6 +48,9 @@ pub fn anchor(ax: char, x: f32, ay: char, y: f32, w: f32, h: f32) -> Vec3 {
 
 #[derive(Component)]
 pub struct SysRow(pub &'static str);
+/// The line under System's Needs you row: how long agents have waited on you today (hidden until it is a minute).
+#[derive(Component)]
+pub struct WaitedLine;
 /// The brand panel's sub line (it reads "Agent swarm" while the swarm is open).
 #[derive(Component)]
 pub struct BrandSub;
@@ -165,8 +168,8 @@ pub fn setup(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut atlas
     c.entity(b).add_children(&[wm, sub]);
     spawn_panel_quad(c, &mut meshes, &mut pmats, &ui, &PanelSpec { id: PanelId::Brand, w, h, home: anchor('c', 800.0, 't', 20.0, w, h), home_scale: 1.0, side: 0.0, phase: 0.7, show_at: show_at(0), unframed: true });
 
-    // ---- system: left 54, top 54, framed
-    let (w, h) = (316.0, 212.0);
+    // ---- system: left 54, top 54, framed (a little taller than its six rows, for the waited line under Needs you)
+    let (w, h) = (316.0, 220.0);
     let ui = spawn_ui_panel(c, &mut atlas, w, h);
     let b = body(c, ui.root, true);
     let hd = hdr(c, &f, "Sphere · System", &format!("v{}", env!("CARGO_PKG_VERSION")));
@@ -177,6 +180,12 @@ pub fn setup(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut atlas
         let dd = c.spawn((SysRow(k), Text::new(v.to_uppercase()), font(&f.ui600, 14.0, 2.24), TextColor(if acc { role_color(Role::Acc) } else { hot }), LineHeight::Px(25.2))).id();
         c.entity(row).add_children(&[dt, dd]);
         c.entity(b).add_child(row);
+        if k == "Needs you" {
+            let wl = c
+                .spawn((WaitedLine, Text::new(""), font(&f.ui500, 11.0, 1.76), TextColor(dim), LineHeight::Px(13.0), Node { display: Display::None, align_self: AlignSelf::FlexEnd, margin: UiRect { top: px(-6), ..default() }, ..default() }))
+                .id();
+            c.entity(b).add_child(wl);
+        }
     }
     spawn_panel_quad(c, &mut meshes, &mut pmats, &ui, &PanelSpec { id: PanelId::System, w, h, home: anchor('l', 54.0, 't', 54.0, w, h), home_scale: 1.0, side: 1.0, phase: 2.9, show_at: show_at(1), unframed: false });
 
@@ -294,7 +303,7 @@ pub fn update(
     sound: Res<crate::sound::Sound>,
     mut acc: Local<f32>,
     mut last_voice: Local<Option<crate::sound::VoiceState>>,
-    mut texts: ParamSet<(Query<(&SysRow, &mut Text, &mut TextColor)>, Query<(&MeterValue, &mut Text)>)>,
+    mut texts: ParamSet<(Query<(&SysRow, &mut Text, &mut TextColor)>, Query<(&MeterValue, &mut Text)>, Query<(&mut Text, &mut Node), With<WaitedLine>>)>,
     mut segs: Query<(&Meter, &mut BackgroundColor)>,
 ) {
     *acc += time.delta_secs();
@@ -327,6 +336,18 @@ pub fn update(
             t.0 = v;
         }
         c.set_if_neq(TextColor(col));
+    }
+    let waited = waited_line(live.waited_today_secs(crate::core::unix_now()));
+    for (mut t, mut n) in &mut texts.p2() {
+        let shown = if waited.is_some() { Display::Flex } else { Display::None };
+        if n.display != shown {
+            n.display = shown;
+        }
+        if let Some(w) = &waited {
+            if &t.0 != w {
+                t.0 = w.clone();
+            }
+        }
     }
     if !s.ready {
         return;
@@ -420,6 +441,11 @@ pub fn draw_rail(
             n.display = d;
         }
     }
+}
+
+/// The line under Needs you once agents have waited a minute or more on you today: "3 MIN WAITED TODAY".
+fn waited_line(secs: u64) -> Option<String> {
+    (secs >= 60).then(|| format!("{} waited today", crate::live::fmt_waited(secs)).to_uppercase())
 }
 
 /// The rolodex: the selected row bright with a lit dot, the list slid so it sits in the band.
@@ -565,6 +591,15 @@ mod tests {
         if APPS.len() % 2 == 1 {
             assert_eq!(rolo_row_at(band - (up + 1.0) * ROLO_ROW, 0), None);
         }
+    }
+
+    #[test]
+    fn the_waited_line_shows_from_a_minute() {
+        assert_eq!(waited_line(0), None);
+        assert_eq!(waited_line(59), None);
+        assert_eq!(waited_line(60).as_deref(), Some("1 MIN WAITED TODAY"));
+        assert_eq!(waited_line(12 * 60 + 40).as_deref(), Some("12 MIN WAITED TODAY"));
+        assert_eq!(waited_line(65 * 60).as_deref(), Some("1 H 5 MIN WAITED TODAY"));
     }
 
     #[test]

@@ -108,7 +108,7 @@ The service owns every terminal: your shells, Claude Code's own screen when you 
 ## Workspaces and isolation
 
 1. **A git worktree per task**, at `~/.sphere/worktrees/<repo>/<task>` on branch `sphere/<slug>`. It sits outside your repo, so watchers, test runners and search in your checkout never see it. A repo's `.sphere/config.toml` can list untracked files to copy in (such as `.env`) and a setup command (such as `npm ci`).
-2. **Claude Code's own sandbox for shell commands** (Seatbelt on macOS, bubblewrap on Linux). Sandboxed commands can write only inside the worktree and reach only allowed hosts, and they run without asking. This is the biggest single cut in how often you get asked.
+2. **Claude Code's own sandbox for shell commands** (Seatbelt on macOS, bubblewrap on Linux). Sandboxed commands can write only inside the worktree and reach only allowed hosts (the package registries by default), and they run without asking. This is the biggest single cut in how often you get asked.
 3. **Containers**, opt-in later, for repos you don't trust.
 
 **Checkpoints.** After each step that changes files, Sphere snapshots the worktree into a private git ref without touching the branch. Any step can be diffed or rolled back from Sphere, including changes made by shell commands.
@@ -133,7 +133,7 @@ Policy runs in three tiers:
 2. **Sphere's rules**, for what needs context Claude Code doesn't have: the branch being pushed, budget left, time of day, focus mode.
 3. **You**, for whatever is left.
 
-By default, reads, searches, edits and tests inside the worktree run freely. Anything outside the worktree asks. Anything that leaves your machine (a push, a PR, a deploy, a message, a new host) always asks. Force pushes and history rewrites are denied unless you allow them when starting the task.
+By default, reads, searches, edits and tests inside the worktree run freely, and so does fetching dependencies from the package registries (crates.io, npm and Yarn, PyPI, the Go module proxy), so installs and builds don't stop to ask. Anything outside the worktree asks. Anything else that leaves your machine (a push, a PR, a deploy, a publish, a message, a new host) always asks. Force pushes and history rewrites are denied unless you allow them when starting the task.
 
 ## Apps: adapted open source
 

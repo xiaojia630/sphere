@@ -244,5 +244,9 @@ async fn a_session_stopped_mid_turn_is_told_to_continue() {
         _ => unreachable!(),
     }
     w.wait("echo", say_has("first message: continue")).await;
-    assert!(!pid_alive(s.pid));
+    // take-over counts a zombie as stopped; on Linux it can linger until init reaps it
+    eventually("the old process to exit", 5, || async {
+        (!pid_alive(s.pid)).then_some(())
+    })
+    .await;
 }

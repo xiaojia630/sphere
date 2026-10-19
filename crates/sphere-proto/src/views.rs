@@ -6,6 +6,8 @@ use crate::event::{Event, EventBody, FileStat, PlanItem, TaskState};
 use crate::request::{AnswerKind, RequestInfo, RequestStatus};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
+use time::format_description::well_known::Rfc3339;
+use time::OffsetDateTime;
 
 /// A tool call that has started and has no result yet.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -94,6 +96,8 @@ pub struct Views {
     requests: HashMap<String, RequestView>,
     request_order: Vec<String>,
     cost_by_day: BTreeMap<String, f64>,
+    /// Seconds agents waited on the human, by the UTC day the request closed.
+    waited_by_day: BTreeMap<String, u64>,
     max_task: u64,
     max_request: u64,
     /// `task + tool` -> the request that was answered `change`.
@@ -108,6 +112,16 @@ fn numeric_suffix(id: &str) -> u64 {
 
 fn hint_key(task: &str, tool: &str) -> String {
     format!("{task}\u{1f}{tool}")
+}
+
+/// Whole seconds from one RFC 3339 time to a later one. 0 when either won't parse or the span
+/// runs backwards.
+fn seconds_between(from: &str, to: &str) -> u64 {
+    let parse = |s: &str| OffsetDateTime::parse(s, &Rfc3339).ok();
+    match (parse(from), parse(to)) {
+        (Some(a), Some(b)) => u64::try_from((b - a).whole_seconds()).unwrap_or(0),
+        _ => 0,
+    }
 }
 
 fn first_line(s: &str, max: usize) -> String {
@@ -169,6 +183,12 @@ impl Views {
     /// Cost reported on a UTC day (`YYYY-MM-DD`).
     pub fn cost_on(&self, day: &str) -> f64 {
         self.cost_by_day.get(day).copied().unwrap_or(0.0)
+    }
+
+    /// Seconds agents spent waiting on the human, over the requests that closed on a UTC day
+    /// (`YYYY-MM-DD`). A request still open isn't counted.
+    pub fn waited_on(&self, day: &str) -> u64 {
+        self.waited_by_day.get(day).copied().unwrap_or(0)
     }
 
     pub fn active_count(&self) -> usize {
@@ -273,6 +293,27 @@ impl Views {
             _ => {}
         }
 
+        let day = ev.at.get(..10).unwrap_or("").to_string();
+
+        // A request that was open or snoozed closes for good: what it waited counts toward the
+        // day it closed. This runs before the status changes, so a second close adds nothing.
+        let closing = match &ev.body {
+            EventBody::RequestAnswered {
+                request, answer, ..
+            } if *answer != AnswerKind::Later => Some(request),
+            EventBody::RequestWithdrawn { request, .. } => Some(request),
+            _ => None,
+        };
+        if let Some(r) = closing
+            .and_then(|id| self.requests.get(id))
+            .filter(|r| r.status.is_open())
+        {
+            let secs = seconds_between(&r.opened_at, &ev.at);
+            if secs > 0 {
+                *self.waited_by_day.entry(day.clone()).or_insert(0) += secs;
+            }
+        }
+
         // Request bookkeeping that is not about a single task's fields.
         match &ev.body {
             EventBody::Request { request } => {
@@ -321,7 +362,6 @@ impl Views {
             _ => {}
         }
 
-        let day = ev.at.get(..10).unwrap_or("").to_string();
         let mut extra_cost = 0.0;
         let Some(t) = self.tasks.get_mut(id) else {
             return;
@@ -486,6 +526,7 @@ fn request_line(info: &RequestInfo) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::request::AnswerKind::{Change, Later, Yes};
     use crate::request::RequestKind;
     use serde_json::json;
 
@@ -544,6 +585,49 @@ mod tests {
             agent_request: Some("a1".into()),
             revises: revises.map(str::to_string),
         }
+    }
+
+    fn at(seq: u64, when: &str, body: EventBody) -> Event {
+        Event {
+            at: when.into(),
+            ..ev(seq, "t1", body)
+        }
+    }
+
+    fn ask(seq: u64, when: &str, id: &str) -> Event {
+        let request = req(id, "t1", "Bash", None);
+        at(seq, when, EventBody::Request { request })
+    }
+
+    fn answer(seq: u64, when: &str, id: &str, answer: AnswerKind) -> Event {
+        let body = EventBody::RequestAnswered {
+            request: id.into(),
+            answer,
+            text: None,
+            always: false,
+        };
+        at(seq, when, body)
+    }
+
+    fn snooze(seq: u64, when: &str, id: &str) -> Event {
+        let request = id.into();
+        at(seq, when, EventBody::RequestSnoozed { request })
+    }
+
+    fn withdraw(seq: u64, when: &str, id: &str) -> Event {
+        let body = EventBody::RequestWithdrawn {
+            request: id.into(),
+            reason: "stop".into(),
+        };
+        at(seq, when, body)
+    }
+
+    /// Views with one running task, `t1`.
+    fn with_task() -> Views {
+        let mut v = Views::default();
+        v.apply(&created(1, "t1"));
+        v.apply(&started(2, "t1"));
+        v
     }
 
     #[test]
@@ -767,5 +851,100 @@ mod tests {
         v.apply(&ev(4, "t99", EventBody::Say { text: "x".into() }));
         assert!(v.task("t99").is_none());
         assert_eq!(v.seq, 4);
+    }
+
+    #[test]
+    fn answering_counts_the_whole_seconds_the_agent_waited() {
+        let mut v = with_task();
+        v.apply(&ask(3, "2026-03-04T10:00:00.000Z", "r1"));
+        assert_eq!(v.waited_on("2026-03-04"), 0, "still waiting");
+        v.apply(&answer(4, "2026-03-04T10:03:00.000Z", "r1", Yes));
+        assert_eq!(v.waited_on("2026-03-04"), 180);
+        assert_eq!(v.waited_on("2026-03-05"), 0);
+
+        // Change closes it too, and a part of a second doesn't count.
+        v.apply(&ask(5, "2026-03-04T10:10:00.800Z", "r2"));
+        v.apply(&answer(6, "2026-03-04T10:10:02.700Z", "r2", Change));
+        assert_eq!(v.waited_on("2026-03-04"), 181);
+    }
+
+    #[test]
+    fn later_keeps_the_agent_waiting_until_the_request_closes_for_good() {
+        let mut v = with_task();
+        v.apply(&ask(3, "2026-03-04T10:00:00.000Z", "r1"));
+        v.apply(&answer(4, "2026-03-04T10:01:00.000Z", "r1", Later));
+        v.apply(&snooze(5, "2026-03-04T10:02:00.000Z", "r1"));
+        assert_eq!(v.request("r1").unwrap().status, RequestStatus::Snoozed);
+        assert_eq!(v.waited_on("2026-03-04"), 0, "snoozed is still waiting");
+
+        v.apply(&answer(6, "2026-03-04T10:10:00.000Z", "r1", Yes));
+        assert_eq!(v.waited_on("2026-03-04"), 600, "counted from opening");
+    }
+
+    #[test]
+    fn a_withdrawn_request_counts_what_it_waited() {
+        let mut v = with_task();
+        v.apply(&ask(3, "2026-03-04T10:00:00.000Z", "r1"));
+        v.apply(&withdraw(4, "2026-03-04T10:02:30.000Z", "r1"));
+        assert_eq!(v.waited_on("2026-03-04"), 150);
+
+        // One that was snoozed first counts all the same.
+        v.apply(&ask(5, "2026-03-04T11:00:00.000Z", "r2"));
+        v.apply(&snooze(6, "2026-03-04T11:00:10.000Z", "r2"));
+        v.apply(&withdraw(7, "2026-03-04T11:01:00.000Z", "r2"));
+        assert_eq!(v.waited_on("2026-03-04"), 210);
+    }
+
+    #[test]
+    fn a_request_closed_twice_counts_once() {
+        let mut v = with_task();
+        v.apply(&ask(3, "2026-03-04T10:00:00.000Z", "r1"));
+        v.apply(&answer(4, "2026-03-04T10:03:00.000Z", "r1", Yes));
+        v.apply(&answer(5, "2026-03-04T10:09:00.000Z", "r1", Yes));
+        v.apply(&answer(6, "2026-03-04T10:10:00.000Z", "r1", Change));
+        v.apply(&withdraw(7, "2026-03-04T10:20:00.000Z", "r1"));
+        assert_eq!(v.waited_on("2026-03-04"), 180);
+
+        // Withdrawn first, then answered anyway.
+        v.apply(&ask(8, "2026-03-04T11:00:00.000Z", "r2"));
+        v.apply(&withdraw(9, "2026-03-04T11:01:00.000Z", "r2"));
+        v.apply(&answer(10, "2026-03-04T11:05:00.000Z", "r2", Yes));
+        assert_eq!(v.waited_on("2026-03-04"), 240);
+
+        // A request nobody opened has nothing to count.
+        v.apply(&answer(11, "2026-03-04T12:00:00.000Z", "r9", Yes));
+        assert_eq!(v.waited_on("2026-03-04"), 240);
+    }
+
+    #[test]
+    fn each_day_keeps_its_own_waited_total() {
+        let mut v = with_task();
+        v.apply(&ask(3, "2026-03-04T08:00:00.000Z", "r1"));
+        v.apply(&answer(4, "2026-03-04T08:00:45.000Z", "r1", Yes));
+        // Opened late on the 4th, answered on the 5th: it counts in full on the 5th.
+        v.apply(&ask(5, "2026-03-04T23:59:00.000Z", "r2"));
+        v.apply(&answer(6, "2026-03-05T00:01:00.000Z", "r2", Yes));
+        v.apply(&ask(7, "2026-03-05T09:00:00.000Z", "r3"));
+        v.apply(&withdraw(8, "2026-03-05T09:00:30.000Z", "r3"));
+        assert_eq!(v.waited_on("2026-03-04"), 45);
+        assert_eq!(v.waited_on("2026-03-05"), 150);
+        assert_eq!(v.waited_on("2026-03-06"), 0);
+    }
+
+    #[test]
+    fn spans_that_cannot_be_measured_count_nothing() {
+        let mut v = with_task();
+        // Opened at a time that is not a time.
+        v.apply(&ask(3, "sometime", "r1"));
+        v.apply(&answer(4, "2026-03-04T10:00:00.000Z", "r1", Yes));
+        // Closed at a time that is not a time.
+        v.apply(&ask(5, "2026-03-04T10:00:00.000Z", "r2"));
+        v.apply(&answer(6, "later", "r2", Yes));
+        // Closed before it opened.
+        v.apply(&ask(7, "2026-03-04T10:05:00.000Z", "r3"));
+        v.apply(&answer(8, "2026-03-04T10:00:00.000Z", "r3", Yes));
+        assert_eq!(v.waited_on("2026-03-04"), 0);
+        assert_eq!(v.waited_on(""), 0);
+        assert!(v.open_requests().is_empty(), "they still closed");
     }
 }

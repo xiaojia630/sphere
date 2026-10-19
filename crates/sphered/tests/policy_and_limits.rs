@@ -45,7 +45,12 @@ async fn policy_is_compiled_into_settings_with_the_sandbox_on() {
     env.start_daemon().await;
     let (s, args) = run_settings(&env).await;
     assert_eq!(s["sandbox"]["enabled"], true);
-    assert_eq!(s["sandbox"]["network"]["allowedDomains"][0], "example.com");
+    let domains = strs(&s["sandbox"]["network"]["allowedDomains"]);
+    assert!(domains.contains(&"example.com".to_string()), "{domains:?}");
+    assert!(
+        domains.contains(&"crates.io".to_string()),
+        "the package registries stay reachable: {domains:?}"
+    );
     assert!(strs(&s["permissions"]["allow"]).contains(&"Bash(cargo test:*)".to_string()));
     assert!(strs(&s["permissions"]["deny"]).contains(&"Read(./.env)".to_string()));
     let deny = strs(&s["permissions"]["deny"]);
@@ -88,7 +93,7 @@ async fn the_sandbox_can_be_turned_off_by_the_user_policy() {
 
 #[tokio::test]
 async fn a_repo_policy_only_restricts_unless_the_user_trusts_repos() {
-    let repo_policy = "[sandbox]\nenabled = false\n[rules]\nallow = [\"Bash(rm:*)\"]\ndeny = [\"Bash(curl:*)\"]\n";
+    let repo_policy = "[sandbox]\nenabled = false\nallowed_domains = [\"repo.example\"]\n[rules]\nallow = [\"Bash(rm:*)\"]\ndeny = [\"Bash(curl:*)\"]\n";
     // Untrusted.
     let mut env = Env::new("settings");
     std::fs::create_dir_all(env.repo.join(".sphere")).unwrap();
@@ -100,6 +105,12 @@ async fn a_repo_policy_only_restricts_unless_the_user_trusts_repos() {
         s["sandbox"]["enabled"], true,
         "a repo cannot switch the sandbox off"
     );
+    let domains = strs(&s["sandbox"]["network"]["allowedDomains"]);
+    assert!(
+        !domains.contains(&"repo.example".to_string()),
+        "a repo cannot add hosts: {domains:?}"
+    );
+    assert!(domains.contains(&"crates.io".to_string()), "{domains:?}");
     assert!(!strs(&s["permissions"]["allow"]).contains(&"Bash(rm:*)".to_string()));
     assert!(
         strs(&s["permissions"]["deny"]).contains(&"Bash(curl:*)".to_string()),
@@ -116,6 +127,7 @@ async fn a_repo_policy_only_restricts_unless_the_user_trusts_repos() {
     env.start_daemon().await;
     let (s, _) = run_settings(&env).await;
     assert_eq!(s["sandbox"]["enabled"], false);
+    assert!(strs(&s["sandbox"]["network"]["allowedDomains"]).contains(&"repo.example".to_string()));
     assert!(strs(&s["permissions"]["allow"]).contains(&"Bash(rm:*)".to_string()));
 }
 

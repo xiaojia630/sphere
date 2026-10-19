@@ -96,7 +96,18 @@ impl Default for Policy {
     fn default() -> Self {
         Policy {
             sandbox_enabled: true,
-            allowed_domains: vec![],
+            // Package registries, so installs and builds can fetch dependencies without asking.
+            allowed_domains: strs(&[
+                "crates.io",
+                "index.crates.io",
+                "static.crates.io",
+                "registry.npmjs.org",
+                "registry.yarnpkg.com",
+                "pypi.org",
+                "files.pythonhosted.org",
+                "proxy.golang.org",
+                "sum.golang.org",
+            ]),
             // Reads, searches, edits and tests run freely; sandboxed shell
             // commands are auto-allowed by the sandbox itself.
             allow: strs(&[
@@ -402,7 +413,34 @@ mod tests {
         assert!(deny.iter().any(|r| r == "Bash(git reset --hard:*)"));
         assert_eq!(s["sandbox"]["enabled"], true);
         assert_eq!(s["sandbox"]["autoAllowBashIfSandboxed"], true);
-        assert!(s["sandbox"].get("network").is_none());
+    }
+
+    #[test]
+    fn defaults_reach_the_package_registries_but_publishing_still_asks() {
+        let s = Policy::default().settings_json(false);
+        let domains = s["sandbox"]["network"]["allowedDomains"]
+            .as_array()
+            .unwrap();
+        for host in [
+            "crates.io",
+            "index.crates.io",
+            "static.crates.io",
+            "registry.npmjs.org",
+            "registry.yarnpkg.com",
+            "pypi.org",
+            "files.pythonhosted.org",
+            "proxy.golang.org",
+            "sum.golang.org",
+        ] {
+            assert!(domains.iter().any(|d| d == host), "{host} is reachable");
+        }
+        assert!(
+            !domains.iter().any(|d| d == "github.com"),
+            "other hosts ask"
+        );
+        let ask = s["permissions"]["ask"].as_array().unwrap();
+        assert!(ask.iter().any(|r| r == "Bash(cargo publish:*)"));
+        assert!(ask.iter().any(|r| r == "Bash(npm publish:*)"));
     }
 
     #[test]
@@ -425,7 +463,7 @@ mod tests {
             r#"
 [sandbox]
 enabled = false
-allowed_domains = ["crates.io"]
+allowed_domains = ["example.com", "crates.io"]
 [rules]
 allow = ["Bash(make:*)"]
 deny = ["Bash(rm -rf:*)"]
@@ -434,7 +472,10 @@ deny = ["Bash(rm -rf:*)"]
         let p = Policy::load(&user, None).unwrap();
         let s = p.settings_json(false);
         assert_eq!(s["sandbox"]["enabled"], false);
-        assert_eq!(s["sandbox"]["network"]["allowedDomains"][0], "crates.io");
+        // Added on top of the defaults, without repeating one.
+        let mut domains = Policy::default().allowed_domains;
+        domains.push("example.com".into());
+        assert_eq!(s["sandbox"]["network"]["allowedDomains"], json!(domains));
         assert!(s["permissions"]["allow"]
             .as_array()
             .unwrap()
@@ -457,6 +498,7 @@ deny = ["Bash(rm -rf:*)"]
             r#"
 [sandbox]
 enabled = false
+allowed_domains = ["repo.example"]
 [rules]
 allow = ["Bash(curl:*)"]
 ask = ["Bash(make deploy:*)"]
@@ -471,6 +513,11 @@ decision = "allow"
         assert_eq!(
             s["sandbox"]["enabled"], true,
             "repo cannot turn the sandbox off"
+        );
+        assert_eq!(
+            p.allowed_domains,
+            Policy::default().allowed_domains,
+            "repo cannot add hosts"
         );
         assert!(!s["permissions"]["allow"]
             .as_array()
@@ -490,6 +537,7 @@ decision = "allow"
         let user = write(dir.path(), "user.toml", "trust_repos = true\n");
         let p = Policy::load(&user, Some(&repo)).unwrap();
         assert_eq!(p.settings_json(false)["sandbox"]["enabled"], false);
+        assert!(p.allowed_domains.contains(&"repo.example".to_string()));
         assert!(matches!(
             p.decide("Bash", &json!({"command": "ls"}), &Ctx { branch: None }),
             Verdict::Allow(_)
