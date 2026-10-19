@@ -227,7 +227,10 @@ pub fn plan_line(cx: &LineCtx, inc: Incoming) -> Plan {
                     reason: "turn ended".into(),
                 });
             }
+            // A result with no turns did no work: a resumed session reports what
+            // it cost before (outside Sphere, say) and that becomes the baseline.
             let delta = total_cost_usd
+                .filter(|_| turns != Some(0))
                 .map(|c| (c - cx.view.last_total_cost).max(0.0))
                 .unwrap_or(0.0);
             plan.events.push(EventBody::Turn {
@@ -2191,6 +2194,23 @@ mod tests {
         assert!(
             matches!(&plan.events[0], EventBody::Turn { cost_delta_usd, .. } if *cost_delta_usd == 0.0)
         );
+        // A resumed session reporting in with no turn: its total is what it
+        // cost before (outside Sphere), not spend of this task.
+        let plan = plan_line(
+            &cx(&view(), &p, &[], &id),
+            Incoming::Result {
+                ok: true,
+                subtype: "success".into(),
+                text: String::new(),
+                turns: Some(0),
+                duration_ms: None,
+                total_cost_usd: Some(0.26),
+            },
+        );
+        assert!(matches!(
+            &plan.events[0],
+            EventBody::Turn { cost_delta_usd, cost_usd: Some(c), .. } if *cost_delta_usd == 0.0 && *c == 0.26
+        ));
     }
 
     #[test]
