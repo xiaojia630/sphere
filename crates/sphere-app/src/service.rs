@@ -265,12 +265,18 @@ fn spawn_sphered() -> Result<(), String> {
     cmd.spawn().map(|_| ()).map_err(|e| format!("could not start sphered ({}): {e}", sphered_exe().display()))
 }
 
+/// The sphered socket, and whether it is the app's own. SPHERE_SOCKET points the app at another sphered (tests, a
+/// second state dir); the app then never starts or restarts one itself.
+fn socket() -> (PathBuf, bool) {
+    match std::env::var_os("SPHERE_SOCKET") {
+        Some(s) => (PathBuf::from(s), false),
+        None => (sphere_proto::paths::default_socket(), true),
+    }
+}
+
 async fn connect(sh: &Mutex<Shared>) -> Client {
-    // SPHERE_SOCKET points the app at another sphered (tests, a second state dir); the app then never
-    // starts one itself.
-    let custom = std::env::var_os("SPHERE_SOCKET").map(PathBuf::from);
-    let socket = custom.clone().unwrap_or_else(sphere_proto::paths::default_socket);
-    let mut started = custom.is_some();
+    let (socket, own) = socket();
+    let mut started = !own;
     let mut backoff = Duration::from_millis(100);
     loop {
         match Client::connect(&socket).await {
@@ -293,9 +299,11 @@ async fn connect(sh: &Mutex<Shared>) -> Client {
 }
 
 async fn run(sh: Arc<Mutex<Shared>>, mut rx: mpsc::UnboundedReceiver<Cmd>) {
+    // what was done about an out-of-date sphered, kept across reconnects so it happens once
+    let mut up = crate::restart::Upgrade::default();
     loop {
         let client = connect(&sh).await;
-        if let Err(e) = session(&sh, &client, &mut rx).await {
+        if let Err(e) = session(&sh, &client, &mut rx, &mut up).await {
             set_link(&sh, Link::Down(e));
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
@@ -305,9 +313,13 @@ async fn run(sh: Arc<Mutex<Shared>>, mut rx: mpsc::UnboundedReceiver<Cmd>) {
 
 /// One connection: snapshot, subscribe from its seq, then refresh the snapshot (at most every 80 ms) whenever
 /// events arrive, while serving commands.
-async fn session(sh: &Arc<Mutex<Shared>>, c: &Client, rx: &mut mpsc::UnboundedReceiver<Cmd>) -> Result<(), String> {
+async fn session(sh: &Arc<Mutex<Shared>>, c: &Client, rx: &mut mpsc::UnboundedReceiver<Cmd>, up: &mut crate::restart::Upgrade) -> Result<(), String> {
     c.hello(ClientKind::App).await.map_err(|e| e.to_string())?;
+    let daemon = c.status().await.map_err(|e| e.to_string())?.version;
     let snap = c.snapshot().await.map_err(|e| e.to_string())?;
+    if upgrade(sh, up, &daemon, running(&snap.tasks)).await {
+        return Ok(());
+    }
     let seq = snap.seq;
     // backfill the runs of every active task and the most recent others up to the snapshot (the swarm shows each
     // active agent's steps), then the subscription carries on
@@ -371,7 +383,12 @@ async fn session(sh: &Arc<Mutex<Shared>>, c: &Client, rx: &mut mpsc::UnboundedRe
                     let t0 = std::time::Instant::now();
                     let snap = c.snapshot().await.map_err(|e| e.to_string())?;
                     sh.lock().unwrap().rtt_ms = Some(t0.elapsed().as_secs_f32() * 1000.0);
+                    let n = running(&snap.tasks);
                     apply(sh, snap);
+                    // an out-of-date sphered waiting for the agents to finish
+                    if upgrade(sh, up, &daemon, n).await {
+                        return Ok(());
+                    }
                 } else if ping.elapsed() > Duration::from_secs(2) {
                     // the System panel's response time
                     ping = std::time::Instant::now();
@@ -392,6 +409,41 @@ async fn session(sh: &Arc<Mutex<Shared>>, c: &Client, rx: &mut mpsc::UnboundedRe
                     }
                 });
             }
+        }
+    }
+}
+
+/// Agents sphered is running or about to: queued, working or waiting on you.
+fn running(tasks: &[TaskView]) -> usize {
+    tasks.iter().filter(|t| matches!(t.state, sphere_proto::TaskState::Queued | sphere_proto::TaskState::Working | sphere_proto::TaskState::NeedsYou)).count()
+}
+
+/// Acts on a sphered whose version differs from the app's (see `restart`). True when sphered was stopped, so the
+/// session ends and the reconnect starts the bundled one. Only the app's own sphered is touched; sphere-host never.
+async fn upgrade(sh: &Mutex<Shared>, up: &mut crate::restart::Upgrade, daemon: &str, running: usize) -> bool {
+    use crate::restart::{words, Act};
+    let app = env!("CARGO_PKG_VERSION");
+    let (socket, own) = socket();
+    if !own {
+        return false;
+    }
+    let Some(act) = up.step(app, daemon, running) else { return false };
+    if act != Act::Restart {
+        if let Some(w) = words(act, app, daemon) {
+            note(sh, w);
+        }
+        return false;
+    }
+    let stopped = tokio::task::spawn_blocking(move || crate::restart::stop_sphered(&crate::restart::Real, &socket, Duration::from_secs(5))).await.map_err(|e| e.to_string()).and_then(|r| r);
+    match stopped {
+        Ok(()) => {
+            set_link(sh, Link::Starting);
+            true
+        }
+        Err(e) => {
+            up.give_up();
+            note(sh, format!("Background service is out of date (sphered {daemon}, app {app}); could not restart it: {e}"));
+            false
         }
     }
 }
