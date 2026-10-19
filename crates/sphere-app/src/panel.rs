@@ -927,7 +927,8 @@ pub fn elsewhere_rows(n: usize) -> (usize, usize) {
 pub fn elsewhere_rows_with(n: usize, own: usize) -> (usize, usize) {
     let (max, _) = elsewhere_rows(n);
     let want = own.min(2);
-    let r = (1..=max).rev().find(|&r| agent_rows_in(own, elsewhere_height(r, n - r)).0 >= want).unwrap_or(max.min(1));
+    // with some slack: an agent's row grows with its status line
+    let r = (1..=max).rev().find(|&r| own == 0 || agent_rows_in(own, elsewhere_height(r, n - r) + 24.0).0 >= want).unwrap_or(max.min(1));
     (r, n - r)
 }
 

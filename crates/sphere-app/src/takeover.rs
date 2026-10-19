@@ -1152,6 +1152,7 @@ mod tests {
         use crate::panel::elsewhere_rows_with;
         assert_eq!(elsewhere_rows_with(3, 4), (1, 2));
         assert_eq!(elsewhere_rows_with(3, 1), (3, 0));
+        assert_eq!(elsewhere_rows_with(5, 2), (2, 3));
         assert_eq!(elsewhere_rows_with(2, 0), (2, 0));
         assert_eq!(elsewhere_rows_with(0, 4), (0, 0));
     }

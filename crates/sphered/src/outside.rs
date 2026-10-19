@@ -580,7 +580,7 @@ pub fn transcript_state(path: &Path) -> (&'static str, Option<String>) {
 // ---- scanning -----------------------------------------------------------------
 
 /// Interactive Claude processes outside `roots` (Sphere's own agents) and `me`.
-fn scan_procs(projects: &Path, roots: &[i32], me: u32) -> Vec<Found> {
+fn scan_procs(projects: &Path, roots: &[i32], me: u32, listed: &[Listed]) -> Vec<Found> {
     let Ok(out) = ps_command(&["-ax"])
         .stdin(std::process::Stdio::null())
         .output()
@@ -612,7 +612,9 @@ fn scan_procs(projects: &Path, roots: &[i32], me: u32) -> Vec<Found> {
             pid: p.pid,
             cwd: cwd_of.get(&p.pid).cloned(),
             start: p.start,
-            explicit: explicit_session(p),
+            // the agents list knows the session of an interactive process
+            explicit: explicit_session(p)
+                .or_else(|| listed_for(listed, p.pid).map(|l| l.id.clone())),
         })
         .collect();
     let mut txs = vec![];
@@ -638,10 +640,13 @@ fn scan_procs(projects: &Path, roots: &[i32], me: u32) -> Vec<Found> {
             let path =
                 a.id.as_deref()
                     .and_then(|id| find_transcript(projects, id, c.cwd.as_deref()));
-            let (state, last_message) = path
+            let (tail_state, last_message) = path
                 .as_deref()
                 .map(transcript_state)
                 .unwrap_or(("unknown", None));
+            let state = listed_for(listed, p.pid)
+                .and_then(|l| l.state)
+                .unwrap_or(tail_state);
             let head = path.as_deref().and_then(sessions::read_transcript);
             Found {
                 start: p.start,
@@ -665,22 +670,87 @@ fn scan_procs(projects: &Path, roots: &[i32], me: u32) -> Vec<Found> {
         .collect()
 }
 
-/// Running sessions of `claude agents --json`.
-async fn scan_background(cfg: &Config) -> Vec<Found> {
-    let listed = match sessions::run_json(&cfg.session_list_cmd())
-        .await
-        .and_then(|t| sessions::parse_agents_json(&t))
-    {
+/// An entry of `claude agents --json`: newer versions list interactive
+/// sessions too (`"kind": "interactive"`), with their pid and status.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Listed {
+    pub id: String,
+    pub pid: Option<u32>,
+    pub interactive: bool,
+    /// `working`, `waiting` or `idle`, when the status says.
+    pub state: Option<&'static str>,
+}
+
+fn listed_state(status: &str) -> Option<&'static str> {
+    match status.to_ascii_lowercase().as_str() {
+        "busy" | "running" | "working" | "active" | "starting" => Some("working"),
+        "waiting" | "needs_input" | "blocked" => Some("waiting"),
+        "idle" => Some("idle"),
+        _ => None,
+    }
+}
+
+pub fn parse_listed(text: &str) -> Vec<Listed> {
+    let Ok(v) = serde_json::from_str::<Value>(text) else {
+        return vec![];
+    };
+    let list = match &v {
+        Value::Array(a) => a.clone(),
+        Value::Object(o) => o
+            .get("sessions")
+            .or_else(|| o.get("agents"))
+            .and_then(|a| a.as_array())
+            .cloned()
+            .unwrap_or_default(),
+        _ => vec![],
+    };
+    let get = |e: &Value, keys: &[&str]| -> Option<String> {
+        keys.iter()
+            .find_map(|k| e.get(k).and_then(|x| x.as_str()).map(str::to_string))
+    };
+    list.iter()
+        .filter_map(|e| {
+            Some(Listed {
+                id: get(e, &["sessionId", "session_id", "id"])?,
+                pid: e
+                    .get("pid")
+                    .and_then(|p| p.as_u64())
+                    .map(|p| p as u32)
+                    .filter(|p| *p > 0),
+                interactive: get(e, &["kind"]).as_deref() == Some("interactive"),
+                state: get(e, &["status", "state"]).and_then(|s| listed_state(&s)),
+            })
+        })
+        .collect()
+}
+
+fn listed_for(listed: &[Listed], pid: u32) -> Option<&Listed> {
+    listed.iter().find(|l| l.pid == Some(pid))
+}
+
+/// Running background sessions of `claude agents --json`. Interactive ones
+/// are left to the process scan, which knows where they run and skips the
+/// ones driven by a program (an SDK, the desktop app, Sphere itself).
+async fn scan_background(cfg: &Config, text: Option<&str>) -> Vec<Found> {
+    let Some(text) = text else {
+        return vec![];
+    };
+    let listed = match sessions::parse_agents_json(text) {
         Ok(l) => l,
         Err(e) => {
             tracing::debug!("could not list background sessions: {e:#}");
             return vec![];
         }
     };
+    let interactive: HashSet<String> = parse_listed(text)
+        .into_iter()
+        .filter(|l| l.interactive)
+        .map(|l| l.id)
+        .collect();
     let projects = cfg.projects_dir();
     listed
         .into_iter()
-        .filter(|s| s.running)
+        .filter(|s| s.running && !interactive.contains(&s.session_id))
         .map(|s| {
             let path = find_transcript(&projects, &s.session_id, s.cwd.as_deref());
             let (tail_state, last_message) = path
@@ -716,8 +786,17 @@ async fn scan_background(cfg: &Config) -> Vec<Found> {
 pub async fn scan(cfg: &Config, roots: Vec<i32>) -> Vec<Found> {
     let projects = cfg.projects_dir();
     let me = std::process::id();
-    let procs = tokio::task::spawn_blocking(move || scan_procs(&projects, &roots, me));
-    let (procs, background) = tokio::join!(procs, scan_background(cfg));
+    let text = match sessions::run_json(&cfg.session_list_cmd()).await {
+        Ok(t) => Some(t),
+        Err(e) => {
+            tracing::debug!("could not list sessions: {e:#}");
+            None
+        }
+    };
+    let listed = text.as_deref().map(parse_listed).unwrap_or_default();
+    let procs =
+        tokio::task::spawn_blocking(move || scan_procs(&projects, &roots, me, &listed)).await;
+    let background = scan_background(cfg, text.as_deref()).await;
     let mut out = background;
     for f in procs.unwrap_or_default() {
         let dup = out.iter().any(|b| {
@@ -833,6 +912,23 @@ pub async fn wait_quiet(path: &Path, quiet: Duration, cap: Duration) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_agents_list_marks_interactive_sessions_and_their_status() {
+        let l = parse_listed(
+            r#"[{"sessionId":"a","pid":39402,"status":"idle","kind":"interactive"},
+                {"sessionId":"b","pid":7,"status":"busy","kind":"interactive"},
+                {"sessionId":"c","status":"waiting","kind":"background"},
+                {"sessionId":"d","state":"running"},{"nope":1}]"#,
+        );
+        assert_eq!(l.len(), 4);
+        assert!(l[0].interactive && l[0].state == Some("idle") && l[0].pid == Some(39402));
+        assert_eq!(l[1].state, Some("working"));
+        assert!(!l[2].interactive && l[2].state == Some("waiting") && l[2].pid.is_none());
+        assert!(!l[3].interactive && l[3].state == Some("working"));
+        assert_eq!(listed_for(&l, 7).map(|x| x.id.as_str()), Some("b"));
+        assert!(parse_listed("garbage").is_empty());
+    }
 
     const PS: &str = "\
     1     0 Mon Oct 19 08:00:00 2026 /sbin/launchd                 /sbin/launchd

@@ -10,9 +10,19 @@ use sphere_proto::{EventBody, TaskState};
 use std::path::Path;
 use std::process::{Command, Stdio};
 
-/// One id per test: they run in parallel and each sees the other's fake session.
-const IDLE: &str = "0a1b2c3d-1111-4222-8333-444455556666";
-const BUSY: &str = "0a1b2c3d-2222-4222-8333-444455556666";
+/// A fresh id per run: tests run in parallel and each sees the other's fake
+/// session (and any left by an earlier run that was cut short).
+fn new_sid(kind: u32) -> String {
+    let ns = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    format!(
+        "{:08x}-{kind:04x}-4000-8000-{:012x}",
+        std::process::id(),
+        ns & 0xffff_ffff_ffff
+    )
+}
 
 fn line(
     sid: &str,
@@ -83,7 +93,7 @@ fn start_outside(root: &Path, cwd: &Path, sid: &str) {
 
 struct Setup {
     env: Env,
-    sid: &'static str,
+    sid: String,
     pid: i32,
 }
 
@@ -91,9 +101,9 @@ async fn setup(idle: bool) -> Setup {
     let mut env = Env::new("takeover");
     let projects = env.root().join("projects");
     let repo = env.repo.canonicalize().unwrap();
-    let sid = if idle { IDLE } else { BUSY };
-    write_transcript(&projects, &repo, sid, idle);
-    start_outside(env.root(), &repo, sid);
+    let sid = new_sid(if idle { 1 } else { 2 });
+    write_transcript(&projects, &repo, &sid, idle);
+    start_outside(env.root(), &repo, &sid);
     let fake = bins().fake.to_string_lossy().to_string();
     env = env
         .set_str("claude_projects_dir", &projects.to_string_lossy())
@@ -107,7 +117,7 @@ async fn setup(idle: bool) -> Setup {
     let pid = eventually("the fake session to show up", 10, || async {
         let l = c.session_outside().await.unwrap();
         l.iter()
-            .find(|o| o.session_id.as_deref() == Some(sid))
+            .find(|o| o.session_id.as_deref() == Some(sid.as_str()))
             .and_then(|o| o.pid)
     })
     .await as i32;
@@ -123,7 +133,7 @@ impl Drop for Setup {
 #[tokio::test]
 async fn an_idle_terminal_session_moves_in_and_waits_for_a_message() {
     let s = setup(true).await;
-    let sid = s.sid;
+    let sid = s.sid.as_str();
     let env = &s.env;
     let c = env.client().await;
 
@@ -213,7 +223,7 @@ async fn an_idle_terminal_session_moves_in_and_waits_for_a_message() {
 #[tokio::test]
 async fn a_session_stopped_mid_turn_is_told_to_continue() {
     let s = setup(false).await;
-    let sid = s.sid;
+    let sid = s.sid.as_str();
     let c = s.env.client().await;
     let o = c.session_outside().await.unwrap();
     let o = o
