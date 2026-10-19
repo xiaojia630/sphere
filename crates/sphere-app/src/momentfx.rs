@@ -271,7 +271,9 @@ fn next(m: &mut Moment, live: &Live, sound: &mut crate::sound::Sound, fx: &mut M
     }
 }
 
-/// N opens and closes the moment (with nothing waiting it says so).
+/// N opens and closes the moment (with nothing waiting it says so). While the swarm is open N is its own (the
+/// next agent that needs you, `swarm::input`).
+#[allow(clippy::too_many_arguments)]
 pub fn keys(
     mut ev: MessageReader<bevy::input::keyboard::KeyboardInput>,
     keys: Res<ButtonInput<KeyCode>>,
@@ -280,10 +282,11 @@ pub fn keys(
     live: Res<Live>,
     mut sound: ResMut<crate::sound::Sound>,
     mut toasts: ResMut<Toasts>,
+    swarm: Res<crate::swarm::Swarm>,
 ) {
     let mods = keys.any_pressed([KeyCode::SuperLeft, KeyCode::SuperRight, KeyCode::ControlLeft, KeyCode::ControlRight, KeyCode::AltLeft, KeyCode::AltRight]);
     for e in ev.read() {
-        if e.state != bevy::input::ButtonState::Pressed || mods || focus.cmd || focus.terminal || e.repeat || m.editing || e.key_code != KeyCode::KeyN {
+        if e.state != bevy::input::ButtonState::Pressed || mods || focus.cmd || focus.terminal || e.repeat || m.editing || e.key_code != KeyCode::KeyN || swarm.open {
             continue;
         }
         if m.shown {

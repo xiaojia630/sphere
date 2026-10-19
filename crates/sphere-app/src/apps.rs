@@ -14,6 +14,10 @@ pub struct Open {
     pub containers_focus: Option<String>,
     /// S or "swarm": open the Agent swarm (one view at a time)
     pub swarm: bool,
+    /// the swarm's "Open in Code": the Code app opens on this task
+    pub code_task: Option<String>,
+    /// the command bar's words while the swarm is open (next, merge, stop, a number, back), for `swarm::input`
+    pub swarm_cmds: Vec<crate::swarm::input::SwarmCmd>,
 }
 
 /// The System app has no tile: it opens from the bar ("system", "top").
@@ -76,7 +80,12 @@ pub fn apply(
     }
     match i {
         0 => focus.terminal = true,
-        2 => code.open(),
+        2 => {
+            code.open();
+            if let Some(t) = open.code_task.take() {
+                code.select_task(Some(t));
+            }
+        }
         3 => git.open(),
         4 => {
             ctr.open();

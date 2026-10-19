@@ -10,10 +10,11 @@ use crate::sound::Sound;
 use bevy::input::keyboard::KeyboardInput;
 use bevy::input::ButtonState;
 use bevy::prelude::*;
+use bevy::text::{LetterSpacing, LineHeight};
 
 pub fn build(app: &mut App) {
     app.add_systems(Startup, start.after(crate::homepanels::setup));
-    app.add_systems(Update, (keys, step, brand_sub).chain().after(crate::home::keys).before(crate::home::apply));
+    app.add_systems(Update, (keys, step, brand_sub, brand_look).chain().after(crate::home::keys).before(crate::home::apply));
     app.add_systems(Update, crate::visor::dock_groups);
 }
 
@@ -71,6 +72,8 @@ pub fn keys(
                     swarm.close();
                     sound.play_with("close", 0.7, 0.0);
                 } else {
+                    // a focus closes (`close`); a request card was already put back by its own Esc (`collapse`)
+                    sound.play_with(if matches!(swarm.mode, Mode::Focus(_)) { "close" } else { "collapse" }, 0.7, 0.0);
                     swarm.mode = Mode::Overview;
                     swarm.version += 1;
                 }
@@ -116,6 +119,46 @@ fn brand_sub(swarm: Res<Swarm>, mut q: Query<&mut Text, With<crate::homepanels::
     for mut t in &mut q {
         if t.0 != want {
             t.0 = want.into();
+        }
+    }
+}
+
+/// In the swarm the wordmark moves to the top left (the panel does, `panel::update_panels`): left aligned, the
+/// wordmark 19 px (23 on the home) and the sub line 10 px (SPEC 1.3 p-brand).
+#[allow(clippy::type_complexity)]
+fn brand_look(
+    swarm: Res<Swarm>,
+    subs: Query<(Entity, &ChildOf), With<crate::homepanels::BrandSub>>,
+    kids: Query<&Children>,
+    mut nodes: Query<&mut Node>,
+    mut texts: Query<(&mut TextFont, &mut LetterSpacing, &mut LineHeight)>,
+    mut was: Local<Option<bool>>,
+) {
+    if *was == Some(swarm.open) {
+        return;
+    }
+    let Ok((sub, parent)) = subs.single() else { return };
+    *was = Some(swarm.open);
+    let sw = swarm.open;
+    let style = |texts: &mut Query<(&mut TextFont, &mut LetterSpacing, &mut LineHeight)>, e: Entity, size: f32, spacing: f32| {
+        if let Ok((mut f, mut l, mut h)) = texts.get_mut(e) {
+            f.font_size = FontSize::Px(size);
+            *l = LetterSpacing::Px(spacing);
+            *h = LineHeight::Px(size);
+        }
+    };
+    if let Ok(mut n) = nodes.get_mut(parent.parent()) {
+        n.align_items = if sw { AlignItems::FlexStart } else { AlignItems::Center };
+    }
+    style(&mut texts, sub, if sw { 10.0 } else { 11.0 }, if sw { 4.4 } else { 5.72 });
+    // the wordmark row is the other child of the sub line's parent; its first child is the "SPHERE" text
+    let Ok(sibs) = kids.get(parent.parent()) else { return };
+    for row in sibs.iter().filter(|e| *e != sub) {
+        if let Ok(mut n) = nodes.get_mut(row) {
+            n.padding.left = px(if sw { 0.0 } else { 14.3 });
+        }
+        if let Some(word) = kids.get(row).ok().and_then(|c| c.first().copied()) {
+            style(&mut texts, word, if sw { 19.0 } else { 23.0 }, if sw { 9.5 } else { 14.26 });
         }
     }
 }

@@ -505,6 +505,7 @@ fn finish_demo(agents: Vec<Agent>) -> Model {
 }
 
 /// The prototype's six example agents at the start (SPEC 9).
+#[cfg(test)]
 pub fn demo() -> Model {
     finish_demo(DEFS.iter().map(demo_agent).collect())
 }
@@ -791,7 +792,6 @@ pub enum Event {
 pub enum ToastKind {
     Plain,
     Ok,
-    Bad,
 }
 
 /// The events from `prev` to `next`: only for agents in both (a new agent has no event), and conflicts that are

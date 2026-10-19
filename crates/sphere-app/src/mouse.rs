@@ -48,6 +48,8 @@ pub struct MouseState {
     t: f32,
     /// for the reticle
     pub dragging: bool,
+    /// the Agent swarm is open: it takes the clicks and the hover (the core still turns when dragged)
+    pub swarm: bool,
 }
 
 pub fn setup(mut cursor: Query<&mut CursorOptions, With<PrimaryWindow>>, args: Res<crate::Args>) {
@@ -130,7 +132,7 @@ pub fn update(
     gts: Query<&GlobalTransform>,
     mut ctl: ResMut<CoreCtl>,
     mut ms: ResMut<MouseState>,
-    (mut acts, mut sound, mut toasts): (ResMut<Acts>, ResMut<crate::sound::Sound>, ResMut<crate::live::Toasts>),
+    (mut acts, mut sound, mut toasts, swarm): (ResMut<Acts>, ResMut<crate::sound::Sound>, ResMut<crate::live::Toasts>, Res<crate::swarm::Swarm>),
     (mut rolo, mut fx, mut open, sv, mut pclicks, mut scrolls, parts): (ResMut<crate::homepanels::Rolodex>, ResMut<crate::fx::Fx>, ResMut<crate::apps::Open>, Res<crate::core::StageView>, ResMut<crate::appframe::PanelClicks>, ResMut<crate::appframe::AppScrolls>, Query<&crate::appframe::AppPart>),
 ) {
     let dt = time.delta_secs();
@@ -155,8 +157,9 @@ pub fn update(
         return;
     };
     ms.pos = Some(pos);
+    ms.swarm = swarm.open;
     let hit = if ms.drag == Drag::None { pick(w, pos, cam, &panels.p0(), &tiles, &decks, &gts) } else { ms.hit.unwrap_or(Hit::None) };
-    if ms.hit != Some(hit) && matches!(hit, Hit::Ring(_)) {
+    if ms.hit != Some(hit) && matches!(hit, Hit::Ring(_)) && !swarm.open {
         sound.play("hover");
     }
     ms.hit = Some(hit);
@@ -308,6 +311,10 @@ pub fn update(
                                 pclicks.0.push((e, Vec2::new(local.x + p.w / 2.0, p.h / 2.0 - local.y)));
                             }
                         }
+                    } else if swarm.open {
+                        // the swarm takes the clicks (`swarm::input`): none of the home's single and double clicks
+                        ms.last_click = None;
+                        ms.pending_click = None;
                     } else if (pos - p0).length() <= 4.0 && now - t0 < 0.45 {
                         let dbl = !orb.open && ms.last_click.is_some_and(|(lp, lt)| now - lt < 0.3 && (pos - lp).length() < 8.0);
                         if orb.open {
@@ -338,7 +345,7 @@ pub fn update(
     }
     // hold the sphere half a second (without moving) to open the core
     if let Some((p0, t0)) = ms.down_at {
-        if !orb.open && ms.drag == Drag::None && hit == Hit::Ring(CORE) && (pos - p0).length() <= 4.0 && now - t0 > 0.5 {
+        if !orb.open && !swarm.open && ms.drag == Drag::None && hit == Hit::Ring(CORE) && (pos - p0).length() <= 4.0 && now - t0 > 0.5 {
             orb.set(true, &mut sound);
             ms.down_at = None;
             ms.pending_click = None;
@@ -446,6 +453,7 @@ pub fn draw_reticle(
     win: Query<&Window, With<PrimaryWindow>>,
     agents: Res<crate::core::Agents>,
     stats: Res<crate::sysstats::SysStats>,
+    swarm: Res<crate::swarm::Swarm>,
     mut at: Local<Vec2>,
     mut q: ParamSet<(Query<(&mut Node, &mut UiTransform, &mut Visibility), With<Reticle>>, Query<(&mut Node, &mut Visibility), With<Tip>>, Query<(&TipText, &mut Text)>)>,
 ) {
@@ -458,7 +466,7 @@ pub fn draw_reticle(
     };
     let k = 1.0 - (-40.0 * dt).exp();
     *at = at.lerp(p, k);
-    let hov = matches!(ms.hit, Some(Hit::Ring(_)) | Some(Hit::Panel(..)));
+    let hov = matches!(ms.hit, Some(Hit::Ring(_)) | Some(Hit::Panel(..))) || swarm.hover.is_some();
     let typing_area = matches!(ms.hit, Some(Hit::Visor));
     for (mut n, mut tr, mut v) in &mut q.p0() {
         v.set_if_neq(if typing_area { Visibility::Hidden } else { Visibility::Inherited });
@@ -477,8 +485,9 @@ pub fn draw_reticle(
             tr.scale = Vec2::splat(s);
         }
     }
+    // the swarm has its own tooltip (for the agent under the pointer)
     let tip = match ms.hit {
-        Some(Hit::Ring(i)) => Some(i),
+        Some(Hit::Ring(i)) if !ms.swarm => Some(i),
         _ => None,
     };
     let w = win.single().map(|w| w.width()).unwrap_or(1600.0);

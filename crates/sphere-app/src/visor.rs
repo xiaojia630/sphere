@@ -43,6 +43,9 @@ pub struct BtnLabel;
 pub struct ThemePop;
 #[derive(Component)]
 pub struct TickerRow;
+/// The left edge text ("SPHERE · CORE ONLINE", "... AGENT SWARM ONLINE" in the swarm).
+#[derive(Component)]
+pub struct EdgeLeft;
 #[derive(Component)]
 pub struct ToastStack;
 
@@ -205,6 +208,9 @@ pub fn setup(mut commands: Commands, f: Res<UiFonts>, dock: Query<Entity, With<D
         let e = c
             .spawn((Text::new(txt), font(&f.ui600, 9.5, 4.75), TextColor(dim), LineHeight::Px(9.5), n, UiTransform { rotation: Rot2::degrees(if left { -90.0 } else { 90.0 }), ..default() }))
             .id();
+        if left {
+            c.entity(e).insert(EdgeLeft);
+        }
         c.entity(root.0).add_child(e);
     }
     // ticker strip
@@ -323,16 +329,26 @@ pub fn ticker(
     stats: Res<crate::sysstats::SysStats>,
     theme: Res<Theme>,
     args: Res<crate::Args>,
+    swarm: Res<crate::swarm::Swarm>,
+    sticker: Res<crate::swarm::feedback::SwarmTicker>,
     mut acc: Local<f32>,
+    mut was: Local<(bool, u64)>,
     mut q: Query<(&mut Text, &mut UiTransform, &ComputedNode), With<TickerRow>>,
 ) {
     *acc += sim.dt;
-    let rebuild = *acc > 3.0 || q.iter().next().is_some_and(|(t, _, _)| t.0.is_empty());
+    // the swarm's items replace the home's while it is open; rebuild at once when that, or its data, changes
+    let key = (swarm.open, swarm.version);
+    let swapped = *was != key || (swarm.open && sticker.is_changed());
+    *was = key;
+    let rebuild = swapped || *acc > 3.0 || q.iter().next().is_some_and(|(t, _, _)| t.0.is_empty());
     for (mut t, mut ut, cn) in &mut q {
         if rebuild {
             *acc = 0.0;
             let mut items: Vec<String> = Vec::new();
-            for a in agents.list.iter().take(4) {
+            if swarm.open {
+                items = crate::swarm::feedback::ticker_items(&sticker.0, &swarm.model);
+            }
+            for a in agents.list.iter().take(if swarm.open { 0 } else { 4 }) {
                 items.push(format!("AGENT {} · {}", a.name.to_lowercase(), a.step.to_lowercase()));
             }
             let up = matches!(live.link, Some(crate::service::Link::Connected));
@@ -434,5 +450,15 @@ pub fn dock_groups(swarm: Res<crate::swarm::Swarm>, mut groups: ParamSet<(Query<
     }
     for mut n in &mut groups.p1() {
         n.set_if_neq(Node { display: t, ..n.clone() });
+    }
+}
+
+/// The left edge text reads "AGENT SWARM ONLINE" while the swarm is open.
+pub fn edge_text(swarm: Res<crate::swarm::Swarm>, mut q: Query<&mut Text, With<EdgeLeft>>) {
+    let want = if swarm.open { "SPHERE · AGENT SWARM ONLINE" } else { "SPHERE · CORE ONLINE" };
+    for mut t in &mut q {
+        if t.0 != want {
+            t.0 = want.into();
+        }
     }
 }

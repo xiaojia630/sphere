@@ -258,6 +258,11 @@ pub(crate) fn home_command(t: &str, acts: &mut crate::home::Acts, open: &mut cra
     }
     if swarm.open {
         use crate::swarm::Tilt;
+        // next / merge / stop / a number / back are the swarm's (`swarm::input` runs them)
+        if let Some(c) = crate::swarm::input::parse(&l) {
+            open.swarm_cmds.push(c);
+            return true;
+        }
         let tilt = if starts(&["low"]) { Some(Tilt::Low) } else if starts(&["mid"]) { Some(Tilt::Mid) } else if starts(&["high"]) { Some(Tilt::High) } else { None };
         if let Some(t) = tilt {
             crate::swarm::view::set_tilt(swarm, t, sound, toasts);

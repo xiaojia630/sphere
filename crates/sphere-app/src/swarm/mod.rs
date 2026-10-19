@@ -3,7 +3,9 @@
 //! shows an agent's recent steps as a track behind it, a click (or 1-9, Tab) brings it front-left with a focus
 //! panel, N goes to the next one that needs you, and a request opens the Agent moment card from its satellite.
 //! The design is `look/swarm/SPEC.md` (from the approved prototype); the data is sphered's (`model`).
+pub mod feedback;
 pub mod hud;
+pub mod input;
 pub mod model;
 pub mod scene;
 pub mod view;
@@ -114,5 +116,7 @@ impl Plugin for SwarmPlugin {
         scene::build(app);
         hud::build(app);
         view::build(app);
+        input::build(app);
+        feedback::build(app);
     }
 }

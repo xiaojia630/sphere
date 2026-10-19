@@ -353,7 +353,7 @@ fn rolo_fade(k: usize, mid: usize, n: usize) -> f32 {
 }
 
 /// Types Sphere's words into the Say line at 30 ms a character; back to the idle hint after 9 s.
-pub fn draw_say(time: Res<Time<Real>>, mut say: ResMut<Say>, mut q: Query<(&mut Text, &mut TextColor, &mut TextFont, &mut LineHeight, &mut bevy::text::LetterSpacing), With<SayText>>) {
+pub fn draw_say(time: Res<Time<Real>>, mut say: ResMut<Say>, swarm: Res<crate::swarm::Swarm>, mut idle_seen: Local<&'static str>, mut q: Query<(&mut Text, &mut TextColor, &mut TextFont, &mut LineHeight, &mut bevy::text::LetterSpacing), With<SayText>>) {
     let dt = time.delta_secs();
     let mut changed = false;
     if !say.text.is_empty() {
@@ -371,12 +371,18 @@ pub fn draw_say(time: Res<Time<Real>>, mut say: ResMut<Say>, mut q: Query<(&mut 
             changed = true;
         }
     }
+    // the idle hint: the home's, or the swarm's for its mode
+    let idle = if swarm.open { crate::swarm::feedback::idle_hint(&swarm.mode) } else { IDLE };
+    if *idle_seen != idle {
+        *idle_seen = idle;
+        changed = true;
+    }
     if !changed && !say.is_changed() {
         return;
     }
     for (mut t, mut c, mut f, mut lh, mut ls) in &mut q {
         if say.text.is_empty() {
-            t.0 = IDLE.into();
+            t.0 = idle.into();
             c.0 = role_color(Role::Dim);
             f.font_size = FontSize::Px(12.0);
             *lh = LineHeight::Px(16.0);

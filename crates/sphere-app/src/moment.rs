@@ -53,6 +53,61 @@ pub struct Moment {
     pub skip: bool,
 }
 
+impl Moment {
+    /// An answered card is still leaving, or everything is answered and the view is closing.
+    pub fn busy(&self) -> bool {
+        self.holding.is_some() || self.fold.is_some() || self.later.is_some() || self.all_done.is_some()
+    }
+
+    /// The task whose request is on the card now.
+    pub fn current_task(&self, live: &Live) -> Option<String> {
+        if !self.shown {
+            return None;
+        }
+        waiting(live, self).get(self.index).map(|r| r.info.task.clone())
+    }
+
+    /// Brings the card up on `task`'s open request (the same sounds and rise as a request arriving; a swap from
+    /// another request ticks instead). False when that task has no request waiting, or the card is busy leaving.
+    pub fn show_task(&mut self, live: &Live, task: &str, sound: &mut crate::sound::Sound) -> bool {
+        if self.busy() {
+            return false;
+        }
+        let Some(i) = waiting(live, self).iter().position(|r| r.info.task == task) else { return false };
+        if self.shown && self.index == i {
+            return true;
+        }
+        if self.shown {
+            sound.play_with("tick", 0.5, 0.0);
+        } else {
+            sound.play_with("whoosh", 0.7, 0.0);
+            sound.play_with("open", 0.8, 0.0);
+            sound.play_with("expand", 0.5, 0.0);
+        }
+        self.index = i;
+        self.shown = true;
+        self.editing = false;
+        self.text.clear();
+        self.rise_seq += 1;
+        self.version += 1;
+        true
+    }
+
+    /// Esc: the card goes back until something new arrives.
+    pub fn put_back(&mut self, live: &Live, sound: &mut crate::sound::Sound) {
+        if !self.shown || self.busy() {
+            return;
+        }
+        let ids: Vec<String> = waiting(live, self).iter().map(|r| r.info.id.clone()).collect();
+        self.dismissed.extend(ids);
+        self.shown = false;
+        self.editing = false;
+        self.text.clear();
+        self.version += 1;
+        sound.play_with("collapse", 0.7, 0.0);
+    }
+}
+
 /// The card's UI root (inside its panel texture).
 #[derive(Resource)]
 pub struct CardRoot(pub Entity);
@@ -63,7 +118,7 @@ pub fn waiting<'a>(live: &'a Live, m: &Moment) -> Vec<&'a RequestView> {
 }
 
 /// Shows the card when a request arrives that wasn't put away, hides it when nothing waits.
-pub fn update(live: Res<Live>, mut m: ResMut<Moment>, mut seen: Local<u64>, mut sound: ResMut<crate::sound::Sound>) {
+pub fn update(live: Res<Live>, mut m: ResMut<Moment>, mut seen: Local<u64>, mut sound: ResMut<crate::sound::Sound>, swarm: Res<crate::swarm::Swarm>) {
     if *seen == live.version {
         return;
     }
@@ -73,7 +128,9 @@ pub fn update(live: Res<Live>, mut m: ResMut<Moment>, mut seen: Local<u64>, mut 
     m.dismissed.retain(|id| open.contains(id));
     let w: Vec<String> = waiting(&live, &m).iter().map(|r| r.info.id.clone()).collect();
     let fresh = w.iter().any(|id| !m.dismissed.contains(id));
-    let shown = !w.is_empty() && (m.shown || fresh);
+    // a request that arrives while the swarm shows an agent's focus panel only toasts (the card waits for N)
+    let held = swarm.open && matches!(swarm.mode, crate::swarm::Mode::Focus(_));
+    let shown = !w.is_empty() && (m.shown || (fresh && !held));
     if shown != m.shown && m.holding.is_none() && m.all_done.is_none() {
         m.shown = shown;
         if shown {

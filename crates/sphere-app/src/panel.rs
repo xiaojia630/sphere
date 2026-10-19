@@ -488,11 +488,13 @@ pub struct Focus {
 
 /// Moves each panel: gentle drift and tilt in the flat view, the prototype's side tilt in Depth, and the
 /// "focus" fly-in for the terminal.
+#[allow(clippy::too_many_arguments)]
 pub fn update_panels(
     sim: Res<Sim>,
     mut ctl: ResMut<CoreCtl>,
     focus: Res<Focus>,
     moment: Res<crate::moment::Moment>,
+    (swarm, live, scene): (Res<crate::swarm::Swarm>, Res<crate::live::Live>, Res<crate::swarm::scene::SceneOut>),
     args: Res<crate::Args>,
     mut mats: ResMut<Assets<PanelMaterial>>,
     mut q: Query<(&mut Panel, &mut Transform, &mut Visibility), Without<ReadoutLink>>,
@@ -555,11 +557,19 @@ pub fn update_panels(
                 tx -= 170.0 * wk;
                 top *= 1.0 - ctl.app;
             } else {
-                let wk = if p.id == PanelId::Terminal { wk } else { wk.max(ctl.swarm) };
+                let sw = if p.id == PanelId::Terminal { 0.0 } else { ctl.swarm };
+                let wk_only = wk;
+                let wk = wk.max(sw);
                 tx -= p.side * 200.0 * wk;
                 tz -= 300.0 * wk;
-                top *= 1.0 - 0.93 * wk;
+                // the swarm shows none of the home's panels (not even as ghosts)
+                top *= (1.0 - 0.93 * wk_only) * (1.0 - sw);
             }
+        }
+        // the swarm moves the wordmark to the top left (stage x 54, y 26: its panel is 560 x 52, the text left aligned)
+        if p.id == PanelId::Brand && ctl.swarm > 0.0 {
+            tx = lerp(tx, 54.0 + p.w / 2.0 - 800.0, ctl.swarm);
+            ty = lerp(ty, 500.0 - (26.0 + p.h / 2.0), ctl.swarm);
         }
         // core open: the side panels step aside and back
         if ctl.orb > 0.0 && !matches!(p.id, PanelId::Brand | PanelId::Say | PanelId::Moment | PanelId::Terminal) {
@@ -581,9 +591,11 @@ pub fn update_panels(
                 p.sc.set(0.08);
                 p.op.set(0.0);
                 p.rx.set(-50.0 * DEG);
-                p.px.set(0.0);
-                p.py.set(CORE_Y);
-                p.pz.set(-140.0);
+                // from the core, or from the satellite that asked (the swarm sets the origin)
+                let o = crate::swarm::input::rise_origin(&swarm, &moment, &live, &scene).unwrap_or(Vec3::new(0.0, CORE_Y, -140.0));
+                p.px.set(o.x);
+                p.py.set(o.y);
+                p.pz.set(o.z);
             }
             p.rise_t += crate::motion::dt(crate::motion::Pace::Big, dt);
             let loose = p.rise_t < 1.5;

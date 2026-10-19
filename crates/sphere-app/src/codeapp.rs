@@ -197,7 +197,7 @@ impl CodeApp {
         self.scroll = 0;
         self.version += 1;
     }
-    fn select_task(&mut self, id: Option<String>) {
+    pub(crate) fn select_task(&mut self, id: Option<String>) {
         self.task = id;
         self.review = None;
         self.tests = None;
@@ -517,7 +517,7 @@ fn commit_rest(wd: &str, title: &str) -> Result<(), String> {
 }
 
 /// Commits what's left in the worktree, then merges the branch into the base in the repo.
-fn merge(repo: &str, wd: &str, branch: Option<&str>, base: &str, title: &str, in_place: bool) -> Result<String, String> {
+pub(crate) fn merge(repo: &str, wd: &str, branch: Option<&str>, base: &str, title: &str, in_place: bool) -> Result<String, String> {
     let branch = branch.filter(|_| !in_place).ok_or("This agent worked in place: its changes are already in the repo")?;
     // sphered records the commit a task started from, not a branch: that one merges into whatever branch
     // the repo is on; a named base must be the branch the repo is on
