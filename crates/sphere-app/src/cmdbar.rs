@@ -262,13 +262,15 @@ pub(crate) fn home_command(t: &str, acts: &mut crate::home::Acts, open: &mut cra
         toasts.push(format!("Motion · {}", if m == Motion::Fast { "Fast" } else { "Cinematic" }));
         return true;
     }
-    // `code` opens the Code app; `code <path>` opens a folder in it (`code .` is the last repo used)
+    // `code` opens the Code app; `code <path>` opens a folder in it (`code .` is the last repo used). Words that
+    // aren't a folder ("code review this") are a task, as before
     if starts(&["code"]) {
         let arg = t.get(4..).unwrap_or("").trim();
         if !arg.is_empty() {
-            match resolve_code_path(arg, last_repo().as_deref(), &home()) {
-                Ok(dir) => open.code_folder(dir),
-                Err(e) => toasts.push(e),
+            match code_arg(arg, last_repo().as_deref(), &home()) {
+                Some(Ok(dir)) => open.code_folder(dir),
+                Some(Err(e)) => toasts.push(e),
+                None => return false,
             }
             return true;
         }
@@ -467,6 +469,18 @@ pub fn resolve_code_path(arg: &str, last: Option<&Path>, home: &Path) -> Result<
     Err(format!("No folder at {}", tilde(first)))
 }
 
+/// What `code <arg>` does: opens a folder, says what's wrong with a path, or (None) runs the words as a task. Only
+/// something written as a path (`.`, `~`, `/x`, `./x`, `../x`) gets an error; other words that aren't a folder are a task.
+pub fn code_arg(arg: &str, last: Option<&Path>, home: &Path) -> Option<Result<PathBuf, String>> {
+    let a = arg.trim().trim_matches(|c| c == '"' || c == '\'');
+    let pathy = a == "." || a == ".." || a == "~" || ["~/", "/", "./", "../"].iter().any(|p| a.starts_with(p));
+    match resolve_code_path(arg, last, home) {
+        Ok(d) => Some(Ok(d)),
+        Err(e) if pathy => Some(Err(e)),
+        Err(_) => None,
+    }
+}
+
 /// `repo: task` names the repo; otherwise the last one used, otherwise the app's folder.
 pub fn resolve(text: &str) -> Result<(String, String), String> {
     if let Some((head, rest)) = text.split_once(':') {
@@ -543,7 +557,7 @@ pub fn draw(
 
 #[cfg(test)]
 mod code_path_tests {
-    use super::resolve_code_path;
+    use super::{code_arg, resolve_code_path};
     use std::path::Path;
 
     fn tree(name: &str) -> std::path::PathBuf {
@@ -579,6 +593,25 @@ mod code_path_tests {
         assert!(resolve_code_path(".", None, &home).unwrap_err().contains("No repo used yet"));
         assert!(resolve_code_path("a.txt", Some(&repo), &home).unwrap_err().contains("is a file"));
         assert!(resolve_code_path("/definitely/not/here", None, Path::new("/h")).unwrap_err().starts_with("No folder at /definitely"));
+        let _ = std::fs::remove_dir_all(&b);
+    }
+
+    #[test]
+    fn words_that_arent_a_folder_are_a_task() {
+        let b = tree("task");
+        let (home, repo) = (b.join("home"), b.join("repo"));
+        // "code review this" starts an agent, as it did before `code <path>`
+        assert_eq!(code_arg("review this", Some(&repo), &home), None);
+        assert_eq!(code_arg("fix the login bug", None, &home), None);
+        assert_eq!(code_arg("a.txt", Some(&repo), &home), None);
+        // folders still open
+        assert_eq!(code_arg("x", Some(&repo), &home), Some(Ok(home.join("Projects/x"))));
+        assert_eq!(code_arg("src", Some(&repo), &home), Some(Ok(repo.join("src"))));
+        // something written as a path says what's wrong
+        assert_eq!(code_arg("~/nope", Some(&repo), &home), Some(Err("No folder at ~/nope".into())));
+        assert!(matches!(code_arg(".", None, &home), Some(Err(e)) if e.contains("No repo used yet")));
+        assert!(matches!(code_arg("./a.txt", Some(&repo), &home), Some(Err(_))));
+        assert!(matches!(code_arg("/definitely/not/here", None, &home), Some(Err(_))));
         let _ = std::fs::remove_dir_all(&b);
     }
 }

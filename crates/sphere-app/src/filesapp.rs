@@ -1006,7 +1006,7 @@ pub fn keys(
             }
             KeyCode::KeyE => {
                 if let Some(p) = cur {
-                    match crate::editors::edit_in_helix(&mut terms, &mut focus, &p, None) {
+                    match crate::editors::edit_in_helix(&mut terms, &mut focus, &p, None, crate::apps::FILES) {
                         Ok(()) => {
                             // the terminal is behind the app: put the app away so the editor shows
                             app.close();

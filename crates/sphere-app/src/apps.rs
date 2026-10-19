@@ -23,7 +23,9 @@ pub struct Open {
 }
 
 /// The Code app's tile.
-const CODE: usize = 2;
+pub const CODE: usize = 2;
+/// The Files app's tile.
+pub const FILES: usize = 6;
 /// The System app has no tile: it opens from the bar ("system", "top").
 const SYSTEM: usize = 100;
 
@@ -48,7 +50,7 @@ impl Open {
     }
 }
 
-#[allow(clippy::type_complexity)]
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
 pub fn apply(
     mut open: ResMut<Open>,
     mut focus: ResMut<Focus>,
@@ -57,7 +59,18 @@ pub fn apply(
     mut sound: ResMut<crate::sound::Sound>,
     mut orb: ResMut<crate::orbit::Orb>,
     mut swarm: ResMut<crate::swarm::Swarm>,
+    terms: Option<ResMut<crate::term::Terms>>,
 ) {
+    // Helix quit: the app it was opened from shows again, as you left it
+    if let Some(a) = terms.and_then(|mut t| t.returned.take()) {
+        if a == CODE && !code.open {
+            code.reshow();
+        } else if a == FILES && !files.open {
+            files.open();
+        }
+        focus.terminal = false;
+        sound.play_with("open", 0.8, 0.0);
+    }
     if let Some(o) = open.toggle_orbit.take() {
         orb.set(o, &mut sound);
     }

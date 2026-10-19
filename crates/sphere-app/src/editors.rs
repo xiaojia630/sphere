@@ -72,14 +72,21 @@ pub fn helix_line(hx: &Path, dir: &Path, file: &Path, line: Option<u32>) -> Stri
 }
 
 /// Opens a terminal tab running Helix on `file` (at `line`) and gives it the keyboard. The caller closes its app so
-/// the terminal shows.
-pub fn edit_in_helix(terms: &mut crate::term::Terms, focus: &mut crate::panel::Focus, file: &Path, line: Option<u32>) -> Result<(), String> {
+/// the terminal shows; when Helix quits the tab closes and app `back` shows again.
+pub fn edit_in_helix(terms: &mut crate::term::Terms, focus: &mut crate::panel::Focus, file: &Path, line: Option<u32>, back: usize) -> Result<(), String> {
     let hx = find_helix()?;
     let dir = file.parent().filter(|d| d.is_dir()).unwrap_or(Path::new("/"));
+    let before = terms.tabs.len();
     terms.open_tab();
-    if let Some(t) = terms.active() {
-        t.send(helix_line(&hx, dir, file, line).as_bytes());
+    // no new tab (sphere-host unreachable): never `exec` Helix in one of your shells
+    if terms.tabs.len() == before {
+        return Err("Couldn't open a terminal for Helix".into());
     }
+    terms.active = terms.tabs.len() - 1;
+    terms.version += 1;
+    let t = terms.tabs.last_mut().expect("tab just opened");
+    t.back_to = Some(back);
+    t.send(helix_line(&hx, dir, file, line).as_bytes());
     focus.terminal = true;
     Ok(())
 }

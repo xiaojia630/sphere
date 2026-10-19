@@ -147,6 +147,11 @@ impl CodeApp {
         self.armed = None;
         self.version += 1;
     }
+    /// Shows the app again as it was left (back from a Helix edit).
+    pub fn reshow(&mut self) {
+        self.open = true;
+        self.version += 1;
+    }
     fn file(&self) -> Option<&FileDiff> {
         self.review.as_ref().and_then(|r| r.files.get(self.file))
     }
@@ -1055,7 +1060,7 @@ fn folder_key(key: KeyCode, shift: bool, app: &mut CodeApp, terms: &mut crate::t
             press_r(app, wd, toasts, sound);
         }
         KeyCode::KeyE => match (app.root().map(Path::to_path_buf), app.folder_target()) {
-            (Some(root), Some((path, line))) => match crate::editors::edit_in_helix(terms, focus, &root.join(&path), Some(line)) {
+            (Some(root), Some((path, line))) => match crate::editors::edit_in_helix(terms, focus, &root.join(&path), Some(line), crate::apps::CODE) {
                 Ok(()) => {
                     // the terminal is behind the app: put the app away so the editor shows
                     app.close();
