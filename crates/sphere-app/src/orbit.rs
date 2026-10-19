@@ -5,7 +5,7 @@
 use crate::core::{CoreCtl, CoreTilt};
 use crate::fonts::UiFonts;
 use crate::geo::*;
-use crate::glow::{GlowMaterial, Kind, ATTR_HOLO};
+use crate::glow::{GlowMaterial, GlowSlots, Kind, ATTR_HOLO};
 use crate::homepanels::APPS;
 use crate::panel::*;
 use crate::util::*;
@@ -141,6 +141,7 @@ pub fn setup(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut gmats: ResMut<Assets<GlowMaterial>>,
+    mut gslots: ResMut<GlowSlots>,
     mut atlas: ResMut<crate::panel::PanelAtlas>,
     mut pmats: ResMut<Assets<PanelMaterial>>,
     f: Res<UiFonts>,
@@ -205,6 +206,8 @@ pub fn setup(
         c.entity(e).remove::<Panel>().insert((Tile(i), Visibility::Hidden));
         let mut m = GlowMaterial::new(Kind::Ring, crate::theme::now_lin(Role::Fill), 0.0);
         m.u.a.y = 0.0;
+        // a beam's alpha follows its tile every frame while the tiles move (see `update`)
+        gslots.attach(&mut m);
         c.spawn((Beam(i), Mesh3d(bm.clone()), MeshMaterial3d(gmats.add(m)), Transform::default(), Visibility::Hidden));
     }
     c.insert_resource(Orb { open: args.apps, since: 0.0, ..default() });
@@ -299,6 +302,7 @@ pub fn update(
     cam: Query<&GlobalTransform, With<crate::CamCore>>,
     mut pmats: ResMut<Assets<PanelMaterial>>,
     mut gmats: ResMut<Assets<GlowMaterial>>,
+    mut gslots: ResMut<GlowSlots>,
     mut feet: Query<(&TileFoot, &mut Text, &mut TextColor)>,
     (mut words, agents, live, stats, terms): (Query<(&TileText, &mut Text), Without<TileFoot>>, Res<crate::core::Agents>, Res<crate::live::Live>, Res<crate::sysstats::SysStats>, Res<crate::term::Terms>),
 ) {
@@ -425,14 +429,11 @@ pub fn update(
         tr.translation = pad;
         tr.rotation = Quat::from_mat3(&Mat3::from_cols(side, up, fwd));
         tr.scale = Vec3::new(TILE_W * 0.5 * 0.62, len, 1.0);
-        // only when it differs: `get_mut` makes the renderer prepare the material again
         let color = crate::theme::now_lin(Role::Fill);
-        if gmats.get(&h.0).is_some_and(|m| m.u.a.x != alpha || m.u.color != color) {
-            if let Some(mut m) = gmats.get_mut(&h.0) {
-                m.u.a.x = alpha;
-                m.u.color = color;
-            }
-        }
+        gslots.update(&mut gmats, &h.0, |u| {
+            u.a.x = alpha;
+            u.color = color;
+        });
     }
     // the footer: "■ Enter to open" on the front tile
     for (ft, mut tx, mut c) in &mut feet {

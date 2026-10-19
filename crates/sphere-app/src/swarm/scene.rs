@@ -6,7 +6,7 @@ mod mesh;
 use super::model::State;
 use super::{Mode, Swarm};
 use crate::core::{CoreCtl, Decks, Sim, StageView};
-use crate::glow::{GlowMaterial, GlowUniform, Kind};
+use crate::glow::{GlowMaterial, GlowSlots, Kind};
 use crate::motion::{self, Pace};
 use crate::util::*;
 use bevy::camera::visibility::NoFrustumCulling;
@@ -325,13 +325,17 @@ struct Gfx<'a, 'w, 's> {
     c: &'a mut Commands<'w, 's>,
     meshes: &'a mut Assets<Mesh>,
     mats: &'a mut Assets<GlowMaterial>,
+    gslots: &'a mut GlowSlots,
 }
 
 impl Gfx<'_, '_, '_> {
-    /// One glow part under `parent`: its mesh, a fresh material (colour from the theme role, alpha, no walls).
+    /// One glow part under `parent`: its mesh, a fresh material (colour from the theme role, alpha, no walls). Every
+    /// part has a slot: its colour and alpha move with the satellite's colour and fade, which settle but never quite
+    /// stop (the colour's lerp is not exact), so keeping them in the material would rebuild it again and again.
     fn part(&mut self, parent: Entity, m: Mesh, kind: Kind, role: Role, alpha: f32, tf: Transform) -> (Entity, H) {
         let mut mat = GlowMaterial::new(kind, crate::theme::now_lin(role), alpha);
         mat.u.a.y = 0.0;
+        self.gslots.attach(&mut mat);
         let h = self.mats.add(mat);
         let e = self.c.spawn((Mesh3d(self.meshes.add(m)), MeshMaterial3d(h.clone()), tf, Visibility::Inherited)).id();
         self.c.entity(parent).add_child(e);
@@ -342,6 +346,7 @@ impl Gfx<'_, '_, '_> {
         let mut mat = GlowMaterial::new(Kind::Ring, crate::theme::now_lin(role), 1.0);
         mat.u.a.y = 0.0;
         mat.u.b.x = 0.0;
+        self.gslots.attach(&mut mat);
         let h = self.mats.add(mat);
         let mh = self.meshes.add(m);
         let e = self.c.spawn((Mesh3d(mh.clone()), MeshMaterial3d(h.clone()), Transform::default(), Visibility::Hidden, NoFrustumCulling)).id();
@@ -356,8 +361,8 @@ impl Gfx<'_, '_, '_> {
     }
 }
 
-fn spawn(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut mats: ResMut<Assets<GlowMaterial>>) {
-    let mut g = Gfx { c: &mut commands, meshes: &mut meshes, mats: &mut mats };
+fn spawn(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut mats: ResMut<Assets<GlowMaterial>>, mut gslots: ResMut<GlowSlots>) {
+    let mut g = Gfx { c: &mut commands, meshes: &mut meshes, mats: &mut mats, gslots: &mut gslots };
     let root = g.c.spawn((Transform::default(), Visibility::Hidden)).id();
     let tf = Transform::default();
     let mut rings = Vec::new();
@@ -418,18 +423,6 @@ impl Sw {
     }
 }
 
-/// Writes a material's uniform only when it differs (a `get_mut` makes the renderer prepare the asset again).
-fn upd(mats: &mut Assets<GlowMaterial>, h: &H, f: impl FnOnce(&mut GlowUniform)) {
-    let Some(cur) = mats.get(h) else { return };
-    let mut u = cur.u;
-    f(&mut u);
-    if u != cur.u {
-        if let Some(mut m) = mats.get_mut(h) {
-            m.u = u;
-        }
-    }
-}
-
 fn put(tfs: &mut Query<&mut Transform>, e: Entity, f: impl FnOnce(&mut Transform)) {
     if let Ok(mut t) = tfs.get_mut(e) {
         let mut n = *t;
@@ -459,6 +452,7 @@ pub fn update(
     mut tfs: Query<&mut Transform>,
     mut vis: Query<&mut Visibility>,
     mut mats: ResMut<Assets<GlowMaterial>>,
+    mut gslots: ResMut<GlowSlots>,
     mut meshes: ResMut<Assets<Mesh>>,
 ) {
     let amt = clamp(swarm.amt.x, 0.0, 1.0);
@@ -527,7 +521,7 @@ pub fn update(
         show(&mut vis, r.group, r.show > 0.003);
         let (f, hi) = (amt * r.show, r.hi);
         for (h, col, a) in [(&r.thin, line, 0.26), (&r.band, line, 0.02), (&r.ticks, line, 0.22), (&r.arcs, fillc, 0.32)] {
-            upd(&mut mats, h, |u| {
+            gslots.update(&mut mats, h, |u| {
                 u.color = col;
                 u.a.x = a;
                 u.a.w = hi;
@@ -544,7 +538,7 @@ pub fn update(
     show(&mut vis, rd.group, true);
     let f = amt * rd.fade;
     for (h, a) in [(&rd.dash, 0.42), (&rd.ring, 0.12), (&rd.ticks, 0.24)] {
-        upd(&mut mats, h, |u| {
+        gslots.update(&mut mats, h, |u| {
             u.color = okc;
             u.a.x = a;
             u.b.x = f;
@@ -757,13 +751,13 @@ pub fn update(
                 (&g.halo, c, (0.26 + hv * 0.1 + fly * 0.2) * halo_f, ft),
             ];
             for (h, col, a, f) in sets {
-                upd(&mut mats, h, |u| {
+                gslots.update(&mut mats, h, |u| {
                     u.color = col;
                     u.a.x = a;
                     u.b.x = f;
                 });
             }
-            upd(&mut mats, &g.prog, |u| u.a.z = reveal);
+            gslots.update(&mut mats, &g.prog, |u| u.a.z = reveal);
         }
 
         // ---- the step trail (rebuilt only when its ring changes) and marks
@@ -783,7 +777,7 @@ pub fn update(
                 tr.rotation = sw.rot * def.q() * Quat::from_rotation_z(ang);
                 tr.scale = Vec3::new(sw.s, sw.s, sw.s * zfac);
             });
-            upd(&mut mats, &g.trail_m, |u| {
+            gslots.update(&mut mats, &g.trail_m, |u| {
                 u.color = fillc;
                 u.a.x = 0.9;
                 u.b.x = trail_f;
@@ -796,7 +790,7 @@ pub fn update(
             if let Some(mut m) = meshes.get_mut(&g.marks_mesh) {
                 *m = mesh::discs_mesh(&discs);
             }
-            upd(&mut mats, &g.marks_m, |u| {
+            gslots.update(&mut mats, &g.marks_m, |u| {
                 u.color = hot;
                 u.a.x = 1.0;
                 u.b.x = mk * ft;
@@ -836,7 +830,7 @@ pub fn update(
             *mm = mesh::ribbon_mesh(&pts, 1.0 / kpx(mid.z), &ks);
         }
         let f = amt * sa.fade.min(sb.fade).max(0.0) * (1.0 - 0.55 * dim);
-        upd(&mut mats, &g.mat, |u| {
+        gslots.update(&mut mats, &g.mat, |u| {
             u.color = beam;
             u.a.x = 1.0;
             u.b.x = f;

@@ -5,7 +5,7 @@
 //! Agents panel, its ring, or the Agents app.
 use crate::core::{CoreCtl, CoreRoot};
 use crate::fonts::UiFonts;
-use crate::glow::{GlowMaterial, Kind, ATTR_HOLO};
+use crate::glow::{GlowMaterial, GlowSlots, Kind, ATTR_HOLO};
 use crate::panel::*;
 use crate::service::{Cmd, Run, RunStep, Service};
 use crate::util::*;
@@ -169,6 +169,7 @@ pub fn setup(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut gmats: ResMut<Assets<GlowMaterial>>,
+    mut gslots: ResMut<GlowSlots>,
     mut atlas: ResMut<crate::panel::PanelAtlas>,
     mut pmats: ResMut<Assets<PanelMaterial>>,
     args: Res<crate::Args>,
@@ -182,8 +183,10 @@ pub fn setup(
     // the track and the head live in world space, placed every frame from the core's position
     let track = c.spawn((Track, Transform::default(), Visibility::Hidden)).id();
     let lm = meshes.add(line_mesh(vec![[0.0; 3], [1.0, 0.0, 0.0]], vec![1.0, 1.0]));
+    // the track's and the head's colour and alpha change every frame (see `update`), so each has a slot
     let mut m = GlowMaterial::new(Kind::Line, crate::theme::now_lin(Role::Line), 0.9);
     m.u.a.y = 0.0;
+    gslots.attach(&mut m);
     let line = c.spawn((TrackLine, Mesh3d(lm), MeshMaterial3d(gmats.add(m)), Transform::default(), bevy::camera::visibility::NoFrustumCulling)).id();
     let mut g = crate::geo::Geo::new();
     crate::geo::ring(&mut g, 13.0, 2.2);
@@ -192,6 +195,7 @@ pub fn setup(
     crate::geo::ticks_geo(&mut g, 30.0, 4, 5.0, 1.0, 0, 0.0);
     let mut hm = GlowMaterial::new(Kind::Ring, crate::theme::now_lin(Role::Hot), 1.0);
     hm.u.a.y = 0.0;
+    gslots.attach(&mut hm);
     let head = c.spawn((Head, Mesh3d(meshes.add(g.into_mesh())), MeshMaterial3d(gmats.add(hm)), Transform::default())).id();
     c.entity(track).add_children(&[line, head]);
     // panels: run (left 54, top 54), output (right 1546, bottom 962), edit (right 1546, top 46)
@@ -289,6 +293,7 @@ pub fn update(
     mut sound: ResMut<crate::sound::Sound>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut gmats: ResMut<Assets<GlowMaterial>>,
+    mut gslots: ResMut<GlowSlots>,
     mut pmats: ResMut<Assets<PanelMaterial>>,
     root: Query<&GlobalTransform, With<CoreRoot>>,
     mut sets: ParamSet<(
@@ -379,10 +384,10 @@ pub fn update(
         if let Some(mut mesh) = meshes.get_mut(&m.0) {
             *mesh = line_mesh(pos.clone(), ks.clone());
         }
-        if let Some(mut g) = gmats.get_mut(&h.0) {
-            g.u.color = crate::theme::now_lin(role);
-            g.u.a.x = 0.95 * amt * fade_big;
-        }
+        gslots.update(&mut gmats, &h.0, |u| {
+            u.color = crate::theme::now_lin(role);
+            u.a.x = 0.95 * amt * fade_big;
+        });
     }
     // the head: at headU, beating; green when the run is done
     let head_p = w.at(hu);
@@ -392,10 +397,10 @@ pub fn update(
         let land = if w.pulse < 0.8 { lerp(1.0, 1.25, 1.0 - w.pulse / 0.8) } else { 1.0 };
         tr.rotation = Quat::from_rotation_z(-0.9 * sim.t);
         tr.scale = Vec3::splat(land);
-        if let Some(mut g) = gmats.get_mut(&h.0) {
-            g.u.color = crate::theme::now_lin(if done { Role::Ok } else if fail { Role::Bad } else { Role::Hot });
-            g.u.a.x = beat * amt * reveal * fade_big;
-        }
+        gslots.update(&mut gmats, &h.0, |u| {
+            u.color = crate::theme::now_lin(if done { Role::Ok } else if fail { Role::Bad } else { Role::Hot });
+            u.a.x = beat * amt * reveal * fade_big;
+        });
     }
     // chips: the current step at the head, done steps trailing back along the track
     let head_x = w.head.x;

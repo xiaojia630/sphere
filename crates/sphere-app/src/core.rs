@@ -449,6 +449,7 @@ pub struct B<'a, 'w, 's> {
     pub commands: &'a mut Commands<'w, 's>,
     pub meshes: &'a mut Assets<Mesh>,
     pub mats: &'a mut Assets<GlowMaterial>,
+    pub slots: &'a mut GlowSlots,
     pub images: &'a mut Assets<Image>,
 }
 
@@ -472,6 +473,10 @@ fn add_geo(
     let mh = b.meshes.add(geo.into_mesh());
     let mut m = glow_mat(if tag == Tag::Spokes { Kind::Spokes } else { Kind::Ring }, role, alpha);
     m.u.a.y = wall;
+    // these two change every frame (see `update_materials`)
+    if matches!(tag, Tag::Need | Tag::Spokes) {
+        b.slots.attach(&mut m);
+    }
     let mut e = b.commands.spawn((
         Mesh3d(mh.clone()),
         MeshMaterial3d(b.mats.add(m)),
@@ -619,10 +624,11 @@ pub fn setup_core(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut mats: ResMut<Assets<GlowMaterial>>,
+    mut slots: ResMut<GlowSlots>,
     mut images: ResMut<Assets<Image>>,
     agents: Res<Agents>,
 ) {
-    let mut b = B { commands: &mut commands, meshes: &mut meshes, mats: &mut mats, images: &mut images };
+    let mut b = B { commands: &mut commands, meshes: &mut meshes, mats: &mut mats, slots: &mut slots, images: &mut images };
     let root = b.commands.spawn((CoreRoot, Transform::from_xyz(0.0, CORE_Y, 0.0), Visibility::default())).id();
     let tilt = b.commands.spawn((CoreTilt, Transform::default(), Visibility::default())).id();
     b.commands.entity(root).add_child(tilt);
@@ -890,6 +896,10 @@ fn spawn_sph(b: &mut B, parent: Entity, mesh: Handle<Mesh>, kind: Kind, role: Ro
     let mut m = glow_mat(kind, role, alpha);
     if kind == Kind::Dots {
         m.u.c.z = 3.0;
+    }
+    // the shell's time changes every frame (see `update_materials`)
+    if tag == Tag::Shell {
+        b.slots.attach(&mut m);
     }
     let e = b.commands.spawn((Mesh3d(mesh), MeshMaterial3d(b.mats.add(m)), Transform::default(), GlowInfo { deck: CORE, role, alpha, wall: 0.0, tag })).id();
     b.commands.entity(parent).add_child(e);
@@ -1180,20 +1190,20 @@ pub fn spin_system(sim: Res<Sim>, ctl: Res<CoreCtl>, mut q: Query<(&mut Transfor
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn update_materials(
     sim: Res<Sim>,
     ctl: Res<CoreCtl>,
     decks: Res<Decks>,
     win: Query<&Window, With<bevy::window::PrimaryWindow>>,
     mut mats: ResMut<Assets<GlowMaterial>>,
+    mut slots: ResMut<GlowSlots>,
     q: Query<(&MeshMaterial3d<GlowMaterial>, &GlowInfo)>,
     core: Res<CoreAssets>,
 ) {
     let pr = win.single().map(|w| w.scale_factor()).unwrap_or(1.0);
     for (h, info) in &q {
-        // `get_mut` marks the asset changed and makes the renderer prepare it again, so only take it when a value
-        // actually differs.
-        let Some(cur) = mats.get(&h.0) else { continue };
+        let Some(kind) = mats.get(&h.0).map(|m| m.kind) else { continue };
         let d = &decks.list[info.deck];
         let mut alpha = info.alpha;
         match info.tag {
@@ -1201,40 +1211,38 @@ pub fn update_materials(
             Tag::Spine => alpha = ctl.depth_amt * 0.55,
             _ => {}
         }
-        let mut u = cur.u;
-        u.color = crate::theme::deck_lin(info.deck, info.role);
-        // the Agent moment's amber flare pulls the core's own colours toward amber
-        if info.deck == CORE && ctl.flare > 0.01 && matches!(info.role, Role::Hot | Role::Fill | Role::Line) {
-            let w = (0.85 * ctl.flare).min(0.85) * if info.role == Role::Line { 0.55 } else { 1.0 };
-            u.color = u.color.lerp(crate::theme::now_lin(Role::Acc), w);
-        }
-        u.c2 = crate::theme::deck_b2_lin(info.deck);
-        u.a = Vec4::new(alpha, info.wall, d.u_reveal, d.u_hi);
-        u.b = Vec4::new(d.u_fade, d.u_depth, 0.0, d.u_pinch);
-        if cur.kind == Kind::Ring && info.deck != CORE {
-            u.c.x = (d.r_min + d.r_max) * 0.5;
-        }
-        if info.tag == Tag::Dots {
-            u.c.z = 3.0 * pr;
-        }
-        if info.tag == Tag::Shell {
-            u.d = Vec4::new(sim.t, 0.0, 0.0, 0.0);
-        }
-        if info.tag == Tag::Spokes {
-            u.d = Vec4::new(sim.t, core.energy, 145.0 + ctl.focus_amt * 165.0, 112.0 * (1.0 - ctl.focus_amt * 0.35));
-        }
-        if info.tag == Tag::Orb {
-            let o = ctl.orb;
-            let rev = clamp(o / 0.85, 0.0, 1.0);
-            u.a = Vec4::new(info.alpha * o, info.wall, rev * rev * (3.0 - 2.0 * rev), ctl.flash * 0.6);
-            u.b = Vec4::new(1.0, 14.0, 0.0, 0.0);
-            u.c.x = 0.0;
-        }
-        if u != cur.u {
-            if let Some(mut m) = mats.get_mut(&h.0) {
-                m.u = u;
+        // the need ring, the shell and the spokes change every frame, and their colour, alpha and time go to their
+        // slots; whatever else differs goes to the material, and only then (see `GlowSlots::update`)
+        slots.update(&mut mats, &h.0, |u| {
+            u.color = crate::theme::deck_lin(info.deck, info.role);
+            // the Agent moment's amber flare pulls the core's own colours toward amber
+            if info.deck == CORE && ctl.flare > 0.01 && matches!(info.role, Role::Hot | Role::Fill | Role::Line) {
+                let w = (0.85 * ctl.flare).min(0.85) * if info.role == Role::Line { 0.55 } else { 1.0 };
+                u.color = u.color.lerp(crate::theme::now_lin(Role::Acc), w);
             }
-        }
+            u.c2 = crate::theme::deck_b2_lin(info.deck);
+            u.a = Vec4::new(alpha, info.wall, d.u_reveal, d.u_hi);
+            u.b = Vec4::new(d.u_fade, d.u_depth, 0.0, d.u_pinch);
+            if kind == Kind::Ring && info.deck != CORE {
+                u.c.x = (d.r_min + d.r_max) * 0.5;
+            }
+            if info.tag == Tag::Dots {
+                u.c.z = 3.0 * pr;
+            }
+            if info.tag == Tag::Shell {
+                u.d = Vec4::new(sim.t, 0.0, 0.0, 0.0);
+            }
+            if info.tag == Tag::Spokes {
+                u.d = Vec4::new(sim.t, core.energy, 145.0 + ctl.focus_amt * 165.0, 112.0 * (1.0 - ctl.focus_amt * 0.35));
+            }
+            if info.tag == Tag::Orb {
+                let o = ctl.orb;
+                let rev = clamp(o / 0.85, 0.0, 1.0);
+                u.a = Vec4::new(info.alpha * o, info.wall, rev * rev * (3.0 - 2.0 * rev), ctl.flash * 0.6);
+                u.b = Vec4::new(1.0, 14.0, 0.0, 0.0);
+                u.c.x = 0.0;
+            }
+        });
     }
 }
 

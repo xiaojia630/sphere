@@ -17,10 +17,28 @@ struct Glow {
     b: vec4<f32>,       // fade, depth, two, pinch
     c: vec4<f32>,       // rg, ang, pt_px, round
     d: vec4<f32>,       // t, iri, 0, 0
+    slot: u32,          // where color, a and d come from, see anim()
 };
 @group(constants::MATERIAL_BIND_GROUP) @binding(0) var<uniform> m: Glow;
 @group(constants::MATERIAL_BIND_GROUP) @binding(1) var tex: texture_2d<f32>;
 @group(constants::MATERIAL_BIND_GROUP) @binding(2) var samp: sampler;
+
+// The three vec4 that animate every frame. The CPU keeps them in one buffer shared by all materials (rewriting a
+// material makes Bevy rebuild its uniform buffer and bind group); a material with a slot reads them there, one
+// without keeps its own. Every entry point that needs color, a or d reads them through anim().
+struct Anim {
+    color: vec4<f32>,
+    a: vec4<f32>,
+    d: vec4<f32>,
+};
+const NO_SLOT: u32 = 0xffffffffu;
+@group(constants::MATERIAL_BIND_GROUP) @binding(3) var<storage> slots: array<Anim>;
+fn anim() -> Anim {
+    if (m.slot == NO_SLOT) {
+        return Anim(m.color, m.a, m.d);
+    }
+    return slots[m.slot];
+}
 
 struct VIn {
     @builtin(instance_index) instance_index: u32,
@@ -57,12 +75,13 @@ fn vs_ring(v: VIn) -> VOut {
 }
 @fragment
 fn fs_ring(i: VOut) -> @location(0) vec4<f32> {
-    if (i.attr.z > m.a.z * TAU) { discard; }
-    let wall = m.a.y * pow(clamp(1.0 - i.attr.y, 0.0, 1.0), 1.8);
+    let e = anim();
+    if (i.attr.z > e.a.z * TAU) { discard; }
+    let wall = e.a.y * pow(clamp(1.0 - i.attr.y, 0.0, 1.0), 1.8);
     let t2 = m.b.z * (1.0 - smoothstep(0.3, 0.62, i.attr.w));
     let k = mix(i.attr.w, max(i.attr.w, 0.66), t2);
-    let a = mix(1.0, wall, i.attr.x) * m.a.x * k * m.b.x * (1.0 + m.a.w * 0.8);
-    return vec4<f32>(mix(m.color.rgb, m.c2.rgb, t2), clamp(a, 0.0, 1.0));
+    let a = mix(1.0, wall, i.attr.x) * e.a.x * k * m.b.x * (1.0 + e.a.w * 0.8);
+    return vec4<f32>(mix(e.color.rgb, m.c2.rgb, t2), clamp(a, 0.0, 1.0));
 }
 
 // ---------------- voice spokes ----------------
@@ -72,11 +91,12 @@ fn fs_ring(i: VOut) -> @location(0) vec4<f32> {
 @vertex
 fn vs_spokes(v: VIn) -> VOut {
     var o: VOut;
+    let e = anim();
     let i = v.attr.w;
     let ang = v.attr.z;
-    let ph = i * 0.37 + m.d.x * (1.1 + (i % 9.0) * 0.14);
-    let lvl = (0.22 + (sin(ph * 0.7 + i * 0.28) * 0.5 + 0.5) * 0.3) * m.d.y;
-    let r = m.d.z + v.position.y * (4.0 + lvl * m.d.w);
+    let ph = i * 0.37 + e.d.x * (1.1 + (i % 9.0) * 0.14);
+    let lvl = (0.22 + (sin(ph * 0.7 + i * 0.28) * 0.5 + 0.5) * 0.3) * e.d.y;
+    let r = e.d.z + v.position.y * (4.0 + lvl * e.d.w);
     let s = sin(ang);
     let c = cos(ang);
     let side = v.position.x;
@@ -102,8 +122,9 @@ fn vs_line(v: VIn) -> VOut {
 }
 @fragment
 fn fs_line(i: VOut) -> @location(0) vec4<f32> {
+    let e = anim();
     let face = mix(0.16, 1.0, smoothstep(-0.25, 0.55, i.extra.x));
-    return vec4<f32>(m.color.rgb, m.a.x * i.attr.x * m.b.x * face * m.a.z);
+    return vec4<f32>(e.color.rgb, e.a.x * i.attr.x * m.b.x * face * e.a.z);
 }
 
 // ---------------- dots ----------------
@@ -122,9 +143,10 @@ fn vs_dots(v: VIn) -> VOut {
 }
 @fragment
 fn fs_dots(i: VOut) -> @location(0) vec4<f32> {
+    let e = anim();
     if (dot(i.attr.xy, i.attr.xy) > 1.0) { discard; }
     let face = mix(0.16, 1.0, smoothstep(-0.25, 0.55, i.extra.x));
-    return vec4<f32>(m.color.rgb, m.a.x * i.attr.z * m.b.x * face * m.a.z);
+    return vec4<f32>(e.color.rgb, e.a.x * i.attr.z * m.b.x * face * e.a.z);
 }
 
 // ---------------- fresnel shell ----------------
@@ -146,11 +168,12 @@ fn hue(h: f32) -> vec3<f32> {
 }
 @fragment
 fn fs_fres(i: VOut) -> @location(0) vec4<f32> {
+    let e = anim();
     let n = normalize(i.attr.xyz);
     let f = pow(1.0 - abs(dot(n, normalize(i.extra.xyz))), 2.4);
     let a = atan2(n.y, n.x) / TAU;
-    let col = mix(m.color.rgb, mix(m.color.rgb, hue(fract(a + m.d.x * 0.03)), 0.72), m.d.y);
-    return vec4<f32>(col, f * m.a.x * m.b.x * m.a.z);
+    let col = mix(e.color.rgb, mix(e.color.rgb, hue(fract(a + e.d.x * 0.03)), 0.72), e.d.y);
+    return vec4<f32>(col, f * e.a.x * m.b.x * e.a.z);
 }
 
 // ---------------- text labels ----------------
@@ -164,15 +187,17 @@ fn vs_text(v: VIn) -> VOut {
 }
 @fragment
 fn fs_text(i: VOut) -> @location(0) vec4<f32> {
-    if (m.c.y > m.a.z * TAU) { discard; }
-    let a = textureSample(tex, samp, i.attr.xy).r * m.a.x * m.b.x;
-    return vec4<f32>(m.color.rgb, a);
+    let e = anim();
+    if (m.c.y > e.a.z * TAU) { discard; }
+    let a = textureSample(tex, samp, i.attr.xy).r * e.a.x * m.b.x;
+    return vec4<f32>(e.color.rgb, a);
 }
 
 // ---------------- screen backdrop: the prototype's #tint, #grid and #scan overlays ----------------
 // color = tint, c2 = grid colour, c.xy = viewport size in css px
 @fragment
 fn fs_backdrop(i: VOut) -> @location(0) vec4<f32> {
+    let e = anim();
     let size = m.c.xy;
     let px = i.attr.xy * size;
     // tint: radial-gradient(ellipse 58% 68% at 50% 46%, tint 0%, transparent 72%)
@@ -188,7 +213,7 @@ fn fs_backdrop(i: VOut) -> @location(0) vec4<f32> {
     let grid = g * mask * 0.11 * 0.34;
     // scanlines: 2px dark every 4px at 5%
     let scan = step(2.0, yb % 4.0) * 0.05;
-    let srgb = m.color.rgb * ta + m.c2.rgb * grid;
+    let srgb = e.color.rgb * ta + m.c2.rgb * grid;
     let lin = select(srgb / 12.92, pow((srgb + vec3<f32>(0.055)) / 1.055, vec3<f32>(2.4)), srgb > vec3<f32>(0.04045));
     return vec4<f32>(lin, scan);
 }
