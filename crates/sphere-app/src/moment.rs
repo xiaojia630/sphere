@@ -34,6 +34,8 @@ pub struct Moment {
     dismissed: Vec<String>,
     /// Answered here, hidden until the next snapshot drops them.
     answered: Vec<String>,
+    /// Put off here with Not now: they stay on the card's list (N brings them back) but don't raise it.
+    put_off: Vec<String>,
     /// Bumps when anything on the card changes.
     pub version: u64,
     /// what the card shows now (for holding it when answered)
@@ -112,9 +114,22 @@ impl Moment {
 #[derive(Resource)]
 pub struct CardRoot(pub Entity);
 
-/// What the card can show: open requests (not snoozed) that weren't just answered here.
+/// Waiting for an answer and not put off: these raise the card.
+fn pending(r: &RequestView, m: &Moment) -> bool {
+    r.status == RequestStatus::Open && !m.answered.contains(&r.info.id) && !m.put_off.contains(&r.info.id)
+}
+
+/// What the card can show: every request still waiting that wasn't just answered here, the ones put off with
+/// Not now last (so N, or clicking the agent, still finds them).
 pub fn waiting<'a>(live: &'a Live, m: &Moment) -> Vec<&'a RequestView> {
-    live.requests.iter().filter(|r| r.status == RequestStatus::Open && !m.answered.contains(&r.info.id)).collect()
+    let mut w: Vec<&RequestView> = live.requests.iter().filter(|r| r.status.is_open() && !m.answered.contains(&r.info.id)).collect();
+    w.sort_by_key(|r| !pending(r, m));
+    w
+}
+
+/// Waiting requests not put off.
+pub fn pending_count(live: &Live, m: &Moment) -> usize {
+    live.requests.iter().filter(|r| pending(r, m)).count()
 }
 
 /// Shows the card when a request arrives that wasn't put away, hides it when nothing waits.
@@ -126,8 +141,9 @@ pub fn update(live: Res<Live>, mut m: ResMut<Moment>, mut seen: Local<u64>, mut 
     let open: Vec<String> = live.requests.iter().map(|r| r.info.id.clone()).collect();
     m.answered.retain(|id| open.contains(id));
     m.dismissed.retain(|id| open.contains(id));
+    m.put_off.retain(|id| open.contains(id));
     let w: Vec<String> = waiting(&live, &m).iter().map(|r| r.info.id.clone()).collect();
-    let fresh = w.iter().any(|id| !m.dismissed.contains(id));
+    let fresh = live.requests.iter().any(|r| pending(r, &m) && !m.dismissed.contains(&r.info.id));
     // a request that arrives while the swarm shows an agent's focus panel only toasts (the card waits for N)
     let held = swarm.open && matches!(swarm.mode, crate::swarm::Mode::Focus(_));
     let shown = !w.is_empty() && (m.shown || (fresh && !held));
@@ -295,7 +311,12 @@ fn answer(m: &mut Moment, svc: &Service, id: &str, kind: AnswerKind, text: Optio
             m.fold = Some(0.0);
         }
     }
-    m.answered.push(id.to_string());
+    if kind == AnswerKind::Later {
+        m.put_off.retain(|x| x != id);
+        m.put_off.push(id.to_string());
+    } else {
+        m.answered.push(id.to_string());
+    }
     m.text.clear();
     m.editing = false;
     svc.send(Cmd::Answer { request: id.to_string(), answer: kind, text });
@@ -590,4 +611,38 @@ fn build(c: &mut Commands, f: &UiFonts, r: &RequestView, title: &str, m: &Moment
     c.entity(foot).add_children(&[count, nav]);
     c.entity(body).add_child(foot);
     body
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn req(id: &str, status: RequestStatus) -> RequestView {
+        let info: sphere_proto::RequestInfo = serde_json::from_value(serde_json::json!({
+            "id": id, "task": format!("t-{id}"), "kind": "permission", "tool": "Bash", "summary": "", "input": {},
+        }))
+        .unwrap();
+        RequestView { info, status, opened_at: "2026-10-19T00:00:00Z".into() }
+    }
+
+    #[test]
+    fn a_request_put_off_stays_findable_but_does_not_raise_the_card() {
+        let mut live = Live::default();
+        live.requests = vec![req("r1", RequestStatus::Snoozed), req("r2", RequestStatus::Open), req("r3", RequestStatus::Open)];
+        let mut m = Moment::default();
+        let ids = |m: &Moment| waiting(&live, m).iter().map(|r| r.info.id.clone()).collect::<Vec<_>>();
+        // put off before (sphered says Snoozed): still on the list, last
+        assert_eq!(ids(&m), ["r2", "r3", "r1"]);
+        assert_eq!(pending_count(&live, &m), 2);
+        // put off here: the same, before sphered's snapshot catches up
+        m.put_off.push("r2".into());
+        assert_eq!(ids(&m), ["r3", "r1", "r2"]);
+        assert_eq!(pending_count(&live, &m), 1);
+        // answered here: gone
+        m.answered.push("r3".into());
+        assert_eq!(ids(&m), ["r1", "r2"]);
+        assert_eq!(pending_count(&live, &m), 0);
+        // the agent's own card (swarm, show_task) still finds a put-off request
+        assert!(waiting(&live, &m).iter().any(|r| r.info.task == "t-r1"));
+    }
 }

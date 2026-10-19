@@ -139,7 +139,7 @@ pub fn update(
     mut ctl: ResMut<CoreCtl>,
     mut ms: ResMut<MouseState>,
     (mut acts, mut sound, mut toasts, swarm): (ResMut<Acts>, ResMut<crate::sound::Sound>, ResMut<crate::live::Toasts>, Res<crate::swarm::Swarm>),
-    (mut rolo, mut fx, mut open, sv, mut pclicks, mut scrolls, parts): (ResMut<crate::homepanels::Rolodex>, ResMut<crate::fx::Fx>, ResMut<crate::apps::Open>, Res<crate::core::StageView>, ResMut<crate::appframe::PanelClicks>, ResMut<crate::appframe::AppScrolls>, Query<&crate::appframe::AppPart>),
+    (mut rolo, mut fx, mut open, sv, mut pclicks, mut scrolls, parts, wpanels, mut work): (ResMut<crate::homepanels::Rolodex>, ResMut<crate::fx::Fx>, ResMut<crate::apps::Open>, Res<crate::core::StageView>, ResMut<crate::appframe::PanelClicks>, ResMut<crate::appframe::AppScrolls>, Query<&crate::appframe::AppPart>, Query<&crate::working::WorkPanel>, ResMut<crate::working::Working>),
 ) {
     let dt = time.delta_secs();
     ms.t += dt;
@@ -210,6 +210,15 @@ pub fn update(
                     if n != 0 && part.pane.is_some() {
                         scrolls.push(part.app, part.pane, n);
                     }
+                }
+            }
+            // the working OUTPUT panel: the wheel scrolls its lines (every 19 px one line; up = older)
+            Hit::Panel(e, PanelId::Work) if !ctrl && wpanels.get(e).is_ok_and(|k| k.0 == 1) => {
+                ms.wheel_acc += dy;
+                while ms.wheel_acc.abs() >= 19.0 {
+                    let up = ms.wheel_acc > 0.0;
+                    ms.wheel_acc -= ms.wheel_acc.signum() * 19.0;
+                    work.out_scroll = if up { work.out_scroll + 1 } else { work.out_scroll.saturating_sub(1) };
                 }
             }
             Hit::Panel(e, _) if !ctrl => {

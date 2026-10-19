@@ -45,6 +45,8 @@ pub struct Working {
     /// the task on screen; `None` follows the latest
     pub task: Option<String>,
     pub version: u64,
+    /// OUTPUT panel scroll, in lines up from the bottom
+    pub out_scroll: usize,
     pub amt: Spring,
     pub big: Spring,
     pub head: Spring,
@@ -65,6 +67,7 @@ impl Default for Working {
             open: false,
             task: None,
             version: 0,
+            out_scroll: 0,
             amt: Spring::new(0.0, 24.0, 9.5),
             big: Spring::new(0.0, 40.0, 12.0),
             head: Spring::new(0.0, 30.0, 10.0),
@@ -452,9 +455,40 @@ fn clip(s: &str, n: usize) -> String {
     }
 }
 
+/// Word-wraps every non-empty line of `s` at `n` chars; only words longer than `n` are split.
+fn wrap(s: &str, n: usize) -> Vec<String> {
+    let n = n.max(1);
+    let mut out = Vec::new();
+    for l in s.lines().filter(|l| !l.trim().is_empty()) {
+        let mut cur = String::new();
+        let mut len = 0;
+        for word in l.split_whitespace() {
+            let mut w: Vec<char> = word.chars().collect();
+            if len > 0 && len + 1 + w.len() <= n {
+                cur.push(' ');
+                cur.extend(w.iter());
+                len += 1 + w.len();
+                continue;
+            }
+            if len > 0 {
+                out.push(std::mem::take(&mut cur));
+            }
+            while w.len() > n {
+                out.push(w.drain(..n).collect());
+            }
+            len = w.len();
+            cur = w.into_iter().collect();
+        }
+        if !cur.is_empty() {
+            out.push(cur);
+        }
+    }
+    out
+}
+
 /// Rebuilds the work panels' UI when the run changes (and once a second for the clock).
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
-pub fn draw(mut commands: Commands, w: Res<Working>, svc: Res<Service>, roots: Option<Res<WorkRoots>>, f: Res<UiFonts>, time: Res<Time<Real>>, sim: Res<crate::core::Sim>, mut seen: Local<(u64, Option<String>, u64, i64)>) {
+pub fn draw(mut commands: Commands, svc: Res<Service>, roots: Option<Res<WorkRoots>>, f: Res<UiFonts>, time: Res<Time<Real>>, sim: Res<crate::core::Sim>, mut w: ResMut<Working>, mut seen: Local<(u64, Option<String>, u64, i64, usize)>, mut last: Local<(String, usize)>) {
     let Some(roots) = roots else { return };
     if w.amt.x < 0.001 && !w.open {
         return;
@@ -467,7 +501,13 @@ pub fn draw(mut commands: Commands, w: Res<Working>, svc: Res<Service>, roots: O
     };
     // the clock ticks once a second (a frozen look test stops it, so its screenshot can settle)
     let clock = if sim.frozen { seen.3 } else { time.elapsed_secs() as i64 };
-    let key = (run.version, task.as_ref().map(|t| format!("{}{:?}{}", t.id, t.state, t.status)), w.version, clock);
+    // a new task or a new reply snaps the output back to the bottom
+    let cur = (task.as_ref().map(|t| t.id.clone()).unwrap_or_default(), run.says.len());
+    if *last != cur {
+        *last = cur;
+        w.out_scroll = 0;
+    }
+    let key = (run.version, task.as_ref().map(|t| format!("{}{:?}{}", t.id, t.state, t.status)), w.version, clock, w.out_scroll);
     if *seen == key {
         return;
     }
@@ -485,7 +525,10 @@ pub fn draw(mut commands: Commands, w: Res<Working>, svc: Res<Service>, roots: O
         return;
     };
     build_run(c, roots.run, &f, &t, &run);
-    build_out(c, roots.out, &f, &t, &run);
+    let max = build_out(c, roots.out, &f, &t, &run, w.out_scroll);
+    if w.out_scroll > max {
+        w.out_scroll = max; // wheel overshoot; the next frame redraws at the clamped spot
+    }
     build_edit(c, roots.edit, &f, &run);
     let n = run.steps.len();
     for (i, root) in roots.chips.iter().enumerate() {
@@ -637,7 +680,7 @@ fn build_run(c: &mut Commands, root: Entity, f: &UiFonts, t: &TaskView, run: &Ru
     c.entity(b).add_child(keys);
 }
 
-fn build_out(c: &mut Commands, root: Entity, f: &UiFonts, t: &TaskView, run: &Run) {
+fn build_out(c: &mut Commands, root: Entity, f: &UiFonts, t: &TaskView, run: &Run, scroll: usize) -> usize {
     let line = role_color(Role::Line);
     let hot = role_color(Role::Hot);
     let b = c.spawn(Node { width: percent(100), height: percent(100), flex_direction: FlexDirection::Column, padding: UiRect { left: px(18), right: px(18), top: px(14), bottom: px(14) }, ..default() }).id();
@@ -662,23 +705,28 @@ fn build_out(c: &mut Commands, root: Entity, f: &UiFonts, t: &TaskView, run: &Ru
     for s in run.steps.iter().rev().take(6).collect::<Vec<_>>().into_iter().rev() {
         lines.push((format!("$ {}", clip(&s.title, 70)), Role::Hot));
         let out = if !s.output.is_empty() { s.output.clone() } else { s.detail.clone() };
-        for l in out.lines().filter(|l| !l.trim().is_empty()).take(3) {
-            lines.push((clip(l, 74), if s.ok == Some(false) { Role::Bad } else { Role::Line }));
+        for l in wrap(&out, 74).into_iter().take(3) {
+            lines.push((l, if s.ok == Some(false) { Role::Bad } else { Role::Line }));
         }
     }
+    // the whole latest reply, wrapped; continuation lines indent under the first
     if let Some(say) = run.says.last() {
-        for l in say.lines().filter(|l| !l.trim().is_empty()).take(2) {
-            lines.push((format!("» {}", clip(l, 72)), Role::Fill));
+        for (i, l) in wrap(say, 70).into_iter().enumerate() {
+            lines.push((if i == 0 { format!("» {l}") } else { format!("  {l}") }, Role::Fill));
         }
     }
-    let shown: Vec<_> = lines.iter().rev().take(12).collect::<Vec<_>>().into_iter().rev().collect();
+    // the window of 12 lines, `scroll` lines above the bottom (never past the top)
+    let end = lines.len().saturating_sub(scroll.min(lines.len().saturating_sub(12)));
+    let start = end.saturating_sub(12);
+    let shown = &lines[start..end];
     for (k, (text, role)) in shown.iter().enumerate() {
-        let fade = if k == 0 && shown.len() >= 12 { 0.45 } else { 1.0 };
+        let fade = if (k == 0 && start > 0) || (k + 1 == shown.len() && end < lines.len()) { 0.45 } else { 1.0 };
         let e = c
             .spawn((Text::new(text.clone()), font(&f.mono, 12.0, 0.0), TextColor(with_alpha(role_color(*role), fade)), LineHeight::Px(19.0), TextLayout { linebreak: LineBreak::NoWrap, ..default() }, Node { overflow: Overflow::clip(), ..default() }))
             .id();
         c.entity(b).add_child(e);
     }
+    lines.len().saturating_sub(12)
 }
 
 fn build_edit(c: &mut Commands, root: Entity, f: &UiFonts, run: &Run) {
@@ -755,6 +803,14 @@ mod tests {
         assert_eq!(parse_rfc3339("1970-01-01T00:00:00Z"), Some(0));
         assert_eq!(parse_rfc3339("2026-10-17T00:55:33.309Z"), Some(1_792_198_533));
         assert_eq!(parse_rfc3339("2026-10-17T01:55:33+01:00"), Some(1_792_198_533));
+    }
+
+    #[test]
+    fn wrap_breaks_at_spaces_and_splits_long_words() {
+        assert_eq!(wrap("aa bb cc dd", 5), ["aa bb", "cc dd"]);
+        assert_eq!(wrap("one\n\n  \ntwo three", 20), ["one", "two three"]);
+        assert_eq!(wrap("abcdefghij kl", 4), ["abcd", "efgh", "ij", "kl"]);
+        assert!(wrap("", 10).is_empty());
     }
 
     #[test]
