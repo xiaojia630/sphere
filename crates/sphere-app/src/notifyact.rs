@@ -37,6 +37,7 @@ pub enum Act {
 
 impl Act {
     /// The identifier macOS hands back when the button is pressed.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub fn id(&self) -> String {
         match self {
             Act::Allow => "allow".into(),
