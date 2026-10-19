@@ -266,6 +266,21 @@ pub(crate) fn home_command(t: &str, acts: &mut crate::home::Acts, open: &mut cra
         open.takeover = Some(w);
         return true;
     }
+    // `code` opens the Code app; `code <path>` opens a folder in it (`code .` is the last repo used). Words that
+    // aren't a folder ("code review this") are a task, as before
+    if starts(&["code"]) {
+        let arg = t.get(4..).unwrap_or("").trim();
+        if !arg.is_empty() {
+            match code_arg(arg, last_repo().as_deref(), &home()) {
+                Some(Ok(dir)) => open.code_folder(dir),
+                Some(Err(e)) => toasts.push(e),
+                None => return false,
+            }
+            return true;
+        }
+        open.app(2, toasts);
+        return true;
+    }
     if starts(&["swarm", "agents swarm", "agent swarm", "all agents"]) {
         open.swarm = true;
         return true;
@@ -410,12 +425,64 @@ fn last_repo_file() -> PathBuf {
     sphere_proto::paths::default_state_dir().join("app").join("last-repo")
 }
 
-fn remember(repo: &str) {
+pub(crate) fn remember(repo: &str) {
     let f = last_repo_file();
     if let Some(d) = f.parent() {
         let _ = std::fs::create_dir_all(d);
     }
     let _ = std::fs::write(f, repo);
+}
+
+/// The last repo an agent was started in (or Code opened), when it is still one.
+fn last_repo() -> Option<PathBuf> {
+    let p = PathBuf::from(std::fs::read_to_string(last_repo_file()).ok()?.trim());
+    is_repo(&p).then_some(p)
+}
+
+/// The folder a `code <path>` means: `~` and `~/x` are in your home, `/x` is absolute, `.` is the last repo used,
+/// anything else is looked up in the last repo, then in `~/Projects`. The words say what is wrong when there is none.
+pub fn resolve_code_path(arg: &str, last: Option<&Path>, home: &Path) -> Result<PathBuf, String> {
+    let arg = arg.trim().trim_matches(|c| c == '"' || c == '\'');
+    let tilde = |p: &Path| match p.strip_prefix(home) {
+        Ok(r) if !home.as_os_str().is_empty() => format!("~/{}", r.display()),
+        _ => p.display().to_string(),
+    };
+    let cands: Vec<PathBuf> = if arg == "." {
+        match last {
+            Some(l) => vec![l.to_path_buf()],
+            None => return Err("No repo used yet: type  code <path>".into()),
+        }
+    } else if arg == "~" {
+        vec![home.to_path_buf()]
+    } else if let Some(r) = arg.strip_prefix("~/") {
+        vec![home.join(r)]
+    } else if arg.starts_with('/') {
+        vec![PathBuf::from(arg)]
+    } else {
+        last.map(|l| l.join(arg)).into_iter().chain([home.join("Projects").join(arg)]).collect()
+    };
+    for p in &cands {
+        if p.is_dir() {
+            return Ok(std::fs::canonicalize(p).unwrap_or_else(|_| p.clone()));
+        }
+    }
+    let first = &cands[0];
+    if first.is_file() {
+        return Err(format!("{} is a file: code opens folders", tilde(first)));
+    }
+    Err(format!("No folder at {}", tilde(first)))
+}
+
+/// What `code <arg>` does: opens a folder, says what's wrong with a path, or (None) runs the words as a task. Only
+/// something written as a path (`.`, `~`, `/x`, `./x`, `../x`) gets an error; other words that aren't a folder are a task.
+pub fn code_arg(arg: &str, last: Option<&Path>, home: &Path) -> Option<Result<PathBuf, String>> {
+    let a = arg.trim().trim_matches(|c| c == '"' || c == '\'');
+    let pathy = a == "." || a == ".." || a == "~" || ["~/", "/", "./", "../"].iter().any(|p| a.starts_with(p));
+    match resolve_code_path(arg, last, home) {
+        Ok(d) => Some(Ok(d)),
+        Err(e) if pathy => Some(Err(e)),
+        Err(_) => None,
+    }
 }
 
 /// `repo: task` names the repo; otherwise the last one used, otherwise the app's folder.
@@ -489,5 +556,66 @@ pub fn draw(
     let caret = if on { role_color(Role::Fill) } else { Color::NONE };
     for mut c in &mut q.p2() {
         c.set_if_neq(BackgroundColor(caret));
+    }
+}
+
+#[cfg(test)]
+mod code_path_tests {
+    use super::{code_arg, resolve_code_path};
+    use std::path::Path;
+
+    fn tree(name: &str) -> std::path::PathBuf {
+        let base = std::fs::canonicalize(std::env::temp_dir()).unwrap().join(format!("sphere-cmdbar-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("home/Projects/x")).unwrap();
+        std::fs::create_dir_all(base.join("repo/src")).unwrap();
+        std::fs::write(base.join("repo/a.txt"), "a").unwrap();
+        base
+    }
+
+    #[test]
+    fn tilde_absolute_dot_and_relative_paths() {
+        let b = tree("paths");
+        let (home, repo) = (b.join("home"), b.join("repo"));
+        assert_eq!(resolve_code_path("~/Projects/x", Some(&repo), &home), Ok(home.join("Projects/x")));
+        assert_eq!(resolve_code_path("~", None, &home), Ok(home.clone()));
+        assert_eq!(resolve_code_path(repo.to_str().unwrap(), None, &home), Ok(repo.clone()));
+        assert_eq!(resolve_code_path(".", Some(&repo), &home), Ok(repo.clone()));
+        // relative to the last repo first, then ~/Projects
+        assert_eq!(resolve_code_path("src", Some(&repo), &home), Ok(repo.join("src")));
+        assert_eq!(resolve_code_path("x", Some(&repo), &home), Ok(home.join("Projects/x")));
+        assert_eq!(resolve_code_path("\"~/Projects/x\"", None, &home), Ok(home.join("Projects/x")));
+        let _ = std::fs::remove_dir_all(&b);
+    }
+
+    #[test]
+    fn a_missing_folder_says_so() {
+        let b = tree("missing");
+        let (home, repo) = (b.join("home"), b.join("repo"));
+        let e = resolve_code_path("~/nope", Some(&repo), &home).unwrap_err();
+        assert_eq!(e, "No folder at ~/nope");
+        assert!(resolve_code_path(".", None, &home).unwrap_err().contains("No repo used yet"));
+        assert!(resolve_code_path("a.txt", Some(&repo), &home).unwrap_err().contains("is a file"));
+        assert!(resolve_code_path("/definitely/not/here", None, Path::new("/h")).unwrap_err().starts_with("No folder at /definitely"));
+        let _ = std::fs::remove_dir_all(&b);
+    }
+
+    #[test]
+    fn words_that_arent_a_folder_are_a_task() {
+        let b = tree("task");
+        let (home, repo) = (b.join("home"), b.join("repo"));
+        // "code review this" starts an agent, as it did before `code <path>`
+        assert_eq!(code_arg("review this", Some(&repo), &home), None);
+        assert_eq!(code_arg("fix the login bug", None, &home), None);
+        assert_eq!(code_arg("a.txt", Some(&repo), &home), None);
+        // folders still open
+        assert_eq!(code_arg("x", Some(&repo), &home), Some(Ok(home.join("Projects/x"))));
+        assert_eq!(code_arg("src", Some(&repo), &home), Some(Ok(repo.join("src"))));
+        // something written as a path says what's wrong
+        assert_eq!(code_arg("~/nope", Some(&repo), &home), Some(Err("No folder at ~/nope".into())));
+        assert!(matches!(code_arg(".", None, &home), Some(Err(e)) if e.contains("No repo used yet")));
+        assert!(matches!(code_arg("./a.txt", Some(&repo), &home), Some(Err(_))));
+        assert!(matches!(code_arg("/definitely/not/here", None, &home), Some(Err(_))));
+        let _ = std::fs::remove_dir_all(&b);
     }
 }

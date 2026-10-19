@@ -53,7 +53,7 @@ all on your real data: code review, git, containers, ports, system and files.
 
 <table>
   <tr>
-    <td width="50%"><img src="docs/media/code.jpg" alt="Code"><br><b>Code</b>: review an agent's diff with its reasons, run the tests, then merge, open a PR or ask for a change.</td>
+    <td width="50%"><img src="docs/media/code.jpg" alt="Code"><br><b>Code</b>: review an agent's diff with its reasons, run the tests, then merge, open a PR or ask for a change. Or open a folder (`code ~/Projects/x`, `code .`, <kbd>O</kbd> in Files or Git): its tree, files and uncommitted diffs, <kbd>E</kbd> edits in Helix in a terminal tab, <kbd>Z</kbd> opens Zed.</td>
     <td width="50%"><img src="docs/media/git.jpg" alt="Git"><br><b>Git</b>: your repos, a tilted commit graph, staging, commit, branches, pull, push and fetch.</td>
   </tr>
   <tr>
@@ -62,7 +62,7 @@ all on your real data: code review, git, containers, ports, system and files.
   </tr>
   <tr>
     <td width="50%"><img src="docs/media/system.jpg" alt="System"><br><b>System</b>: CPU per core, memory, GPU, network, disk and battery, and what's using them.</td>
-    <td width="50%"><img src="docs/media/files.jpg" alt="Files"><br><b>Files</b>: yazi-style columns with a preview, pinned places, copy and paste, and the Trash.</td>
+    <td width="50%"><img src="docs/media/files.jpg" alt="Files"><br><b>Files</b>: yazi-style columns with a preview, pinned places, copy and paste, and the Trash. <kbd>E</kbd> edits in Helix, <kbd>Z</kbd> opens Zed, <kbd>O</kbd> opens the folder in Code.</td>
   </tr>
 </table>
 
@@ -78,7 +78,7 @@ all on your real data: code review, git, containers, ports, system and files.
 **Requirements:** macOS 13 or later on Apple silicon. Agents run on your own
 [Claude Code](https://docs.anthropic.com/en/docs/claude-code), which must be installed and signed in; everything
 else works without it. Optional: Docker Desktop or [OrbStack](https://orbstack.dev) for Containers, the GitHub CLI
-(`gh`) for opening PRs, and [Zed](https://zed.dev) for quick edits.
+(`gh`) for opening PRs, [Helix](https://helix-editor.com) for quick edits and [Zed](https://zed.dev) for real ones.
 
 ## Keys
 
@@ -237,7 +237,7 @@ More keys:
 
 Sounds are synthesised and rendered to WAV (`crates/sphere-app/assets/sounds`). Speech uses macOS `say` with the Daniel voice.
 
-Flags: `--demo` (sample agents, no service), `--code`, `--git`, `--app containers|ports|system|files`, `--moment` (the Agent moment with sample requests), `--apps` (core open), `--work` (the Working view), `--swarm` (the Agent swarm), `--orbit`, `--collapsed`, `--theme <name>`, `--motion fast|cinematic`, `--live` (screenshots and benches against the real service), `--cmd "<command>"` (what the first terminal tab runs), `--bench <seconds>`, `--shot <png> [--frames N] [--depth] [--term]`, `--record <dir> [--record-frames N]` (every frame, for GIFs), `--size WxH`, `--no-msaa`. `SPHERE_STATS=1` prints startup timings and memory. `SPHERE_SOCKET` points the app at another sphered.
+Flags: `--demo` (sample agents, no service), `--code`, `--git`, `--app containers|ports|system|files`, `--moment` (the Agent moment with sample requests), `--apps` (core open), `--work` (the Working view), `--swarm` (the Agent swarm), `--orbit`, `--collapsed`, `--theme <name>`, `--motion fast|cinematic`, `--live` (screenshots and benches against the real service), `--cmd "<command>"` (what the first terminal tab runs), `--bench <seconds>`, `--shot <png> [--frames N] [--depth] [--term]`, `--record <dir> [--record-frames N]` (every frame, for GIFs), `--size WxH`, `--no-msaa`. `SPHERE_STATS=1` prints startup timings and memory. `SPHERE_SOCKET` points the app at another sphered. `SPHERE_CODE_DIR=<folder>` opens Code on that folder at start (look tests; `SPHERE_CODE_KEYS` plays keys in it).
 
 `--shot` and `--record` render offscreen and need no window. `--bench`, `--shot` and `--record` use the demo data unless `--live` is given.
 

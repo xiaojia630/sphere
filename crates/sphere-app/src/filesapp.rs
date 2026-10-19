@@ -1,7 +1,8 @@
 //! The Files app: yazi-style columns (the parent, where you are, a preview), pinned places
 //! along the top (your repos, Downloads, agents' worktrees), and a status line. Keys: H J K L (or arrows) move,
 //! Enter opens with the default app, / filters, Space selects, Y yanks, P pastes here (never over anything), D
-//! moves to the Trash (asks twice; only things inside your home), E opens in Zed (else the default editor),
+//! moves to the Trash (asks twice; only things inside your home), E edits in Helix in a terminal tab (else the default editor),
+//! Z opens it in Zed, O opens the folder in the Code app,
 //! 1-9 pinned places, . shows hidden files, Shift+J/K or PageUp/PageDown scroll the preview, G / Shift+G jump to
 //! the top / end, Esc clears the filter, then closes.
 //! Everything that touches the disk and may be slow (listing a folder, reading a preview, copying) runs on a
@@ -804,6 +805,7 @@ pub fn keys(
     mut toasts: ResMut<crate::live::Toasts>,
     (mut clicks, mut scrolls): (ResMut<crate::appframe::AppClicks>, ResMut<crate::appframe::AppScrolls>),
     mut cmd_was: Local<bool>,
+    (mut terms, mut open): (ResMut<crate::term::Terms>, ResMut<crate::apps::Open>),
 ) {
     let mut focus = focus;
     let mods = keys.any_pressed([KeyCode::SuperLeft, KeyCode::SuperRight, KeyCode::ControlLeft, KeyCode::ControlRight, KeyCode::AltLeft, KeyCode::AltRight]);
@@ -1016,17 +1018,41 @@ pub fn keys(
             }
             KeyCode::KeyE => {
                 if let Some(p) = cur {
-                    let zed = ["/Applications/Zed.app/Contents/MacOS/cli", "/usr/local/bin/zed", "/opt/homebrew/bin/zed"].into_iter().find(|z| Path::new(z).exists());
-                    let r = match zed {
-                        Some(z) => std::process::Command::new(z).arg(&p).spawn(),
-                        None => std::process::Command::new("open").arg("-t").arg(&p).spawn(),
-                    };
-                    match r {
-                        Ok(_) => toasts.push_quiet(format!("Editing {}", name_of(&p))),
-                        Err(e) => toasts.push(format!("Could not open an editor: {e}")),
+                    match crate::editors::edit_in_helix(&mut terms, &mut focus, &p, None, crate::apps::FILES) {
+                        Ok(()) => {
+                            // the terminal is behind the app: put the app away so the editor shows
+                            app.close();
+                            toasts.push_quiet(format!("Editing {} in Helix · :q comes back", name_of(&p)));
+                        }
+                        Err(hint) => {
+                            // say how to get Helix once; the default editor does the job meanwhile
+                            static HINTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+                            if !HINTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                                toasts.push(hint);
+                            }
+                            match std::process::Command::new("open").arg("-t").arg(&p).spawn() {
+                                Ok(_) => toasts.push_quiet(format!("Editing {}", name_of(&p))),
+                                Err(e) => toasts.push(format!("Could not open an editor: {e}")),
+                            }
+                        }
                     }
                     sound.play("open");
                 }
+            }
+            KeyCode::KeyZ => {
+                let p = cur.clone().unwrap_or_else(|| app.cwd.clone());
+                match crate::editors::open_in_zed(&p, None) {
+                    Ok(()) => {
+                        toasts.push_quiet(format!("Opening {} in Zed", name_of(&p)));
+                        sound.play("open");
+                    }
+                    Err(e) => toasts.push(e),
+                }
+            }
+            KeyCode::KeyO => {
+                let dir = cur.clone().filter(|p| p.is_dir()).unwrap_or_else(|| app.cwd.clone());
+                open.code_folder(dir);
+                sound.play("open");
             }
             k @ (KeyCode::Digit1 | KeyCode::Digit2 | KeyCode::Digit3 | KeyCode::Digit4 | KeyCode::Digit5 | KeyCode::Digit6 | KeyCode::Digit7 | KeyCode::Digit8 | KeyCode::Digit9) => {
                 const DIGITS: [KeyCode; 9] = [KeyCode::Digit1, KeyCode::Digit2, KeyCode::Digit3, KeyCode::Digit4, KeyCode::Digit5, KeyCode::Digit6, KeyCode::Digit7, KeyCode::Digit8, KeyCode::Digit9];
@@ -1134,7 +1160,7 @@ pub fn draw(mut commands: Commands, app: Res<FilesApp>, svc: Res<Service>, roots
     let ui = Ui::new(&f);
     let here = app.cwd.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "/".into());
     ui.corelab(c, ws.corelab, "Files", clip_cells(&tilde(&app.cwd), 40), ui.line);
-    ui.top(c, ws.panes[TOP], "Files", clip_cells(&tilde(&app.cwd).to_uppercase(), 110), "files after yazi (MIT) · quick edit in Zed");
+    ui.top(c, ws.panes[TOP], "Files", clip_cells(&tilde(&app.cwd).to_uppercase(), 110), "files after yazi (MIT) · quick edit in Helix");
     ui.strip(c, ws.panes[STRIP], &agents, &merged, ["H J K L MOVE   ENTER OPEN   / FILTER   . HIDDEN   SPACE SELECT   SHIFT J K SCROLL PREVIEW", "Y YANK   P PASTE   D TRASH   E EDIT   1-9 PINNED   G / SHIFT G TOP / END   ESC CLEAR, CLOSE"]);
     // pinned places
     let r = c.spawn(Node { width: percent(100), height: percent(100), flex_direction: FlexDirection::Row, align_items: AlignItems::Center, column_gap: px(8), padding: UiRect::horizontal(px(14)), ..default() }).id();
@@ -1272,6 +1298,8 @@ pub fn draw(mut commands: Commands, app: Res<FilesApp>, svc: Res<Service>, roots
         ("Paste", "P", KeyCode::KeyP, ui.hot, !app.yanked.is_empty()),
         (if armed { "Trash again" } else { "Trash" }, "D", KeyCode::KeyD, role_color(Role::Bad), cur_path.is_some()),
         ("Edit", "E", KeyCode::KeyE, ui.hot, cur_path.is_some()),
+        ("Zed", "Z", KeyCode::KeyZ, ui.hot, true),
+        ("Code", "O", KeyCode::KeyO, ui.hot, true),
     ] {
         let btn = ui.button(c, label, k, if on { col } else { with_alpha(ui.dim, 0.6) }, armed && key == KeyCode::KeyD);
         c.entity(btn).insert(Click::Key(key));
