@@ -357,6 +357,8 @@ pub struct FrameStats {
     pub all: Vec<f32>,
     pub frames: u64,
     pub since_label: f32,
+    /// what the process had used when the bench started counting
+    pub usage0: Option<crate::stats::Usage>,
 }
 
 #[derive(Component)]
@@ -422,6 +424,9 @@ pub fn frame_stats(time: Res<Time<Real>>, sim: Res<Sim>, mut st: ResMut<FrameSta
         eprintln!("stats: long frame {ms:.0} ms (frame {}) at {:.0} ms", st.frames, crate::stats::ms());
     }
     if st.frames > 20 {
+        if st.usage0.is_none() {
+            st.usage0 = Some(crate::stats::Usage::now());
+        }
         st.recent.push(ms);
         if st.recent.len() > 300 {
             st.recent.remove(0);
@@ -440,7 +445,7 @@ pub fn frame_stats(time: Res<Time<Real>>, sim: Res<Sim>, mut st: ResMut<FrameSta
     }
 }
 
-pub fn bench(args: Res<Args>, time: Res<Time<Real>>, st: Res<FrameStats>, mut exit: MessageWriter<AppExit>) {
+pub fn bench(args: Res<Args>, time: Res<Time<Real>>, st: Res<FrameStats>, window: Query<&Window, With<bevy::window::PrimaryWindow>>, mut exit: MessageWriter<AppExit>) {
     let Some(secs) = args.bench else { return };
     if time.elapsed_secs() < secs + 1.5 {
         return;
@@ -449,16 +454,27 @@ pub fn bench(args: Res<Args>, time: Res<Time<Real>>, st: Res<FrameStats>, mut ex
     let mean: f32 = v.iter().sum::<f32>() / v.len().max(1) as f32;
     let (p50, p99, p999) = (pct(&mut v, 0.5), pct(&mut v, 0.99), pct(&mut v, 0.999));
     let max = v.last().copied().unwrap_or(0.0);
+    // CPU time per frame: the main thread, the render thread, and every thread of the process together
+    let now = crate::stats::Usage::now();
+    let n = v.len() as u64;
+    let (main_ms, render_ms, all_ms) = st.usage0.as_ref().map_or((0.0, 0.0, 0.0), |a| now.per_frame_ms(a, n));
     println!(
-        "bench: {} frames over {:.1}s | avg {:.1} fps | frame ms p50 {:.2}  p99 {:.2}  p99.9 {:.2}  max {:.2}",
+        "bench: {} frames over {:.1}s | avg {:.1} fps | frame ms p50 {:.2}  p99 {:.2}  p99.9 {:.2}  max {:.2} | cpu ms/frame main {:.2}  render {:.2}  all threads {:.2}",
         v.len(),
         v.iter().sum::<f32>() / 1000.0,
         1000.0 / mean.max(0.0001),
         p50,
         p99,
         p999,
-        max
+        max,
+        main_ms,
+        render_ms,
+        all_ms
     );
+    if let Some(a) = &st.usage0 {
+        let w = window.iter().next().map(|w| format!("window {}x{} px at scale {}", w.physical_width(), w.physical_height(), w.scale_factor())).unwrap_or_else(|| "offscreen".into());
+        println!("usage: {w} | {}", crate::stats::usage_line(a, &now, n));
+    }
     exit.write(AppExit::Success);
 }
 
