@@ -226,10 +226,10 @@ fn tile_text(i: usize, now: Option<&TileState>) -> (&'static str, String, String
             Some(n) => format!("{n} task{} · review, merge, PR", if n == 1 { "" } else { "s" }),
             None => "Review, checkpoints, merge, PR".into(),
         }),
-        3 => ("live", "Branches and PRs".into(), "gitui and your gh login".into()),
+        3 => ("live", "Branches and PRs".into(), now.and_then(|n| n.git.clone()).unwrap_or_else(|| "Status, branches, pull requests".into())),
         4 => ("live", now.map(|n| n.docker.clone()).unwrap_or_else(|| "Docker".into()), now.map(|n| n.docker_detail.clone()).unwrap_or_else(|| "Start, stop, restart, logs".into())),
-        5 => ("live", "Ports and logs".into(), "What's listening, and its output".into()),
-        6 => ("live", "Files".into(), "Browse, preview, quick edit".into()),
+        5 => ("live", "Ports and logs".into(), now.and_then(|n| n.ports).map(|p| format!("{p} listening · and their output")).unwrap_or_else(|| "What's listening, and its output".into())),
+        6 => ("live", "Files".into(), now.and_then(|n| n.files.clone()).unwrap_or_else(|| "Browse, preview, quick edit".into())),
         _ => ("soon", "Music".into(), "Not built yet".into()),
     }
 }
@@ -242,6 +242,10 @@ struct TileState {
     tasks: usize,
     docker: String,
     docker_detail: String,
+    /// "main · 3 changed", ports listening and "Projects · 24 items", once those apps have read them
+    git: Option<String>,
+    ports: Option<usize>,
+    files: Option<String>,
 }
 
 fn build_tile(c: &mut Commands, root: Entity, f: &UiFonts, i: usize, name: &str, live: bool) {
@@ -300,11 +304,11 @@ pub fn update(
     mut pmats: ResMut<Assets<PanelMaterial>>,
     mut gmats: ResMut<Assets<GlowMaterial>>,
     mut feet: Query<(&TileFoot, &mut Text, &mut TextColor)>,
-    (mut words, agents, live, stats, terms): (Query<(&TileText, &mut Text), Without<TileFoot>>, Res<crate::core::Agents>, Res<crate::live::Live>, Res<crate::sysstats::SysStats>, Res<crate::term::Terms>),
+    (mut words, agents, live, stats, terms, git, ports, files): (Query<(&TileText, &mut Text), Without<TileFoot>>, Res<crate::core::Agents>, Res<crate::live::Live>, Res<crate::sysstats::SysStats>, Res<crate::term::Terms>, Res<crate::gitapp::GitApp>, Res<crate::ports::PortsApp>, Res<crate::filesapp::FilesApp>),
 ) {
     let dt = sim.dt;
     if orb.amount() > 0.01 {
-        let st = TileState { tabs: terms.tabs.len(), agents: agents.list.len(), working: agents.working(), needs: live.requests.len().max(agents.waiting()), tasks: live.titles.len(), docker: stats.get().docker.label(), docker_detail: stats.get().docker.detail() };
+        let st = TileState { tabs: terms.tabs.len(), agents: agents.list.len(), working: agents.working(), needs: live.requests.len().max(agents.waiting()), tasks: live.titles.len(), docker: stats.get().docker.label(), docker_detail: stats.get().docker.detail(), git: git.caption(), ports: ports.listening(), files: files.caption() };
         for (t, mut tx) in &mut words {
             let (r, m, s) = tile_text(t.0, Some(&st));
             let want = match t.1 {

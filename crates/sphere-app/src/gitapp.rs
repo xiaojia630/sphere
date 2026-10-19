@@ -159,6 +159,14 @@ impl Default for GitApp {
 }
 
 impl GitApp {
+    /// "main · 3 changed" for the repo on screen, if one is loaded (the Orbit tile's caption).
+    pub fn caption(&self) -> Option<String> {
+        let c = &self.repo.as_ref()?.card;
+        Some(format!("{} · {}", c.branch, if c.changed == 0 { "clean".to_string() } else { format!("{} changed", c.changed) }))
+    }
+}
+
+impl GitApp {
     pub fn open(&mut self) {
         self.open = true;
         self.load_t = -99.0;

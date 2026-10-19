@@ -367,7 +367,7 @@ pub fn update(sim: Res<crate::core::Sim>, mut atlases: ResMut<AppAtlases>, mut a
                 for c in v.iter().filter(|c| c.running() && !c.mem.is_empty()) {
                     let h = app.hist.entry(c.id.clone()).or_default();
                     h.push(c.cpu);
-                    if h.len() > 24 {
+                    if h.len() > HIST_SAMPLES {
                         h.remove(0);
                     }
                 }
@@ -407,7 +407,7 @@ pub fn update(sim: Res<crate::core::Sim>, mut atlases: ResMut<AppAtlases>, mut a
     if !app.open {
         return;
     }
-    if !app.loading && sim.t - app.load_t > 4.0 {
+    if !app.loading && sim.t - app.load_t > SAMPLE_SECS {
         app.load_t = sim.t;
         app.loading = true;
         let first = app.list.as_ref().is_none_or(|l| l.is_err());
@@ -672,6 +672,24 @@ fn secs(s: u32) -> String {
     }
 }
 
+/// The detail chart keeps this many samples, one per read (every SAMPLE_SECS).
+const HIST_SAMPLES: usize = 24;
+const SAMPLE_SECS: f32 = 4.0;
+
+/// "CPU · LAST 96 SEC" or, from two minutes up, "CPU · LAST 5 MIN": the span the chart covers.
+fn span_label(samples: usize, secs: f32) -> String {
+    let total = (samples as f32 * secs).round() as u32;
+    if total >= 120 {
+        format!("CPU · LAST {} MIN", (total as f32 / 60.0).round() as u32)
+    } else {
+        format!("CPU · LAST {total} SEC")
+    }
+}
+
+fn history_label() -> String {
+    span_label(HIST_SAMPLES, SAMPLE_SECS)
+}
+
 fn draw_detail(c: &mut Commands, ui: &Ui, root: Entity, ct: &Container, hist: &[f32], armed: bool, working: Option<(&str, u32)>) {
     let b = ui.body(c, root);
     let col = state_col(ct);
@@ -695,7 +713,7 @@ fn draw_detail(c: &mut Commands, ui: &Ui, root: Entity, ct: &Container, hist: &[
     let running = ct.running();
     let max = hist.iter().cloned().fold(5.0, f32::max);
     let vals: Vec<f32> = hist.iter().map(|v| v / max).collect();
-    let lab = ui.text(c, "CPU · LAST 24 SAMPLES", &ui.f.ui600, 9.5, 1.8, ui.dim);
+    let lab = ui.text(c, history_label(), &ui.f.ui600, 9.5, 1.8, ui.dim);
     let sp = ui.spark(c, &vals, 34.0, ui.line);
     c.entity(inner).add_children(&[lab, sp]);
     let mem_txt = if !running {
@@ -789,6 +807,14 @@ fn draw_logs(c: &mut Commands, ui: &Ui, root: Entity, ct: &Container, app: &Cont
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chart_label_is_the_span_of_its_samples() {
+        assert_eq!(span_label(24, 4.0), "CPU · LAST 96 SEC");
+        assert_eq!(span_label(24, 5.0), "CPU · LAST 2 MIN");
+        assert_eq!(span_label(30, 10.0), "CPU · LAST 5 MIN");
+        assert_eq!(history_label(), "CPU · LAST 96 SEC");
+    }
 
     #[test]
     fn wheel_keys_per_pane() {

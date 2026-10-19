@@ -507,6 +507,18 @@ pub struct FilesApp {
     done_tx: Sender<Msg>,
 }
 
+impl FilesApp {
+    /// "Projects · 24 items" for the folder on screen, once it has been read (the Orbit tile's caption).
+    pub fn caption(&self) -> Option<String> {
+        if self.entries.is_empty() || self.error.is_some() {
+            return None;
+        }
+        let name = self.cwd.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "/".into());
+        let n = self.entries.len();
+        Some(format!("{name} · {n} item{}", if n == 1 { "" } else { "s" }))
+    }
+}
+
 impl Default for FilesApp {
     fn default() -> Self {
         let (jobs, jrx) = channel();
