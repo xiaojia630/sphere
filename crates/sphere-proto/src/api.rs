@@ -145,6 +145,10 @@ pub struct Snapshot {
     /// How many agents run at once; the rest wait queued. `None` from an older sphered.
     #[serde(default)]
     pub max_concurrent: Option<usize>,
+    /// Seconds agents spent waiting on a person today, over requests closed today. Requests still
+    /// waiting aren't included: clients add `now - opened_at` for those. 0 from an older sphered.
+    #[serde(default)]
+    pub waited_today_secs: u64,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

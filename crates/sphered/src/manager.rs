@@ -1572,6 +1572,7 @@ impl Manager {
             cost_today_usd: v.cost_on(&day),
             daily_cap_usd: self.cfg.daily_cap_usd,
             max_concurrent: Some(self.cfg.max_concurrent),
+            waited_today_secs: 0,
         })
     }
 
