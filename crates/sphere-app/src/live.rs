@@ -103,16 +103,33 @@ fn row(t: &TaskView, merged: bool) -> Agent {
     Agent { name, state, p: p.max(0.04), step, rate: 0.0, figure, chip }
 }
 
-/// Every agent for the panel: what needs you first, then working, then the most recent finished (the panel
-/// shows the first rows and counts the rest).
-fn pick(tasks: &[TaskView], merged: &HashSet<String>) -> Vec<Agent> {
+/// A task that failed or was stopped before its agent ever ran (no session, no step, no cost): a start
+/// that didn't happen, not an agent.
+fn never_ran(t: &TaskView) -> bool {
+    matches!(t.state, TaskState::Failed | TaskState::Stopped) && t.session_id.is_none() && t.steps == 0 && t.cost_usd == 0.0
+}
+
+/// How long a finished, failed or stopped agent stays in the panel.
+const RECENT_SECS: i64 = 24 * 3600;
+
+/// The agents for the panel: what needs you first, then working, then the most recent finished (the panel
+/// shows the first rows and counts the rest). Finished ones go after a day; starts that never ran are left
+/// out but the latest, so its error still shows. `now` is unix seconds.
+fn pick(tasks: &[TaskView], merged: &HashSet<String>, now: i64) -> Vec<Agent> {
+    let recent = |t: &TaskView| crate::working::parse_rfc3339(&t.updated_at).is_none_or(|at| now - at < RECENT_SECS);
+    let latest_dud = tasks.iter().filter(|t| never_ran(t)).max_by(|a, b| a.updated_at.cmp(&b.updated_at)).map(|t| t.id.clone());
+    let keep = |t: &TaskView| match t.state {
+        TaskState::NeedsYou | TaskState::Working | TaskState::Queued => true,
+        _ if never_ran(t) => latest_dud.as_ref() == Some(&t.id) && recent(t),
+        _ => recent(t),
+    };
     let rank = |t: &TaskView| match t.state {
         TaskState::NeedsYou => 0,
         TaskState::Working => 1,
         TaskState::Queued => 2,
         _ => 3,
     };
-    let mut v: Vec<&TaskView> = tasks.iter().collect();
+    let mut v: Vec<&TaskView> = tasks.iter().filter(|t| keep(t)).collect();
     v.sort_by(|a, b| rank(a).cmp(&rank(b)).then_with(|| b.updated_at.cmp(&a.updated_at)));
     v.into_iter().map(|t| row(t, merged.contains(&t.id))).collect()
 }
@@ -177,7 +194,7 @@ pub fn sync(svc: Res<Service>, mut live: ResMut<Live>, mut agents: ResMut<Agents
         }
         live.link = s.link.clone();
     }
-    agents.set(pick(&s.tasks, &s.merged));
+    agents.set(pick(&s.tasks, &s.merged, crate::core::unix_now()));
     agents.set_runs(
         s.tasks
             .iter()
@@ -321,18 +338,43 @@ mod tests {
     fn every_agent_counts_and_the_panel_shows_three_and_more_past_four() {
         let tasks: Vec<TaskView> = (0..6).map(|i| task(&format!("t{i}"), TaskState::Working, &format!("2026-10-19T00:0{i}:00Z"))).collect();
         let mut agents = Agents::empty();
-        agents.set(pick(&tasks, &HashSet::new()));
+        agents.set(pick(&tasks, &HashSet::new(), NOW));
         assert_eq!(agents.working(), 6, "agents past the fourth still count");
         assert_eq!(crate::panel::agent_rows(agents.list.len()), (3, 3));
         assert_eq!(crate::panel::agent_rows(4), (4, 0));
         assert_eq!(crate::panel::agent_rows(0), (0, 0));
     }
 
+    /// 2026-10-19T12:00:00Z
+    const NOW: i64 = 1_792_411_200;
+
+    #[test]
+    fn starts_that_never_ran_are_not_agents_but_the_latest_shows() {
+        let mut tasks: Vec<TaskView> = (0..5).map(|i| task(&format!("f{i}"), TaskState::Failed, &format!("2026-10-19T00:0{i}:00Z"))).collect();
+        let mut done = task("d1", TaskState::Done, "2026-10-18T13:00:00Z");
+        done.steps = 3;
+        tasks.push(done);
+        let mut ran = task("f9", TaskState::Failed, "2026-10-18T14:00:00Z");
+        ran.session_id = Some("s".into());
+        tasks.push(ran);
+        let names: Vec<String> = pick(&tasks, &HashSet::new(), NOW).into_iter().map(|a| a.name).collect();
+        assert_eq!(names, vec!["Task f4", "Task f9", "Task d1"]);
+    }
+
+    #[test]
+    fn finished_agents_leave_after_a_day_but_working_ones_stay() {
+        let mut old = task("d0", TaskState::Done, "2026-10-17T10:00:00Z");
+        old.steps = 5;
+        let tasks = vec![old, task("w0", TaskState::Working, "2026-10-17T10:00:00Z"), task("x0", TaskState::Failed, "2026-10-17T11:00:00Z")];
+        let names: Vec<String> = pick(&tasks, &HashSet::new(), NOW).into_iter().map(|a| a.name).collect();
+        assert_eq!(names, vec!["Task w0"]);
+    }
+
     #[test]
     fn a_merged_agent_reads_merged() {
         let tasks = vec![task("t1", TaskState::Done, "2026-10-19T00:00:00Z"), task("t2", TaskState::Done, "2026-10-19T00:01:00Z")];
         let merged: HashSet<String> = ["t1".to_string()].into();
-        let rows = pick(&tasks, &merged);
+        let rows = pick(&tasks, &merged, NOW);
         let step = |n: &str| rows.iter().find(|a| a.name == n).unwrap().step.clone();
         assert_eq!(step("Task t1"), "Merged · sphere/t1");
         assert_eq!(step("Task t2"), "Done: finished");
