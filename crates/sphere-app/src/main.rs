@@ -3,6 +3,7 @@ mod appframe;
 mod apps;
 mod callouts;
 mod codeapp;
+mod editors;
 mod containers;
 mod cmdbar;
 mod core;
