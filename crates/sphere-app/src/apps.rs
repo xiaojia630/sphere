@@ -16,10 +16,14 @@ pub struct Open {
     pub swarm: bool,
     /// the swarm's "Open in Code": the Code app opens on this task
     pub code_task: Option<String>,
+    /// "code <path>", or O in Files and Git: the Code app opens on this folder
+    pub code_dir: Option<std::path::PathBuf>,
     /// the command bar's words while the swarm is open (next, merge, stop, a number, back), for `swarm::input`
     pub swarm_cmds: Vec<crate::swarm::input::SwarmCmd>,
 }
 
+/// The Code app's tile.
+const CODE: usize = 2;
 /// The System app has no tile: it opens from the bar ("system", "top").
 const SYSTEM: usize = 100;
 
@@ -33,6 +37,14 @@ impl Open {
     }
     pub fn system(&mut self) {
         self.pending = Some(SYSTEM);
+    }
+    /// Opens the Code app on a folder (and remembers it as the last repo when it is one, so `code .` finds it again).
+    pub fn code_folder(&mut self, dir: std::path::PathBuf) {
+        if dir.join(".git").exists() {
+            crate::cmdbar::remember(&dir.to_string_lossy());
+        }
+        self.code_dir = Some(dir);
+        self.pending = Some(CODE);
     }
 }
 
@@ -81,9 +93,13 @@ pub fn apply(
     match i {
         0 => focus.terminal = true,
         2 => {
-            code.open();
-            if let Some(t) = open.code_task.take() {
-                code.select_task(Some(t));
+            if let Some(d) = open.code_dir.take() {
+                code.open_folder(d);
+            } else {
+                code.open();
+                if let Some(t) = open.code_task.take() {
+                    code.select_task(Some(t));
+                }
             }
         }
         3 => git.open(),

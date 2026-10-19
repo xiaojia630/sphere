@@ -327,6 +327,7 @@ pub fn keys(
     mut toasts: ResMut<crate::live::Toasts>,
     (mut clicks, mut scrolls): (ResMut<crate::appframe::AppClicks>, ResMut<crate::appframe::AppScrolls>),
     mut cmd_was: Local<bool>,
+    mut open: ResMut<crate::apps::Open>,
 ) {
     let mut focus = focus;
     let mods = keys.any_pressed([KeyCode::SuperLeft, KeyCode::SuperRight, KeyCode::ControlLeft, KeyCode::ControlRight, KeyCode::AltLeft, KeyCode::AltRight]);
@@ -523,6 +524,13 @@ pub fn keys(
                 app.act(Op::Fetch);
                 sound.play("progress");
             }
+            KeyCode::KeyO => match app.dir() {
+                Some(dir) => {
+                    open.code_folder(dir);
+                    sound.play("open");
+                }
+                None => toasts.push("No repo to open"),
+            },
             KeyCode::KeyL => {
                 app.act(Op::Pull);
                 sound.play("progress");
@@ -1231,7 +1239,7 @@ fn draw_strip(c: &mut Commands, ui: &Ui, root: Entity, agents: &[TaskView], merg
     let sp = c.spawn(Node { flex_grow: 1.0, ..default() }).id();
     let legend = c.spawn(Node { flex_direction: FlexDirection::Column, row_gap: px(4), align_items: AlignItems::FlexEnd, ..default() }).id();
     let l1 = ui.text(c, "J K MOVE   TAB LIST   ENTER STAGE / SWITCH   S U STAGE   A X ALL   C COMMIT   M AMEND", &ui.f.ui600, 10.0, 1.6, ui.dim);
-    let l2 = ui.text(c, "B BRANCH   F FETCH   L PULL   P PUSH   V GRAPH   [ ] REPO   ESC CLOSE", &ui.f.ui600, 10.0, 1.6, ui.dim);
+    let l2 = ui.text(c, "B BRANCH   F FETCH   L PULL   P PUSH   V GRAPH   O CODE   [ ] REPO   ESC CLOSE", &ui.f.ui600, 10.0, 1.6, ui.dim);
     c.entity(legend).add_children(&[l1, l2]);
     c.entity(r).add_children(&[sp, legend]);
 }

@@ -5,6 +5,10 @@
 //! repo's own test command. Keys: J K (or the arrows) move through the diff line by line, H L hunk by hunk,
 //! PgDn PgUp a page, [ ] files, Tab next agent, R run tests, M P E Z D actions (M, P and D ask twice), Esc
 //! disarms an action, then closes.
+//! It also opens a folder (`code <path>`, O in Files and Git): the folder's files on the left, the selected file or its
+//! uncommitted diff in the middle, the repo's changes, its tests and the editors on the right. Keys there: J K (or the
+//! arrows) move through the tree, Enter opens or closes a folder, PgUp PgDn scroll, H L hunks, [ ] changed files, E
+//! edits in Helix (a terminal tab), Z opens Zed (Shift+Z or F: the folder), R runs the tests, Esc closes.
 use crate::core::CoreCtl;
 use crate::fonts::UiFonts;
 use crate::panel::*;
@@ -16,6 +20,8 @@ use crate::util::*;
 use bevy::prelude::*;
 use bevy::text::LineHeight;
 use sphere_proto::{TaskState, TaskView};
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Mutex};
 
 // the workspace, centred on the stage
@@ -94,6 +100,10 @@ pub struct CodeApp {
     busy: bool,
     /// bumps when anything on screen changes
     version: u64,
+    /// an agent's task, or a folder you opened
+    source: Source,
+    folder: Folder,
+    folder_rx: Option<Mutex<mpsc::Receiver<FolderLoad>>>,
 }
 
 impl Default for CodeApp {
@@ -118,6 +128,9 @@ impl Default for CodeApp {
             notes: (tx, Mutex::new(rx)),
             busy: false,
             version: 0,
+            source: Source::Agent,
+            folder: Folder::default(),
+            folder_rx: None,
         }
     }
 }
@@ -125,6 +138,7 @@ impl Default for CodeApp {
 impl CodeApp {
     pub fn open(&mut self) {
         self.open = true;
+        self.source = Source::Agent;
         self.task = None;
         self.version += 1;
     }
@@ -209,6 +223,455 @@ impl CodeApp {
     }
 }
 
+// ------------------------------------------------------------------ folder mode
+
+/// What the Code app is on: an agent's task (reviewing its worktree), or a folder you opened.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub enum Source {
+    #[default]
+    Agent,
+    Folder(PathBuf),
+}
+
+/// File rows that fit the folder's tree.
+const FOLDER_ROWS: usize = 22;
+/// Lines of a file that show in the centre pane.
+const FILE_ROWS: usize = 15;
+/// A click on a file-tree row is numbered from here (agent chips start at AGENT_PICK, changed files below it).
+const TREE_PICK: usize = 20_000;
+/// Files listed from a folder; a plain folder is walked this deep.
+const MAX_FILES: usize = 20_000;
+const MAX_DEPTH: usize = 8;
+/// Files bigger than this many bytes, or longer than this many lines, aren't shown whole.
+const MAX_VIEW_BYTES: u64 = 1_000_000;
+const MAX_VIEW_LINES: usize = 5000;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct TreeRow {
+    /// path from the folder, `/`-separated
+    pub path: String,
+    pub name: String,
+    pub depth: usize,
+    pub dir: bool,
+    pub open: bool,
+}
+
+#[derive(Default)]
+struct Dir {
+    dirs: std::collections::BTreeMap<String, Dir>,
+    files: Vec<String>,
+}
+
+fn flatten(d: &Dir, prefix: &str, depth: usize, expanded: &HashSet<String>, out: &mut Vec<TreeRow>) {
+    let mut dirs: Vec<(&String, &Dir)> = d.dirs.iter().collect();
+    dirs.sort_by_key(|(n, _)| n.to_lowercase());
+    for (name, sub) in dirs {
+        let path = format!("{prefix}{name}");
+        let open = expanded.contains(&path);
+        out.push(TreeRow { path: path.clone(), name: name.clone(), depth, dir: true, open });
+        if open {
+            flatten(sub, &format!("{path}/"), depth + 1, expanded, out);
+        }
+    }
+    let mut files: Vec<&String> = d.files.iter().collect();
+    files.sort_by_key(|n| n.to_lowercase());
+    for name in files {
+        out.push(TreeRow { path: format!("{prefix}{name}"), name: name.clone(), depth, dir: false, open: false });
+    }
+}
+
+/// The rows the tree shows: at each level folders first, then files, by name; a folder's contents only when expanded.
+pub(crate) fn tree_rows(files: &[String], expanded: &HashSet<String>) -> Vec<TreeRow> {
+    let mut root = Dir::default();
+    for f in files {
+        let mut d = &mut root;
+        let mut parts = f.split('/').peekable();
+        while let Some(p) = parts.next() {
+            if parts.peek().is_some() {
+                d = d.dirs.entry(p.to_string()).or_default();
+            } else {
+                d.files.push(p.to_string());
+            }
+        }
+    }
+    let mut out = Vec::new();
+    flatten(&root, "", 0, expanded, &mut out);
+    out
+}
+
+/// Whether `dir` is itself the top of a git repo (a folder inside one is listed plainly: its changes are relative to the top).
+fn is_repo_top(dir: &Path) -> bool {
+    let Ok(top) = crate::gitdata::git_t(dir, &["rev-parse", "--show-toplevel"]) else { return false };
+    matches!((std::fs::canonicalize(top), std::fs::canonicalize(dir)), (Ok(a), Ok(b)) if a == b)
+}
+
+/// A git repo's files: tracked, plus untracked ones that aren't ignored (those that are gone are left out).
+pub(crate) fn git_files(root: &Path) -> Vec<String> {
+    let out = crate::gitdata::git(root, &["ls-files", "-z", "--cached", "--others", "--exclude-standard"]).unwrap_or_default();
+    let mut v: Vec<String> = out.split('\0').filter(|p| !p.is_empty()).filter(|p| root.join(p).symlink_metadata().is_ok_and(|m| !m.is_dir())).map(str::to_string).collect();
+    v.sort();
+    v.dedup();
+    v.truncate(MAX_FILES);
+    v
+}
+
+/// A plain folder's files (hidden ones, `node_modules` and `target` left out), a few levels deep.
+pub(crate) fn walk_files(root: &Path) -> Vec<String> {
+    fn go(dir: &Path, rel: &str, depth: usize, out: &mut Vec<String>) {
+        let Ok(rd) = std::fs::read_dir(dir) else { return };
+        for e in rd.flatten() {
+            let name = e.file_name().to_string_lossy().to_string();
+            if name.starts_with('.') || out.len() >= MAX_FILES {
+                continue;
+            }
+            let Ok(ft) = e.file_type() else { continue };
+            let path = if rel.is_empty() { name.clone() } else { format!("{rel}/{name}") };
+            if ft.is_dir() {
+                if depth < MAX_DEPTH && !matches!(name.as_str(), "node_modules" | "target") {
+                    go(&e.path(), &path, depth + 1, out);
+                }
+            } else {
+                out.push(path);
+            }
+        }
+    }
+    let mut v = Vec::new();
+    go(root, "", 0, &mut v);
+    v.sort();
+    v
+}
+
+fn branch_of(root: &Path) -> String {
+    crate::gitdata::git_t(root, &["symbolic-ref", "--short", "-q", "HEAD"])
+        .ok()
+        .filter(|s| !s.is_empty())
+        .or_else(|| crate::gitdata::git_t(root, &["rev-parse", "--short", "HEAD"]).ok().filter(|s| !s.is_empty()).map(|s| format!("detached {s}")))
+        .unwrap_or_else(|| "no commits yet".into())
+}
+
+/// A file's lines for the centre pane, or why it can't be shown.
+fn read_text(p: &Path) -> Result<Vec<String>, String> {
+    let m = std::fs::metadata(p).map_err(|e| e.to_string())?;
+    if m.len() > MAX_VIEW_BYTES {
+        return Err(format!("{} KB, too big to show", m.len() / 1000));
+    }
+    let b = std::fs::read(p).map_err(|e| e.to_string())?;
+    if b.contains(&0) {
+        return Err("binary file".into());
+    }
+    Ok(String::from_utf8_lossy(&b).lines().take(MAX_VIEW_LINES).map(|l| l.replace('\t', "    ")).collect())
+}
+
+/// What the background read of a folder brings back.
+pub(crate) struct FolderLoad {
+    git: bool,
+    branch: String,
+    files: Vec<String>,
+    /// the repo's uncommitted changes against HEAD (`None` for a folder that is no repo)
+    changes: Option<Review>,
+}
+
+pub(crate) fn load_folder(root: &Path) -> FolderLoad {
+    let git = is_repo_top(root);
+    let files = if git { git_files(root) } else { walk_files(root) };
+    FolderLoad { git, branch: if git { branch_of(root) } else { String::new() }, files, changes: git.then(|| review::load(&root.to_string_lossy(), "HEAD")) }
+}
+
+/// `/Users/me/x` as `~/x`.
+pub(crate) fn tilde(p: &Path) -> String {
+    match std::env::var_os("HOME").map(PathBuf::from).filter(|h| !h.as_os_str().is_empty()).and_then(|h| p.strip_prefix(&h).ok().map(|r| r.to_path_buf())) {
+        Some(r) if r.as_os_str().is_empty() => "~".into(),
+        Some(r) => format!("~/{}", r.display()),
+        None => p.display().to_string(),
+    }
+}
+
+#[derive(Default)]
+struct Folder {
+    git: bool,
+    branch: String,
+    /// the first read is in
+    loaded: bool,
+    files: Vec<String>,
+    expanded: HashSet<String>,
+    rows: Vec<TreeRow>,
+    /// the selected row's path, and its place in `rows`
+    sel: Option<String>,
+    cursor: usize,
+    top: usize,
+    /// the selected file's text when it has no diff to show (or why it can't be shown), and how far it is scrolled
+    view: Option<Result<Vec<String>, String>>,
+    vscroll: usize,
+}
+
+/// Which pane view a selected file gets: its uncommitted diff when it has changes, else its contents.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum FileView {
+    Diff(usize),
+    Contents,
+}
+
+pub(crate) fn file_view(changes: Option<&Review>, path: &str) -> FileView {
+    match changes.and_then(|r| r.files.iter().position(|f| f.path == path)) {
+        Some(i) => FileView::Diff(i),
+        None => FileView::Contents,
+    }
+}
+
+/// The buttons of the actions pane: (label, key label, the key it presses, the action that asks twice, colour, filled).
+/// An agent's work is merged, sent as a PR, asked about or discarded; a folder is edited and tested.
+#[allow(clippy::type_complexity)]
+fn action_buttons(folder: bool) -> Vec<(&'static str, &'static str, KeyCode, Option<Act>, Role, bool)> {
+    if folder {
+        vec![
+            ("EDIT IN HELIX", "E", KeyCode::KeyE, None, Role::Hot, true),
+            ("OPEN IN ZED", "Z", KeyCode::KeyZ, None, Role::Hot, false),
+            ("OPEN FOLDER IN ZED", "⇧Z", KeyCode::KeyF, None, Role::Hot, false),
+            ("RUN TESTS", "R", KeyCode::KeyR, None, Role::Hot, false),
+            ("CLOSE", "ESC", KeyCode::Escape, None, Role::Dim, false),
+        ]
+    } else {
+        vec![
+            ("MERGE", "M", KeyCode::KeyM, Some(Act::Merge), Role::Hot, true),
+            ("OPEN PR", "P", KeyCode::KeyP, Some(Act::Pr), Role::Hot, false),
+            ("ASK FOR CHANGE", "E", KeyCode::KeyE, None, Role::Hot, false),
+            ("OPEN IN ZED", "Z", KeyCode::KeyZ, None, Role::Hot, false),
+            ("DISCARD", "D", KeyCode::KeyD, Some(Act::Discard), Role::Bad, false),
+        ]
+    }
+}
+
+impl CodeApp {
+    /// Opens the app on a folder: its tree on the left, the selected file in the middle.
+    pub fn open_folder(&mut self, dir: PathBuf) {
+        self.select_task(None);
+        self.open = true;
+        self.source = Source::Folder(dir);
+        self.folder = Folder::default();
+        self.folder_rx = None;
+        self.loading = false;
+        self.loaded = (String::new(), u64::MAX);
+        self.load_t = -9.0;
+        self.version += 1;
+    }
+    pub(crate) fn is_folder(&self) -> bool {
+        matches!(self.source, Source::Folder(_))
+    }
+    fn root(&self) -> Option<&Path> {
+        match &self.source {
+            Source::Folder(p) => Some(p),
+            Source::Agent => None,
+        }
+    }
+    fn sel_row(&self) -> Option<&TreeRow> {
+        self.folder.rows.get(self.folder.cursor)
+    }
+    /// The selected file's view: a diff when it has uncommitted changes.
+    fn folder_view(&self) -> Option<FileView> {
+        let row = self.sel_row().filter(|r| !r.dir)?;
+        Some(file_view(self.review.as_ref(), &row.path))
+    }
+    fn rebuild_rows(&mut self) {
+        self.folder.rows = tree_rows(&self.folder.files, &self.folder.expanded);
+        self.folder.cursor = self.folder.sel.as_ref().and_then(|s| self.folder.rows.iter().position(|r| &r.path == s)).unwrap_or(0).min(self.folder.rows.len().saturating_sub(1));
+        self.folder.sel = self.sel_row().map(|r| r.path.clone());
+        self.fix_top();
+    }
+    fn fix_top(&mut self) {
+        let f = &mut self.folder;
+        if f.cursor < f.top {
+            f.top = f.cursor;
+        } else if f.cursor >= f.top + FOLDER_ROWS {
+            f.top = f.cursor + 1 - FOLDER_ROWS;
+        }
+        f.top = f.top.min(f.rows.len().saturating_sub(FOLDER_ROWS));
+    }
+    /// Reads what the centre pane shows for the selection; `keep` leaves the scroll where it is (a refresh).
+    fn sync_view(&mut self, keep: bool) {
+        let (hunk, scroll, vscroll) = (self.hunk, self.scroll, self.folder.vscroll);
+        self.folder.view = None;
+        self.hunk = 0;
+        self.scroll = 0;
+        self.folder.vscroll = 0;
+        match self.folder_view() {
+            Some(FileView::Diff(i)) => {
+                self.file = i;
+                if keep {
+                    self.hunk = hunk.min(self.file().map_or(0, |f| f.hunks.len().saturating_sub(1)));
+                    self.scroll = scroll.min(self.max_scroll());
+                }
+            }
+            Some(FileView::Contents) => {
+                let text = self.root().zip(self.folder.sel.as_deref()).map(|(r, p)| read_text(&r.join(p)));
+                self.folder.view = text;
+                if keep {
+                    self.folder.vscroll = vscroll.min(self.view_len().saturating_sub(FILE_ROWS));
+                }
+            }
+            None => {}
+        }
+        self.version += 1;
+    }
+    fn view_len(&self) -> usize {
+        match &self.folder.view {
+            Some(Ok(l)) => l.len(),
+            _ => 0,
+        }
+    }
+    /// Selects the file at `path`, opening the folders above it.
+    pub(crate) fn folder_select(&mut self, path: &str) {
+        let mut at = String::new();
+        for part in path.split('/').collect::<Vec<_>>().split_last().map(|x| x.1).unwrap_or(&[]) {
+            if !at.is_empty() {
+                at.push('/');
+            }
+            at.push_str(part);
+            self.folder.expanded.insert(at.clone());
+        }
+        self.folder.sel = Some(path.to_string());
+        self.rebuild_rows();
+        self.sync_view(false);
+    }
+    fn folder_move(&mut self, d: i32) {
+        let n = self.folder.rows.len();
+        if n == 0 {
+            return;
+        }
+        self.folder.cursor = (self.folder.cursor as i32 + d).clamp(0, n as i32 - 1) as usize;
+        self.folder.sel = self.sel_row().map(|r| r.path.clone());
+        self.fix_top();
+        self.sync_view(false);
+    }
+    /// Enter: a folder opens or closes; a file starts again from its top.
+    fn folder_toggle(&mut self) {
+        let Some(row) = self.sel_row().cloned() else { return };
+        if row.dir {
+            if !self.folder.expanded.remove(&row.path) {
+                self.folder.expanded.insert(row.path);
+            }
+            self.rebuild_rows();
+            self.version += 1;
+        } else {
+            self.sync_view(false);
+        }
+    }
+    /// ←: closes the open folder, else goes up to the folder around the selection.
+    fn folder_left(&mut self) {
+        let Some(row) = self.sel_row().cloned() else { return };
+        if row.dir && row.open {
+            self.folder.expanded.remove(&row.path);
+            self.rebuild_rows();
+            self.version += 1;
+        } else if let Some((parent, _)) = row.path.rsplit_once('/') {
+            let parent = parent.to_string();
+            if let Some(i) = self.folder.rows.iter().position(|r| r.path == parent) {
+                self.folder.cursor = i;
+                self.folder.sel = Some(parent);
+                self.fix_top();
+                self.sync_view(false);
+            }
+        }
+    }
+    /// A click on row `i`: selects it, and opens or closes it when it was already selected.
+    fn folder_pick(&mut self, i: usize) {
+        if i >= self.folder.rows.len() {
+            return;
+        }
+        if i == self.folder.cursor {
+            self.folder_toggle();
+        } else {
+            self.folder.cursor = i;
+            self.folder.sel = self.sel_row().map(|r| r.path.clone());
+            self.fix_top();
+            self.sync_view(false);
+        }
+    }
+    /// Scrolls the centre pane by `d` lines: the diff's hunks, or the file.
+    fn folder_scroll(&mut self, d: i32) {
+        match self.folder_view() {
+            Some(FileView::Diff(_)) => {
+                if d > 0 {
+                    if self.scroll < self.max_scroll() {
+                        self.scroll = (self.scroll + d as usize).min(self.max_scroll());
+                    } else if self.hunk + 1 < self.file().map_or(0, |f| f.hunks.len()) {
+                        self.hunk += 1;
+                        self.scroll = 0;
+                    }
+                } else if self.scroll > 0 {
+                    self.scroll = self.scroll.saturating_sub((-d) as usize);
+                } else if self.hunk > 0 {
+                    self.hunk -= 1;
+                    self.scroll = self.max_scroll();
+                }
+            }
+            Some(FileView::Contents) => {
+                let max = self.view_len().saturating_sub(FILE_ROWS);
+                self.folder.vscroll = (self.folder.vscroll as i32 + d).clamp(0, max as i32) as usize;
+            }
+            None => return,
+        }
+        self.version += 1;
+    }
+    /// H L: the previous or next hunk of the selected file's diff.
+    fn folder_hunk(&mut self, d: i32) {
+        if let Some(FileView::Diff(_)) = self.folder_view() {
+            let n = self.file().map_or(0, |f| f.hunks.len());
+            self.hunk = (self.hunk as i32 + d).clamp(0, n.max(1) as i32 - 1) as usize;
+            self.scroll = 0;
+            self.version += 1;
+        }
+    }
+    /// [ ]: the previous or next changed file.
+    fn folder_changed(&mut self, d: i32) {
+        let Some(r) = &self.review else { return };
+        let present: HashSet<&str> = self.folder.files.iter().map(String::as_str).collect();
+        let paths: Vec<String> = r.files.iter().filter(|f| present.contains(f.path.as_str())).map(|f| f.path.clone()).collect();
+        if paths.is_empty() {
+            return;
+        }
+        let here = self.folder.sel.as_ref().and_then(|s| paths.iter().position(|p| p == s));
+        let i = match (here, d > 0) {
+            (Some(i), _) => (i as i32 + d).clamp(0, paths.len() as i32 - 1) as usize,
+            (None, true) => 0,
+            (None, false) => paths.len() - 1,
+        };
+        let p = paths[i].clone();
+        self.folder_select(&p);
+    }
+    /// The file the editors open and the line: the selected hunk's line for a diff, the top of the view for a file.
+    fn folder_target(&self) -> Option<(String, u32)> {
+        let row = self.sel_row().filter(|r| !r.dir)?;
+        let line = match self.folder_view()? {
+            FileView::Diff(_) => self.file().and_then(|f| f.hunks.get(self.hunk)).map(|h| h.new_start + self.scroll as u32).unwrap_or(1),
+            FileView::Contents => self.folder.vscroll as u32 + 1,
+        };
+        Some((row.path.clone(), line))
+    }
+    /// A read of the folder is in: the tree and the changes follow it, the selection stays on its file.
+    fn folder_loaded(&mut self, l: FolderLoad) {
+        let first = !self.folder.loaded;
+        self.folder.loaded = true;
+        self.folder.git = l.git;
+        self.folder.branch = l.branch;
+        let files_changed = self.folder.files != l.files;
+        let changes_changed = self.review != l.changes;
+        self.folder.files = l.files;
+        self.review = l.changes;
+        if first {
+            let present: HashSet<&str> = self.folder.files.iter().map(String::as_str).collect();
+            let start = self.review.as_ref().and_then(|r| r.files.iter().find(|f| present.contains(f.path.as_str())).map(|f| f.path.clone())).or_else(|| tree_rows(&self.folder.files, &HashSet::new()).into_iter().find(|r| !r.dir).map(|r| r.path));
+            match start {
+                Some(p) => self.folder_select(&p),
+                None => self.rebuild_rows(),
+            }
+        } else if files_changed || changes_changed {
+            self.rebuild_rows();
+            self.sync_view(true);
+        }
+        self.version += 1;
+    }
+}
+
 /// A click on an agent chip picks the nth agent of the repo (file rows are numbered below this).
 const AGENT_PICK: usize = 10_000;
 
@@ -246,6 +709,10 @@ pub struct CodeRoots {
 pub fn setup(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut images: ResMut<Assets<Image>>, (home, mut atlases): (Res<PanelAtlas>, ResMut<AppAtlases>), mut pmats: ResMut<Assets<PanelMaterial>>, args: Res<crate::Args>, mut app: ResMut<CodeApp>) {
     if args.code {
         app.open();
+    }
+    // look tests: open a folder at start (see SPHERE_CODE_KEYS for keys played once it is read)
+    if let Some(d) = std::env::var_os("SPHERE_CODE_DIR") {
+        app.open_folder(PathBuf::from(d));
     }
     // the app's own atlas, sharper than the home's (see `AppAtlases`)
     let mut atlas = Atlas::new(&mut commands, &mut images, home.scale * APP_SHARP, -11);
@@ -291,6 +758,54 @@ fn scroll_key(pane: Option<u8>, down: bool) -> Option<KeyCode> {
     }
 }
 
+/// The wheel over the folder's panes: lines of the file or diff, rows of the tree, changed files.
+fn folder_scroll_key(pane: Option<u8>, down: bool) -> Option<KeyCode> {
+    match (Pane::ALL.get(pane? as usize)?, down) {
+        (Pane::Diff, true) => Some(KeyCode::PageDown),
+        (Pane::Diff, false) => Some(KeyCode::PageUp),
+        (Pane::Task, true) => Some(KeyCode::KeyJ),
+        (Pane::Task, false) => Some(KeyCode::KeyK),
+        (Pane::Tree, true) => Some(KeyCode::BracketRight),
+        (Pane::Tree, false) => Some(KeyCode::BracketLeft),
+        _ => None,
+    }
+}
+
+/// R: starts the tests in `wd`, or stops the run that is going.
+fn press_r(app: &mut CodeApp, wd: Option<String>, toasts: &mut crate::live::Toasts, sound: &mut crate::sound::Sound) {
+    match wd {
+        Some(wd) => {
+            if app.tests.as_ref().is_some_and(|t| !t.done) {
+                if let Some(c) = &app.tests_cancel {
+                    c.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+                toasts.push_quiet("Stopping the tests");
+                sound.play("toggle");
+            } else {
+                run_tests(app, wd, toasts);
+                sound.play("progress");
+            }
+        }
+        None => toasts.push("No worktree to test"),
+    }
+}
+
+/// Z (or the folder button) in folder mode: the selected file at its line, or the whole folder, in Zed's own window.
+fn zed_from_folder(app: &CodeApp, whole: bool, toasts: &mut crate::live::Toasts, sound: &mut crate::sound::Sound) {
+    let Some(root) = app.root() else { return };
+    let (target, line, what) = match app.folder_target().filter(|_| !whole) {
+        Some((p, l)) => (root.join(&p), Some(l), format!("{p}:{l}")),
+        None => (root.to_path_buf(), None, tilde(root)),
+    };
+    match crate::editors::open_in_zed(&target, line) {
+        Ok(()) => {
+            toasts.push_quiet(format!("Opening {what} in Zed"));
+            sound.play("open");
+        }
+        Err(e) => toasts.push(e),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn keys(
     mut ev: MessageReader<bevy::input::keyboard::KeyboardInput>,
@@ -303,9 +818,11 @@ pub fn keys(
     mut toasts: ResMut<crate::live::Toasts>,
     (mut clicks, mut scrolls): (ResMut<crate::appframe::AppClicks>, ResMut<crate::appframe::AppScrolls>),
     mut cmd_was: Local<bool>,
+    mut terms: ResMut<crate::term::Terms>,
 ) {
     let mut focus = focus;
     let mods = keys.any_pressed([KeyCode::SuperLeft, KeyCode::SuperRight, KeyCode::ControlLeft, KeyCode::ControlRight, KeyCode::AltLeft, KeyCode::AltRight]);
+    let shift = keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]);
     // the bar closing this frame (Esc, Enter) doesn't also act here
     let bar_busy = focus.cmd || *cmd_was;
     *cmd_was = focus.cmd;
@@ -321,11 +838,25 @@ pub fn keys(
         codes.push(e.key_code);
     }
     // the wheel: over the diff it steps lines, over the files it steps files
-    codes.extend(crate::appframe::scroll_keys(scrolls.take(0), scroll_key));
+    let folder = app.is_folder();
+    codes.extend(crate::appframe::scroll_keys(scrolls.take(0), if folder { folder_scroll_key } else { scroll_key }));
     // clicks on the panes: a button presses its key, a row picks its item
     for c in clicks.take(0) {
         match c {
             Click::Key(k) => codes.push(k),
+            // a row of the folder's file tree
+            Click::Pick(i) if i >= TREE_PICK => {
+                if folder {
+                    app.folder_pick(i - TREE_PICK);
+                }
+            }
+            // a changed file in folder mode opens in the tree
+            Click::Pick(i) if folder => {
+                let path = app.review.as_ref().and_then(|r| r.files.get(i)).map(|f| f.path.clone());
+                if let Some(p) = path.filter(|p| app.folder.files.contains(p)) {
+                    app.folder_select(&p);
+                }
+            }
             // a file row, or (10000 and up) an agent chip
             Click::Pick(i) if i >= AGENT_PICK => {
                 let id = {
@@ -355,6 +886,10 @@ pub fn keys(
         }
     }
     for key in codes {
+        if folder {
+            folder_key(key, shift, &mut app, &mut terms, &mut focus, &mut toasts, &mut sound);
+            continue;
+        }
         let task = { pick(&app, &svc.shared.lock().unwrap().tasks).cloned() };
         match key {
             KeyCode::Escape => {
@@ -412,21 +947,7 @@ pub fn keys(
                     sound.play("toggle");
                 }
             }
-            KeyCode::KeyR => match task.as_ref().and_then(|t| t.workdir.clone()) {
-                Some(wd) => {
-                    if app.tests.as_ref().is_some_and(|t| !t.done) {
-                        if let Some(c) = &app.tests_cancel {
-                            c.store(true, std::sync::atomic::Ordering::Relaxed);
-                        }
-                        toasts.push_quiet("Stopping the tests");
-                        sound.play("toggle");
-                    } else {
-                        run_tests(&mut app, wd, &mut toasts);
-                        sound.play("progress");
-                    }
-                }
-                None => toasts.push("No worktree to test"),
-            },
+            KeyCode::KeyR => press_r(&mut app, task.as_ref().and_then(|t| t.workdir.clone()), &mut toasts, &mut sound),
             KeyCode::KeyE => {
                 if let Some(t) = &task {
                     bar.ask(t.id.clone(), t.title.clone(), &mut focus);
@@ -437,7 +958,7 @@ pub fn keys(
                 let target = app.file().map(|f| (f.path.clone(), f.hunks.get(app.hunk).map(|h| h.new_start + app.scroll as u32).unwrap_or(1), f.status == review::Status::Deleted));
                 match (task.as_ref().and_then(|t| t.workdir.clone()), target) {
                     (Some(_), Some((path, _, true))) => toasts.push(format!("{path} was deleted: nothing to open")),
-                    (Some(wd), Some((path, line, _))) => match open_in_zed(&wd, &path, line) {
+                    (Some(wd), Some((path, line, _))) => match crate::editors::open_in_zed(&Path::new(&wd).join(&path), Some(line)) {
                         Ok(()) => {
                             toasts.push_quiet(format!("Opening {path}:{line} in Zed"));
                             sound.play("open");
@@ -483,6 +1004,71 @@ pub fn keys(
             }
             _ => {}
         }
+    }
+}
+
+/// A key in folder mode. J K move through the tree, Enter opens or closes, PgUp PgDn scroll the file or diff, H L
+/// hunks, [ ] changed files, E edits in Helix, Z opens in Zed (Shift or F: the whole folder), R runs the tests. The
+/// agent's actions (merge, PR, ask, discard) aren't here at all.
+fn folder_key(key: KeyCode, shift: bool, app: &mut CodeApp, terms: &mut crate::term::Terms, focus: &mut Focus, toasts: &mut crate::live::Toasts, sound: &mut crate::sound::Sound) {
+    match key {
+        KeyCode::Escape => {
+            app.close();
+            sound.play_with("collapse", 0.7, 0.0);
+        }
+        KeyCode::KeyJ | KeyCode::ArrowDown => {
+            app.folder_move(1);
+            sound.play_q("tick", 40);
+        }
+        KeyCode::KeyK | KeyCode::ArrowUp => {
+            app.folder_move(-1);
+            sound.play_q("tick", 40);
+        }
+        KeyCode::Enter | KeyCode::ArrowRight => {
+            app.folder_toggle();
+            sound.play_q("tick", 40);
+        }
+        KeyCode::ArrowLeft => {
+            app.folder_left();
+            sound.play_q("tick", 40);
+        }
+        KeyCode::PageDown => {
+            app.folder_scroll(HUNK_ROWS as i32 - 2);
+            sound.play_q("tick", 40);
+        }
+        KeyCode::PageUp => {
+            app.folder_scroll(-(HUNK_ROWS as i32 - 2));
+            sound.play_q("tick", 40);
+        }
+        KeyCode::KeyL => app.folder_hunk(1),
+        KeyCode::KeyH => app.folder_hunk(-1),
+        KeyCode::BracketRight => {
+            app.folder_changed(1);
+            sound.play_q("tick", 40);
+        }
+        KeyCode::BracketLeft => {
+            app.folder_changed(-1);
+            sound.play_q("tick", 40);
+        }
+        KeyCode::KeyR => {
+            let wd = app.root().map(|r| r.to_string_lossy().to_string());
+            press_r(app, wd, toasts, sound);
+        }
+        KeyCode::KeyE => match (app.root().map(Path::to_path_buf), app.folder_target()) {
+            (Some(root), Some((path, line))) => match crate::editors::edit_in_helix(terms, focus, &root.join(&path), Some(line)) {
+                Ok(()) => {
+                    // the terminal is behind the app: put the app away so the editor shows
+                    app.close();
+                    toasts.push_quiet(format!("Editing {path} in Helix · :q comes back"));
+                    sound.play("open");
+                }
+                Err(e) => toasts.push(e),
+            },
+            _ => toasts.push("Select a file to edit"),
+        },
+        KeyCode::KeyZ => zed_from_folder(app, shift, toasts, sound),
+        KeyCode::KeyF => zed_from_folder(app, true, toasts, sound),
+        _ => {}
     }
 }
 
@@ -589,16 +1175,6 @@ fn discard(repo: &str, wd: &str, in_place: bool) -> Result<String, String> {
     Ok("Discarded · the worktree is gone, its branch stays".into())
 }
 
-fn open_in_zed(wd: &str, path: &str, line: u32) -> Result<(), String> {
-    let target = format!("{}:{line}", std::path::Path::new(wd).join(path).display());
-    let cli = ["/Applications/Zed.app/Contents/MacOS/cli", "/usr/local/bin/zed", "/opt/homebrew/bin/zed"].into_iter().find(|p| std::path::Path::new(p).exists());
-    let cmd = cli.map(str::to_string).or_else(|| std::process::Command::new("zed").arg("--version").output().ok().map(|_| "zed".to_string()));
-    match cmd {
-        Some(c) => std::process::Command::new(c).arg(target).spawn().map(|_| ()).map_err(|e| format!("Zed: {e}")),
-        None => Err("Zed isn't installed (zed.dev)".into()),
-    }
-}
-
 fn run_tests(app: &mut CodeApp, wd: String, toasts: &mut crate::live::Toasts) {
     let cmd = match review::detect_tests(&wd) {
         Ok(c) => c,
@@ -647,6 +1223,55 @@ pub fn update(sim: Res<crate::core::Sim>, mut atlases: ResMut<AppAtlases>, mut a
         }
         app.tests = Some(t);
         app.version += 1;
+    }
+    if let Source::Folder(root) = app.source.clone() {
+        let got = app.folder_rx.as_ref().and_then(|r| match r.lock().ok()?.try_recv() {
+            Ok(v) => Some(Some(v)),
+            Err(mpsc::TryRecvError::Disconnected) => Some(None),
+            Err(_) => None,
+        });
+        match got {
+            Some(Some(l)) => {
+                app.loading = false;
+                let first = !app.folder.loaded;
+                app.folder_loaded(l);
+                // look tests: SPHERE_CODE_KEYS plays keys once the folder is read (j k move, x opens or closes, v pages,
+                // ] [ changed files, l h hunks, r runs the tests)
+                if let (true, Ok(keys)) = (first, std::env::var("SPHERE_CODE_KEYS")) {
+                    for k in keys.chars() {
+                        match k {
+                            'j' => app.folder_move(1),
+                            'k' => app.folder_move(-1),
+                            'x' => app.folder_toggle(),
+                            'v' => app.folder_scroll(HUNK_ROWS as i32 - 2),
+                            ']' => app.folder_changed(1),
+                            '[' => app.folder_changed(-1),
+                            'l' => app.folder_hunk(1),
+                            'h' => app.folder_hunk(-1),
+                            'r' => run_tests(&mut app, root.to_string_lossy().to_string(), &mut toasts),
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            Some(None) => app.loading = false,
+            None => {}
+        }
+        if !app.open || app.loading {
+            return;
+        }
+        // read the folder when it opens and then every few seconds, so edits made elsewhere show up
+        if app.loaded.0.is_empty() || sim.t - app.load_t > 3.0 {
+            app.loaded.0 = root.to_string_lossy().to_string();
+            app.load_t = sim.t;
+            app.loading = true;
+            let (tx, rx) = mpsc::channel();
+            app.folder_rx = Some(Mutex::new(rx));
+            std::thread::spawn(move || {
+                let _ = tx.send(load_folder(&root));
+            });
+        }
+        return;
     }
     let got = app.load_rx.as_ref().and_then(|r| match r.lock().ok()?.try_recv() {
         Ok(v) => Some(Some(v)),
@@ -784,9 +1409,10 @@ pub fn draw(mut commands: Commands, app: Res<CodeApp>, svc: Res<Service>, roots:
     if app.amt.x < 0.001 && !app.open {
         return;
     }
+    let folder = app.is_folder();
     let (task, run, agents, sver, link) = {
         let s = svc.shared.lock().unwrap();
-        let t = pick(&app, &s.tasks).cloned();
+        let t = if folder { None } else { pick(&app, &s.tasks).cloned() };
         let run = t.as_ref().and_then(|t| s.runs.get(&t.id).cloned()).unwrap_or_default();
         let agents: Vec<TaskView> = t.as_ref().map(|t| repo_tasks(&s.tasks, &t.repo).into_iter().cloned().collect()).unwrap_or_default();
         (t, run, (agents, s.merged.clone()), s.version, s.link.clone())
@@ -808,10 +1434,16 @@ pub fn draw(mut commands: Commands, app: Res<CodeApp>, svc: Res<Service>, roots:
     let needs = agents.iter().filter(|t| t.state == TaskState::NeedsYou).count();
     let lab = c.spawn(Node { flex_direction: FlexDirection::Column, row_gap: px(5), padding: UiRect::top(px(4)), ..default() }).id();
     let l1 = ui.text(c, "CODE", &f.ui600, 11.0, 3.1, ui.hot);
-    let (l2s, l2c) = if needs > 0 { (format!("{needs} agent{} needs you", if needs == 1 { "" } else { "s" }), role_color(Role::Acc)) } else { (format!("{} agent{} on this repo", agents.len(), if agents.len() == 1 { "" } else { "s" }), ui.line) };
+    let (l2s, l2c) = if folder {
+        (if app.folder.git { format!("folder · {}", clip(&app.folder.branch, 24)) } else { "folder".to_string() }, ui.line)
+    } else if needs > 0 { (format!("{needs} agent{} needs you", if needs == 1 { "" } else { "s" }), role_color(Role::Acc)) } else { (format!("{} agent{} on this repo", agents.len(), if agents.len() == 1 { "" } else { "s" }), ui.line) };
     let l2 = ui.text(c, l2s, &f.ui500, 11.5, 1.2, l2c);
     c.entity(lab).add_children(&[l1, l2]);
     c.entity(roots.corelab).add_child(lab);
+    if let Source::Folder(dir) = &app.source {
+        draw_folder(c, &ui, &roots, &app, dir);
+        return;
+    }
     draw_top(c, &ui, root(Pane::Top), task.as_ref());
     draw_strip(c, &ui, root(Pane::Strip), &agents, &merged, task.as_ref());
     let Some(t) = task else {
@@ -832,25 +1464,39 @@ pub fn draw(mut commands: Commands, app: Res<CodeApp>, svc: Res<Service>, roots:
         return;
     };
     draw_task(c, &ui, root(Pane::Task), &t, &run, app.review.as_ref());
-    draw_tree(c, &ui, root(Pane::Tree), &app);
+    draw_tree(c, &ui, root(Pane::Tree), &app, Some(app.file));
     draw_diff(c, &ui, root(Pane::Diff), &app, &run);
-    draw_tests(c, &ui, root(Pane::Tests), &t, app.tests.as_ref());
+    draw_tests(c, &ui, root(Pane::Tests), t.workdir.as_deref(), "the agent's worktree", app.tests.as_ref());
     draw_acts(c, &ui, root(Pane::Acts), &app);
 }
 
 fn draw_top(c: &mut Commands, ui: &Ui, root: Entity, t: Option<&TaskView>) {
+    let repo = t.map(|t| clip(&Path::new(&t.repo).file_name().map(|s| s.to_string_lossy().to_uppercase()).unwrap_or_default(), 40)).unwrap_or_default();
+    top_bar(c, ui, root, format!("{repo} · REVIEW"), None, "diff after delta (MIT) · git · editor: Zed (GPL-3.0)");
+}
+
+/// The bar along the top: the app, what it is on, and (folder mode) the folder's path and branch.
+fn top_bar(c: &mut Commands, ui: &Ui, root: Entity, sub: String, where_: Option<(String, String)>, credit: &str) {
     let r = c.spawn(Node { width: percent(100), height: percent(100), flex_direction: FlexDirection::Row, align_items: AlignItems::Center, column_gap: px(12), ..default() }).id();
     c.entity(root).add_child(r);
     let ic = ui.text(c, "</>", &ui.f.mono, 12.0, 0.0, ui.hot);
     let name = ui.text(c, "CODE", &ui.f.ui600, 11.0, 3.5, ui.hot);
-    let repo = t.map(|t| clip(&std::path::Path::new(&t.repo).file_name().map(|s| s.to_string_lossy().to_uppercase()).unwrap_or_default(), 40)).unwrap_or_default();
-    let sub = ui.text(c, format!("{repo} · REVIEW"), &ui.f.ui500, 11.0, 2.6, ui.dim);
+    let sub = ui.text(c, sub, &ui.f.ui500, 11.0, 2.6, ui.dim);
     let sp = c.spawn(Node { flex_grow: 1.0, ..default() }).id();
-    let credit = ui.text(c, "diff after delta (MIT) · git · editor: Zed (GPL-3.0)", &ui.f.ui500, 10.5, 1.0, ui.dim);
+    let credit = ui.text(c, credit, &ui.f.ui500, 10.5, 1.0, ui.dim);
     let esc = c.spawn((Node { padding: UiRect { left: px(6), right: px(6), top: px(3), bottom: px(2) }, border: UiRect::all(px(1)), ..default() }, BorderColor::all(with_alpha(ui.line, 0.55)), Click::Key(KeyCode::Escape))).id();
     let et = ui.text(c, "ESC", &ui.f.ui700, 10.0, 1.6, ui.hot);
     c.entity(esc).add_child(et);
-    c.entity(r).add_children(&[ic, name, sub, sp, credit, esc]);
+    c.entity(r).add_children(&[ic, name, sub]);
+    if let Some((path, branch)) = where_ {
+        let p = ui.text(c, path, &ui.f.mono, 12.0, 0.0, ui.hot);
+        c.entity(r).add_child(p);
+        if !branch.is_empty() {
+            let b = ui.text(c, branch, &ui.f.mono, 12.0, 0.0, role_color(Role::Acc));
+            c.entity(r).add_child(b);
+        }
+    }
+    c.entity(r).add_children(&[sp, credit, esc]);
 }
 
 fn draw_task(c: &mut Commands, ui: &Ui, root: Entity, t: &TaskView, run: &crate::service::Run, r: Option<&Review>) {
@@ -946,10 +1592,12 @@ fn bar_blocks(c: &mut Commands, ui: &Ui, add: usize, del: usize) -> Entity {
     row
 }
 
-fn draw_tree(c: &mut Commands, ui: &Ui, root: Entity, app: &CodeApp) {
+fn draw_tree(c: &mut Commands, ui: &Ui, root: Entity, app: &CodeApp, selected: Option<usize>) {
     let b = ui.body(c, root);
     let r = app.review.as_ref();
+    let folder = app.is_folder();
     let sum = match r {
+        Some(r) if folder && !r.files.is_empty() => format!("{} changed · +{} −{}", r.files.len(), r.added(), r.removed()),
         Some(r) if r.error.is_some() => String::new(),
         Some(r) if r.files.is_empty() => String::new(),
         Some(r) => format!("{} of {} files · +{} −{}{}", app.file + 1, r.files.len(), r.added(), r.removed(), if r.more > 0 { format!(" · {} more not listed", r.more) } else { String::new() }),
@@ -959,7 +1607,13 @@ fn draw_tree(c: &mut Commands, ui: &Ui, root: Entity, app: &CodeApp) {
     let h = ui.header(c, "Changed files", &sum, ui.dim);
     let list = c.spawn(Node { flex_direction: FlexDirection::Column, padding: UiRect { left: px(10), right: px(14), top: px(8), ..default() }, ..default() }).id();
     c.entity(b).add_children(&[h, list]);
-    let Some(r) = r else { return };
+    let Some(r) = r else {
+        if folder && app.folder.loaded && !app.folder.git {
+            let t = c.spawn((Text::new("Not a git repo: no changes to track"), font(&ui.f.ui500, 13.0, 0.4), TextColor(ui.dim), Node { margin: UiRect::all(px(18)), ..default() })).id();
+            c.entity(list).add_child(t);
+        }
+        return;
+    };
     let note = |c: &mut Commands, s: String, col: Color| {
         let t = c.spawn((Text::new(s), font(&ui.f.ui500, 13.0, 0.4), TextColor(col), LineHeight::Px(18.0), Node { margin: UiRect::left(px(10)), ..default() })).id();
         c.entity(list).add_child(t);
@@ -969,13 +1623,14 @@ fn draw_tree(c: &mut Commands, ui: &Ui, root: Entity, app: &CodeApp) {
         return;
     }
     if r.files.is_empty() {
-        let s = if r.merged { format!("Merged into {}: nothing left to review", r.base) } else { format!("No changes yet against {}", r.base) };
+        let s = if folder { "Clean: no uncommitted changes".to_string() } else if r.merged { format!("Merged into {}: nothing left to review", r.base) } else { format!("No changes yet against {}", r.base) };
         note(c, s, ui.dim);
         return;
     }
-    let first = app.file.saturating_sub(TREE_ROWS - 1).min(r.files.len().saturating_sub(TREE_ROWS));
+    let at = selected.unwrap_or(0);
+    let first = at.saturating_sub(TREE_ROWS - 1).min(r.files.len().saturating_sub(TREE_ROWS));
     for (i, fd) in r.files.iter().enumerate().skip(first).take(TREE_ROWS) {
-        let sel = i == app.file;
+        let sel = selected == Some(i);
         let row = c
             .spawn((
                 Node { flex_direction: FlexDirection::Row, align_items: AlignItems::Center, height: px(22), padding: UiRect { left: px(10), right: px(4), ..default() }, border: UiRect::left(px(2)), column_gap: px(8), flex_shrink: 0.0, ..default() },
@@ -1012,7 +1667,8 @@ fn draw_tree(c: &mut Commands, ui: &Ui, root: Entity, app: &CodeApp) {
 
 fn draw_diff(c: &mut Commands, ui: &Ui, root: Entity, app: &CodeApp, run: &crate::service::Run) {
     let b = ui.body(c, root);
-    let h = ui.header(c, "Diff", "J K lines · H L hunks · [ ] files · Z open in Zed", ui.dim);
+    let folder = app.is_folder();
+    let h = ui.header(c, "Diff", if folder { "PgUp PgDn lines · H L hunks · [ ] changed files · E Helix · Z Zed" } else { "J K lines · H L hunks · [ ] files · Z open in Zed" }, ui.dim);
     c.entity(b).add_child(h);
     let Some(fd) = app.file() else {
         let msg = match app.review.as_ref() {
@@ -1040,7 +1696,8 @@ fn draw_diff(c: &mut Commands, ui: &Ui, root: Entity, app: &CodeApp, run: &crate
         let pos = ui.text(c, format!("{}–{} of {}", app.scroll + 1, end, hk.lines.len()), &ui.f.mono, 11.0, 0.0, ui.dim);
         c.entity(fh).add_child(pos);
     }
-    for (label, key) in [("K ↑", KeyCode::KeyK), ("J ↓", KeyCode::KeyJ), ("H ‹", KeyCode::KeyH), ("L ›", KeyCode::KeyL)] {
+    let chips = if folder { [("PGUP", KeyCode::PageUp), ("PGDN", KeyCode::PageDown), ("H ‹", KeyCode::KeyH), ("L ›", KeyCode::KeyL)] } else { [("K ↑", KeyCode::KeyK), ("J ↓", KeyCode::KeyJ), ("H ‹", KeyCode::KeyH), ("L ›", KeyCode::KeyL)] };
+    for (label, key) in chips {
         let chip = c.spawn((Node { padding: UiRect { left: px(5), right: px(5), top: px(2), bottom: px(1) }, border: UiRect::all(px(1)), flex_shrink: 0.0, ..default() }, BorderColor::all(with_alpha(ui.line, 0.4)), Click::Key(key))).id();
         let t = ui.text(c, label, &ui.f.mono, 11.0, 0.0, ui.line);
         c.entity(chip).add_child(t);
@@ -1149,17 +1806,17 @@ fn draw_diff(c: &mut Commands, ui: &Ui, root: Entity, app: &CodeApp, run: &crate
     }
 }
 
-fn draw_tests(c: &mut Commands, ui: &Ui, root: Entity, t: &TaskView, run: Option<&TestRun>) {
+fn draw_tests(c: &mut Commands, ui: &Ui, root: Entity, wd: Option<&str>, what: &str, run: Option<&TestRun>) {
     let b = ui.body(c, root);
-    let cmd = run.map(|r| r.command.clone()).or_else(|| t.workdir.as_deref().and_then(review::test_command).map(|v| v.join(" "))).unwrap_or_else(|| "no test command".into());
+    let cmd = run.map(|r| r.command.clone()).or_else(|| wd.and_then(review::test_command).map(|v| v.join(" "))).unwrap_or_else(|| "no test command".into());
     let short = cmd.split(" --").next().unwrap_or(&cmd).to_string();
     let h = ui.header(c, "Tests", &short, ui.dim);
     let inner = c.spawn(Node { flex_direction: FlexDirection::Column, row_gap: px(6), padding: UiRect { left: px(18), right: px(16), top: px(12), bottom: px(10) }, flex_grow: 1.0, ..default() }).id();
     c.entity(b).add_children(&[h, inner]);
     let Some(r) = run else {
-        let msg = match t.workdir.as_deref().map(review::detect_tests) {
+        let msg = match wd.map(review::detect_tests) {
             Some(Err(e)) => e,
-            _ => "Not run yet. R (or click) runs the repo's tests in the agent's worktree.".to_string(),
+            _ => format!("Not run yet. R (or click) runs the repo's tests in {what}."),
         };
         let m = c.spawn((Text::new(msg), font(&ui.f.ui500, 13.0, 0.4), TextColor(ui.line), LineHeight::Px(17.0), Click::Key(KeyCode::KeyR))).id();
         c.entity(inner).add_child(m);
@@ -1241,18 +1898,12 @@ fn draw_acts(c: &mut Commands, ui: &Ui, root: Entity, app: &CodeApp) {
         },
         None => "tests not run".into(),
     };
-    let h = ui.header(c, "Review", &format!("+{a} −{d} · {tests}"), ui.dim);
+    let h = ui.header(c, if app.is_folder() { "Actions" } else { "Review" }, &format!("+{a} −{d} · {tests}"), ui.dim);
     let inner = c.spawn(Node { flex_direction: FlexDirection::Column, row_gap: px(9), padding: UiRect { left: px(16), right: px(16), top: px(14), bottom: px(14) }, ..default() }).id();
     c.entity(b).add_children(&[h, inner]);
     let armed = app.armed.map(|x| x.0);
-    let buttons: [(&str, &str, Option<Act>, Role, bool); 5] = [
-        ("MERGE", "M", Some(Act::Merge), Role::Hot, true),
-        ("OPEN PR", "P", Some(Act::Pr), Role::Hot, false),
-        ("ASK FOR CHANGE", "E", None, Role::Hot, false),
-        ("OPEN IN ZED", "Z", None, Role::Hot, false),
-        ("DISCARD", "D", Some(Act::Discard), Role::Bad, false),
-    ];
-    for (label, key, act, role, filled) in buttons {
+    let buttons = action_buttons(app.is_folder());
+    for (label, key, code, act, role, filled) in buttons {
         let is_armed = act.is_some() && act == armed;
         // armed: amber (red for discard) until you press again
         let col = if is_armed && role != Role::Bad { role_color(Role::Acc) } else { role_color(role) };
@@ -1262,13 +1913,7 @@ fn draw_acts(c: &mut Commands, ui: &Ui, root: Entity, app: &CodeApp) {
                 Node { height: px(34), flex_direction: FlexDirection::Row, align_items: AlignItems::Center, padding: UiRect { left: px(12), right: px(10), ..default() }, border: UiRect::all(px(1)), ..default() },
                 BackgroundColor(if fill { if is_armed && role == Role::Bad { col } else { with_alpha(col, if is_armed { 1.0 } else { 0.92 }) } } else { with_alpha(ui.line, 0.06) }),
                 BorderColor::all(if fill { col } else { with_alpha(col, 0.55) }),
-                Click::Key(match key {
-                    "M" => KeyCode::KeyM,
-                    "P" => KeyCode::KeyP,
-                    "E" => KeyCode::KeyE,
-                    "Z" => KeyCode::KeyZ,
-                    _ => KeyCode::KeyD,
-                }),
+                Click::Key(code),
             ))
             .id();
         let text = if is_armed { format!("PRESS {key} AGAIN") } else { label.to_string() };
@@ -1281,6 +1926,151 @@ fn draw_acts(c: &mut Commands, ui: &Ui, root: Entity, app: &CodeApp) {
         c.entity(btn).add_children(&[t, sp, kb]);
         c.entity(inner).add_child(btn);
     }
+}
+
+// ------------------------------------------------------------------ folder mode: drawing
+
+fn pane_root(roots: &CodeRoots, p: Pane) -> Entity {
+    roots.panes.iter().find(|x| x.0 == p).map(|x| x.1).unwrap()
+}
+
+/// The panes of a folder: its files on the left, the selected file (or its diff) in the middle, the repo's
+/// uncommitted changes above it, the tests and the editors on the right.
+fn draw_folder(c: &mut Commands, ui: &Ui, roots: &CodeRoots, app: &CodeApp, dir: &Path) {
+    let root = |p: Pane| pane_root(roots, p);
+    let name = dir.file_name().map(|s| clip(&s.to_string_lossy().to_uppercase(), 30)).unwrap_or_else(|| "/".into());
+    let branch = if app.folder.git { app.folder.branch.clone() } else { String::new() };
+    top_bar(c, ui, root(Pane::Top), format!("{name} · FOLDER"), Some((clip_start(&tilde(dir), 60), branch)), "diff after delta (MIT) · git · editors: Helix (MPL-2.0), Zed (GPL-3.0)");
+    draw_folder_strip(c, ui, root(Pane::Strip), dir, app);
+    draw_folder_files(c, ui, root(Pane::Task), app);
+    let sel = match app.folder_view() {
+        Some(FileView::Diff(i)) => Some(i),
+        _ => None,
+    };
+    draw_tree(c, ui, root(Pane::Tree), app, sel);
+    match sel {
+        Some(_) => draw_diff(c, ui, root(Pane::Diff), app, &crate::service::Run::default()),
+        None => draw_file_view(c, ui, root(Pane::Diff), app),
+    }
+    draw_tests(c, ui, root(Pane::Tests), Some(&dir.to_string_lossy()), "the folder", app.tests.as_ref());
+    draw_acts(c, ui, root(Pane::Acts), app);
+}
+
+/// The left pane: the folder as a tree, folders first. Changed files carry their git letter.
+fn draw_folder_files(c: &mut Commands, ui: &Ui, root: Entity, app: &CodeApp) {
+    let b = ui.body(c, root);
+    let f = &app.folder;
+    let sum = if !f.loaded { "reading…".to_string() } else { format!("{} file{}", f.files.len(), if f.files.len() == 1 { "" } else { "s" }) };
+    let h = ui.header(c, "Files", &sum, ui.dim);
+    let list = c.spawn(Node { flex_direction: FlexDirection::Column, padding: UiRect { left: px(6), right: px(8), top: px(6), ..default() }, ..default() }).id();
+    c.entity(b).add_children(&[h, list]);
+    if f.loaded && f.rows.is_empty() {
+        let t = ui.text(c, "An empty folder", &ui.f.ui500, 13.0, 0.4, ui.dim);
+        c.entity(list).add_child(t);
+    }
+    let status: std::collections::HashMap<&str, review::Status> = app.review.iter().flat_map(|r| r.files.iter().map(|x| (x.path.as_str(), x.status))).collect();
+    for (i, row) in f.rows.iter().enumerate().skip(f.top).take(FOLDER_ROWS) {
+        let sel = i == f.cursor;
+        let el = c
+            .spawn((
+                Node { flex_direction: FlexDirection::Row, align_items: AlignItems::Center, height: px(22), padding: UiRect { left: px(6.0 + row.depth as f32 * 12.0), right: px(4), ..default() }, border: UiRect::left(px(2)), column_gap: px(6), flex_shrink: 0.0, overflow: Overflow::clip(), ..default() },
+                BackgroundColor(if sel { with_alpha(ui.line, 0.10) } else { Color::NONE }),
+                BorderColor::all(if sel { ui.hot } else { Color::NONE }),
+                Click::Pick(TREE_PICK + i),
+            ))
+            .id();
+        let mark = c.spawn((Text::new(if !row.dir { " " } else if row.open { "−" } else { "+" }), font(&ui.f.mono, 12.0, 0.0), TextColor(ui.dim), Node { width: px(10), flex_shrink: 0.0, ..default() })).id();
+        let shown = clip(&row.name, 26usize.saturating_sub(row.depth * 2).max(8));
+        let nt = c.spawn((Text::new(if row.dir { format!("{shown}/") } else { shown }), font(&ui.f.mono, 12.0, 0.0), TextColor(if sel || row.dir { ui.hot } else { ui.line }), TextLayout { linebreak: LineBreak::NoWrap, ..default() }, Node { flex_grow: 1.0, flex_shrink: 1.0, overflow: Overflow::clip(), ..default() })).id();
+        c.entity(el).add_children(&[mark, nt]);
+        if let Some(st) = status.get(row.path.as_str()) {
+            let col = match st {
+                review::Status::Added => role_color(Role::Ok),
+                review::Status::Deleted => role_color(Role::Bad),
+                review::Status::Renamed => role_color(Role::Acc),
+                review::Status::Modified => role_color(Role::Acc),
+            };
+            let t = c.spawn((Text::new(st.letter()), font(&ui.f.mono, 11.0, 0.0), TextColor(col), Node { flex_shrink: 0.0, ..default() })).id();
+            c.entity(el).add_child(t);
+        }
+        c.entity(list).add_child(el);
+    }
+}
+
+/// The middle pane for a file with no diff: its contents with line numbers.
+fn draw_file_view(c: &mut Commands, ui: &Ui, root: Entity, app: &CodeApp) {
+    let b = ui.body(c, root);
+    let h = ui.header(c, "File", "PgUp PgDn lines · J K files · E Helix · Z Zed", ui.dim);
+    c.entity(b).add_child(h);
+    let say = |c: &mut Commands, s: &str| {
+        let t = c.spawn((Text::new(s.to_string()), font(&ui.f.ui500, 13.0, 0.4), TextColor(ui.dim), Node { margin: UiRect::all(px(18)), ..default() })).id();
+        c.entity(b).add_child(t);
+    };
+    let Some(row) = app.sel_row() else {
+        say(c, if app.folder.loaded { "Nothing to show" } else { "Reading the folder…" });
+        return;
+    };
+    if row.dir {
+        let n = app.folder.files.iter().filter(|p| p.starts_with(&format!("{}/", row.path))).count();
+        say(c, &format!("{}/ · {n} file{} · Enter {}", row.path, if n == 1 { "" } else { "s" }, if row.open { "closes it" } else { "opens it" }));
+        return;
+    }
+    let fh = c.spawn(Node { flex_direction: FlexDirection::Row, align_items: AlignItems::Center, column_gap: px(10), padding: UiRect { left: px(18), right: px(18), top: px(8), bottom: px(6) }, flex_shrink: 0.0, ..default() }).id();
+    let tri = ui.text(c, "≡", &ui.f.mono, 13.0, 0.0, role_color(Role::Acc));
+    let pt = ui.text(c, clip_start(&row.path, 56), &ui.f.mono, 13.0, 0.0, ui.hot);
+    let sp = c.spawn(Node { flex_grow: 1.0, ..default() }).id();
+    c.entity(fh).add_children(&[tri, pt, sp]);
+    let body = c.spawn(Node { flex_direction: FlexDirection::Column, margin: UiRect { left: px(14), right: px(14), ..default() }, ..default() }).id();
+    c.entity(b).add_children(&[fh, body]);
+    let say_in = |c: &mut Commands, s: String| {
+        let t = ui.text(c, s, &ui.f.ui500, 13.0, 0.4, ui.dim);
+        c.entity(body).add_child(t);
+    };
+    match &app.folder.view {
+        None => say_in(c, "Reading…".into()),
+        Some(Err(e)) => say_in(c, e.clone()),
+        Some(Ok(lines)) if lines.is_empty() => say_in(c, "An empty file".into()),
+        Some(Ok(lines)) => {
+            let start = app.folder.vscroll.min(lines.len().saturating_sub(1));
+            let end = (start + FILE_ROWS).min(lines.len());
+            let pos = ui.text(c, format!("{}–{} of {}", start + 1, end, lines.len()), &ui.f.mono, 11.0, 0.0, ui.dim);
+            c.entity(fh).add_child(pos);
+            for chip_def in [("PGUP", KeyCode::PageUp), ("PGDN", KeyCode::PageDown)] {
+                let chip = c.spawn((Node { padding: UiRect { left: px(5), right: px(5), top: px(2), bottom: px(1) }, border: UiRect::all(px(1)), flex_shrink: 0.0, ..default() }, BorderColor::all(with_alpha(ui.line, 0.4)), Click::Key(chip_def.1))).id();
+                let t = ui.text(c, chip_def.0, &ui.f.mono, 11.0, 0.0, ui.line);
+                c.entity(chip).add_child(t);
+                c.entity(fh).add_child(chip);
+            }
+            for (i, l) in lines.iter().enumerate().skip(start).take(FILE_ROWS) {
+                let row = c.spawn(Node { flex_direction: FlexDirection::Row, align_items: AlignItems::Center, height: px(18), column_gap: px(10), padding: UiRect::left(px(6)), flex_shrink: 0.0, ..default() }).id();
+                let num = c.spawn((Text::new(format!("{:>4}", i + 1)), font(&ui.f.mono, 11.0, 0.0), TextColor(ui.dim), Node { width: px(34), flex_shrink: 0.0, ..default() })).id();
+                let code = c.spawn((Text::new(clip(l, 84)), font(&ui.f.mono, 12.0, 0.0), TextColor(ui.line), TextLayout { linebreak: LineBreak::NoWrap, ..default() }, Node { overflow: Overflow::clip(), flex_shrink: 1.0, ..default() })).id();
+                c.entity(row).add_children(&[num, code]);
+                c.entity(body).add_child(row);
+            }
+        }
+    }
+}
+
+fn draw_folder_strip(c: &mut Commands, ui: &Ui, root: Entity, dir: &Path, app: &CodeApp) {
+    let r = c.spawn(Node { width: percent(100), height: percent(100), flex_direction: FlexDirection::Row, align_items: AlignItems::Center, column_gap: px(12), padding: UiRect { left: px(16), right: px(14), ..default() }, ..default() }).id();
+    c.entity(root).add_child(r);
+    let lab = ui.text(c, "FOLDER", &ui.f.ui600, 10.5, 3.2, ui.dim);
+    let chip = c.spawn((Node { height: px(36), flex_direction: FlexDirection::Row, align_items: AlignItems::Center, column_gap: px(10), padding: UiRect { left: px(10), right: px(12), ..default() }, border: UiRect::all(px(1)), ..default() }, BorderColor::all(ui.hot))).id();
+    let dot = c.spawn((Node { width: px(8), height: px(8), ..default() }, BackgroundColor(ui.hot), UiTransform { rotation: Rot2::degrees(45.0), ..default() })).id();
+    let col = c.spawn(Node { flex_direction: FlexDirection::Column, row_gap: px(1), ..default() }).id();
+    let tt = ui.text(c, dir.file_name().map(|s| clip(&s.to_string_lossy(), 26)).unwrap_or_else(|| "/".into()), &ui.f.ui600, 12.5, 0.4, ui.hot);
+    let n = app.review.as_ref().map_or(0, |r| r.files.len());
+    let sub = if !app.folder.loaded { "reading…".to_string() } else if app.folder.git { format!("{} · {}", clip(&app.folder.branch, 18), if n == 0 { "clean".to_string() } else { format!("{n} changed") }) } else { "not a git repo".to_string() };
+    let st = ui.text(c, sub, &ui.f.ui500, 11.0, 0.4, ui.line);
+    c.entity(col).add_children(&[tt, st]);
+    c.entity(chip).add_children(&[dot, col]);
+    let sp = c.spawn(Node { flex_grow: 1.0, ..default() }).id();
+    let legend = c.spawn(Node { flex_direction: FlexDirection::Column, row_gap: px(4), align_items: AlignItems::FlexEnd, ..default() }).id();
+    let l1 = ui.text(c, "J K FILE   ↵ OPEN / FOLD   PGUP PGDN SCROLL   H L HUNK   [ ] CHANGED FILE", &ui.f.ui600, 10.0, 1.6, ui.dim);
+    let l2 = ui.text(c, "E HELIX   Z ZED   ⇧Z FOLDER IN ZED   R TESTS   ESC CLOSE", &ui.f.ui600, 10.0, 1.6, ui.dim);
+    c.entity(legend).add_children(&[l1, l2]);
+    c.entity(r).add_children(&[lab, chip, sp, legend]);
 }
 
 /// How many agent chips fit in the strip.
@@ -1542,5 +2332,93 @@ mod tests {
         let r = review::load(wt.to_str().unwrap(), "main");
         assert!(r.error.unwrap().contains("gone"));
         let _ = std::fs::remove_dir_all(repo.parent().unwrap());
+    }
+
+    fn folder_repo(name: &str) -> std::path::PathBuf {
+        let root = std::fs::canonicalize(std::env::temp_dir()).unwrap().join(format!("sphere-folder-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(root.join("target")).unwrap();
+        for a in [&["init", "-q", "-b", "main"][..], &["config", "user.email", "t@t"], &["config", "user.name", "t"], &["config", "commit.gpgsign", "false"]] {
+            git_in(&root, a);
+        }
+        std::fs::write(root.join(".gitignore"), "target/\n").unwrap();
+        std::fs::write(root.join("README.md"), "hello\n").unwrap();
+        std::fs::write(root.join("src/lib.rs"), "fn a() {}\nfn b() {}\n").unwrap();
+        git_in(&root, &["add", "."]);
+        git_in(&root, &["commit", "-q", "-m", "base"]);
+        std::fs::write(root.join("notes.txt"), "new\n").unwrap();
+        std::fs::write(root.join("target/out.o"), "x").unwrap();
+        std::fs::write(root.join("src/lib.rs"), "fn a() {}\nfn b() { 1; }\n").unwrap();
+        root
+    }
+
+    #[test]
+    fn the_tree_lists_tracked_and_untracked_files_but_not_ignored_ones_folders_first() {
+        let root = folder_repo("tree");
+        let files = git_files(&root);
+        assert_eq!(files, [".gitignore", "README.md", "notes.txt", "src/lib.rs"]);
+        // collapsed: the folder, then the files; expanded: its contents sit under it
+        let rows = tree_rows(&files, &HashSet::new());
+        let names: Vec<_> = rows.iter().map(|r| (r.name.as_str(), r.dir, r.depth)).collect();
+        assert_eq!(names, [("src", true, 0), (".gitignore", false, 0), ("notes.txt", false, 0), ("README.md", false, 0)]);
+        let open: HashSet<String> = ["src".to_string()].into();
+        let rows = tree_rows(&files, &open);
+        assert_eq!((rows[0].path.as_str(), rows[0].open, rows[1].path.as_str(), rows[1].depth), ("src", true, "src/lib.rs", 1));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_plain_folder_is_walked_without_hidden_files() {
+        let root = std::env::temp_dir().join(format!("sphere-folder-plain-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("a/b")).unwrap();
+        std::fs::create_dir_all(root.join("node_modules/x")).unwrap();
+        std::fs::write(root.join("a/b/c.txt"), "c").unwrap();
+        std::fs::write(root.join("z.txt"), "z").unwrap();
+        std::fs::write(root.join(".hidden"), "h").unwrap();
+        std::fs::write(root.join("node_modules/x/y.js"), "y").unwrap();
+        assert_eq!(walk_files(&root), ["a/b/c.txt", "z.txt"]);
+        let l = load_folder(&root);
+        assert!(!l.git && l.changes.is_none());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_changed_file_shows_its_diff_and_an_unchanged_one_its_contents() {
+        let root = folder_repo("view");
+        let l = load_folder(&root);
+        assert!(l.git && l.branch == "main");
+        let changes = l.changes.as_ref().unwrap();
+        let changed: Vec<_> = changes.files.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(changed, ["notes.txt", "src/lib.rs"]);
+        assert!(matches!(file_view(Some(changes), "src/lib.rs"), FileView::Diff(_)));
+        assert_eq!(file_view(Some(changes), "README.md"), FileView::Contents);
+        assert_eq!(file_view(None, "src/lib.rs"), FileView::Contents);
+        // the app opens on the first changed file, and reads an unchanged one's text
+        let mut a = CodeApp::default();
+        a.open_folder(root.clone());
+        a.folder_loaded(l);
+        assert_eq!(a.folder.sel.as_deref(), Some("notes.txt"));
+        assert!(matches!(a.folder_view(), Some(FileView::Diff(_))));
+        a.folder_select("README.md");
+        assert_eq!(a.folder_view(), Some(FileView::Contents));
+        assert_eq!(a.folder.view, Some(Ok(vec!["hello".to_string()])));
+        a.folder_select("src/lib.rs");
+        assert!(matches!(a.folder_view(), Some(FileView::Diff(_))));
+        assert_eq!(a.folder_target(), Some(("src/lib.rs".to_string(), 1)));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_agents_actions_are_not_offered_in_a_folder() {
+        let folder: Vec<_> = action_buttons(true).iter().map(|b| b.1).collect();
+        for agent_only in ["M", "P", "D"] {
+            assert!(!folder.contains(&agent_only), "{agent_only}");
+        }
+        assert!(action_buttons(true).iter().all(|b| b.3.is_none() && b.0 != "ASK FOR CHANGE"));
+        assert_eq!(folder, ["E", "Z", "⇧Z", "R", "ESC"]);
+        let agent: Vec<_> = action_buttons(false).iter().map(|b| b.1).collect();
+        assert_eq!(agent, ["M", "P", "E", "Z", "D"]);
     }
 }
