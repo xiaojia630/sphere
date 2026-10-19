@@ -168,13 +168,20 @@ const SUBCOMMANDS: &[&str] = &[
     "migrate-installer",
 ];
 
+/// `claude agents`, `claude mcp` and the like: tools, never a session.
+fn is_subcommand(p: &Proc) -> bool {
+    program_args(p)
+        .first()
+        .is_some_and(|w| SUBCOMMANDS.contains(w))
+}
+
 /// One-shot and helper forms are not sessions a person sits in: print mode,
 /// the SDK/stream-json mode other tools drive, subcommands, version and help.
 pub fn is_helper(p: &Proc) -> bool {
-    let a = program_args(p);
-    if a.first().is_some_and(|w| SUBCOMMANDS.contains(w)) {
+    if is_subcommand(p) {
         return true;
     }
+    let a = program_args(p);
     a.iter().any(|w| {
         matches!(
             *w,
@@ -579,15 +586,123 @@ pub fn transcript_state(path: &Path) -> (&'static str, Option<String>) {
 
 // ---- scanning -----------------------------------------------------------------
 
-/// Interactive Claude processes outside `roots` (Sphere's own agents) and `me`.
-fn scan_procs(projects: &Path, roots: &[i32], me: u32, listed: &[Listed]) -> Vec<Found> {
-    let Ok(out) = ps_command(&["-ax"])
+/// The longest a [`Probe`] stands while no Claude process starts or stops.
+const PROBE_MAX_AGE: Duration = Duration::from_secs(60);
+
+/// What the slow part of a scan found: the agents list (`claude agents --json`
+/// starts a Node program) and the folder of each Claude process (`lsof` on
+/// macOS). It stands while the same Claude processes run and their
+/// transcripts can tell their status, so a scan of a quiet machine runs `ps`
+/// and reads transcripts.
+#[derive(Debug)]
+pub struct Probe {
+    /// When the list was asked for.
+    at: SystemTime,
+    since: Instant,
+    /// The Claude processes running then (see [`claude_procs`]).
+    claudes: Vec<(u32, Option<u64>)>,
+    listed: Option<String>,
+    /// Folders looked up so far, by pid (`None`: it could not be read).
+    cwds: HashMap<u32, Option<String>>,
+}
+
+impl Probe {
+    /// Asks for the agents list now, on a machine running `claudes`, keeping
+    /// the folders `old` found of the processes still running (one it could
+    /// not read is asked about again).
+    async fn take(cfg: &Config, claudes: Vec<(u32, Option<u64>)>, old: Option<Probe>) -> Probe {
+        let cwds = match old {
+            Some(Probe {
+                claudes: was, cwds, ..
+            }) => cwds
+                .into_iter()
+                .filter(|(pid, cwd)| {
+                    cwd.is_some() && was.iter().any(|w| w.0 == *pid && claudes.contains(w))
+                })
+                .collect(),
+            None => HashMap::new(),
+        };
+        let at = SystemTime::now();
+        let listed = match sessions::run_json(&cfg.session_list_cmd()).await {
+            Ok(t) => Some(t),
+            Err(e) => {
+                tracing::debug!("could not list sessions: {e:#}");
+                None
+            }
+        };
+        Probe {
+            at,
+            since: Instant::now(),
+            claudes,
+            listed,
+            cwds,
+        }
+    }
+
+    /// Whether it still stands for a machine running `claudes`.
+    fn stands(&self, claudes: &[(u32, Option<u64>)]) -> bool {
+        self.claudes == claudes && self.since.elapsed() < PROBE_MAX_AGE
+    }
+}
+
+/// The process table, empty when `ps` fails.
+fn read_procs() -> Vec<Proc> {
+    ps_command(&["-ax"])
         .stdin(std::process::Stdio::null())
         .output()
-    else {
-        return vec![];
-    };
-    let procs = parse_ps(&String::from_utf8_lossy(&out.stdout));
+        .map(|out| parse_ps(&String::from_utf8_lossy(&out.stdout)))
+        .unwrap_or_default()
+}
+
+/// Every Claude process but the subcommands (`claude agents` itself is one),
+/// with its start, sorted: helpers count, since a background session may run
+/// as one. While this stays the same, no session started or stopped.
+fn claude_procs(procs: &[Proc]) -> Vec<(u32, Option<u64>)> {
+    let mut v: Vec<(u32, Option<u64>)> = procs
+        .iter()
+        .filter(|p| is_claude(p) && !is_subcommand(p))
+        .map(|p| (p.pid, p.start))
+        .collect();
+    v.sort_unstable();
+    v
+}
+
+/// The status the agents list gave, unless the transcript changed after the
+/// list was taken (or the list said nothing): then the transcript says. But
+/// an open tool call is either running or waiting for an answer, which only
+/// the list can tell: `None` asks for a new list, unless it was just taken.
+fn pick_state<'a>(
+    listed: Option<&'a str>,
+    tail: &'a str,
+    changed: bool,
+    just_listed: bool,
+) -> Option<&'a str> {
+    match listed {
+        Some(s) if !changed || tail == "unknown" => Some(s),
+        Some(s) if tail == "waiting" => just_listed.then_some(s),
+        _ => Some(tail),
+    }
+}
+
+fn modified(path: Option<&Path>) -> Option<SystemTime> {
+    std::fs::metadata(path?).and_then(|m| m.modified()).ok()
+}
+
+/// Interactive Claude processes in `procs` outside `roots` (Sphere's own
+/// agents) and `me`. A process's folder is looked up once and kept in
+/// `cwd_of`; `listed_at` is when `listed` was taken. True with them when a
+/// status needs a new list (see [`pick_state`]).
+#[allow(clippy::too_many_arguments)]
+fn scan_procs(
+    projects: &Path,
+    procs: &[Proc],
+    roots: &[i32],
+    me: u32,
+    listed: &[Listed],
+    listed_at: SystemTime,
+    just_listed: bool,
+    cwd_of: &mut HashMap<u32, Option<String>>,
+) -> (Vec<Found>, bool) {
     let table: HashMap<u32, &Proc> = procs.iter().map(|p| (p.pid, p)).collect();
     let mut skip: HashSet<u32> = roots
         .iter()
@@ -605,12 +720,23 @@ fn scan_procs(projects: &Path, roots: &[i32], me: u32, listed: &[Listed]) -> Vec
         .into_iter()
         .filter(|p| !pids.contains(&p.ppid))
         .collect();
-    let cwd_of = cwds(&claudes.iter().map(|p| p.pid).collect::<Vec<_>>());
+    // a process keeps its folder: ask only about the new ones
+    let new: Vec<u32> = claudes
+        .iter()
+        .map(|p| p.pid)
+        .filter(|pid| !cwd_of.contains_key(pid))
+        .collect();
+    if !new.is_empty() {
+        let mut got = cwds(&new);
+        for pid in new {
+            cwd_of.insert(pid, got.remove(&pid));
+        }
+    }
     let cands: Vec<Cand> = claudes
         .iter()
         .map(|p| Cand {
             pid: p.pid,
-            cwd: cwd_of.get(&p.pid).cloned(),
+            cwd: cwd_of.get(&p.pid).cloned().flatten(),
             start: p.start,
             // the agents list knows the session of an interactive process
             explicit: explicit_session(p)
@@ -633,7 +759,8 @@ fn scan_procs(projects: &Path, roots: &[i32], me: u32, listed: &[Listed]) -> Vec
         }
     }
     let assigned = assign(&cands, &txs);
-    claudes
+    let mut again = false;
+    let found = claudes
         .iter()
         .zip(cands.iter().zip(assigned))
         .map(|(p, (c, a))| {
@@ -644,9 +771,17 @@ fn scan_procs(projects: &Path, roots: &[i32], me: u32, listed: &[Listed]) -> Vec
                 .as_deref()
                 .map(transcript_state)
                 .unwrap_or(("unknown", None));
-            let state = listed_for(listed, p.pid)
-                .and_then(|l| l.state)
-                .unwrap_or(tail_state);
+            let changed_at = modified(path.as_deref());
+            let state = pick_state(
+                listed_for(listed, p.pid).and_then(|l| l.state),
+                tail_state,
+                changed_at.is_some_and(|m| m > listed_at),
+                just_listed,
+            )
+            .unwrap_or_else(|| {
+                again = true;
+                tail_state
+            });
             let head = path.as_deref().and_then(sessions::read_transcript);
             Found {
                 start: p.start,
@@ -660,14 +795,12 @@ fn scan_procs(projects: &Path, roots: &[i32], me: u32, listed: &[Listed]) -> Vec
                     state: state.to_string(),
                     ambiguous: a.ambiguous,
                     last_message,
-                    updated_at: path
-                        .as_deref()
-                        .and_then(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok())
-                        .and_then(sessions::rfc3339),
+                    updated_at: changed_at.and_then(sessions::rfc3339),
                 },
             }
         })
-        .collect()
+        .collect();
+    (found, again)
 }
 
 /// An entry of `claude agents --json`: newer versions list interactive
@@ -728,18 +861,24 @@ fn listed_for(listed: &[Listed], pid: u32) -> Option<&Listed> {
     listed.iter().find(|l| l.pid == Some(pid))
 }
 
-/// Running background sessions of `claude agents --json`. Interactive ones
-/// are left to the process scan, which knows where they run and skips the
-/// ones driven by a program (an SDK, the desktop app, Sphere itself).
-async fn scan_background(cfg: &Config, text: Option<&str>) -> Vec<Found> {
+/// Running background sessions of `claude agents --json`, taken at
+/// `listed_at`. Interactive ones are left to the process scan, which knows
+/// where they run and skips the ones driven by a program (an SDK, the desktop
+/// app, Sphere itself). True with them when a status needs a new list.
+async fn scan_background(
+    cfg: &Config,
+    text: Option<&str>,
+    listed_at: SystemTime,
+    just_listed: bool,
+) -> (Vec<Found>, bool) {
     let Some(text) = text else {
-        return vec![];
+        return (vec![], false);
     };
     let listed = match sessions::parse_agents_json(text) {
         Ok(l) => l,
         Err(e) => {
             tracing::debug!("could not list background sessions: {e:#}");
-            return vec![];
+            return (vec![], false);
         }
     };
     let interactive: HashSet<String> = parse_listed(text)
@@ -748,7 +887,8 @@ async fn scan_background(cfg: &Config, text: Option<&str>) -> Vec<Found> {
         .map(|l| l.id)
         .collect();
     let projects = cfg.projects_dir();
-    listed
+    let mut again = false;
+    let found = listed
         .into_iter()
         .filter(|s| s.running && !interactive.contains(&s.session_id))
         .map(|s| {
@@ -757,10 +897,17 @@ async fn scan_background(cfg: &Config, text: Option<&str>) -> Vec<Found> {
                 .as_deref()
                 .map(transcript_state)
                 .unwrap_or(("unknown", None));
-            let state = match s.state.as_deref() {
-                Some("unknown") | None => tail_state,
-                Some(st) => st,
-            };
+            let state = pick_state(
+                s.state.as_deref().filter(|st| *st != "unknown"),
+                tail_state,
+                modified(path.as_deref()).is_some_and(|m| m > listed_at),
+                just_listed,
+            )
+            .unwrap_or_else(|| {
+                again = true;
+                tail_state
+            })
+            .to_string();
             let head = path.as_deref().and_then(sessions::read_transcript);
             Found {
                 start: None,
@@ -771,34 +918,78 @@ async fn scan_background(cfg: &Config, text: Option<&str>) -> Vec<Found> {
                     cwd: s.cwd.or_else(|| head.as_ref().and_then(|h| h.cwd.clone())),
                     title: s.title.or_else(|| head.and_then(|h| h.title)),
                     where_: BACKGROUND.into(),
-                    state: state.to_string(),
+                    state,
                     ambiguous: false,
                     last_message,
                     updated_at: s.updated_at,
                 },
             }
         })
-        .collect()
+        .collect();
+    (found, again)
 }
 
 /// Every session running outside Sphere, newest first. `roots` are the pids
 /// of Sphere's own agents, which are skipped along with their children.
-pub async fn scan(cfg: &Config, roots: Vec<i32>) -> Vec<Found> {
-    let projects = cfg.projects_dir();
-    let me = std::process::id();
-    let text = match sessions::run_json(&cfg.session_list_cmd()).await {
-        Ok(t) => Some(t),
-        Err(e) => {
-            tracing::debug!("could not list sessions: {e:#}");
-            None
+/// `probe` keeps the slow part: it is taken again when a Claude process
+/// started or stopped, when a transcript shows a tool call made after the
+/// list (running, or waiting for an answer?), after a minute, or when `fresh`.
+pub async fn scan(
+    cfg: &Config,
+    roots: Vec<i32>,
+    probe: &mut Option<Probe>,
+    fresh: bool,
+) -> Vec<Found> {
+    let procs = tokio::task::spawn_blocking(read_procs)
+        .await
+        .unwrap_or_default();
+    scan_with(cfg, procs, roots, probe, fresh).await
+}
+
+async fn scan_with(
+    cfg: &Config,
+    procs: Vec<Proc>,
+    roots: Vec<i32>,
+    probe: &mut Option<Probe>,
+    fresh: bool,
+) -> Vec<Found> {
+    let claudes = claude_procs(&procs);
+    let mut renew = fresh || !probe.as_ref().is_some_and(|p| p.stands(&claudes));
+    let (background, found) = loop {
+        if renew {
+            *probe = Some(Probe::take(cfg, claudes.clone(), probe.take()).await);
         }
+        let Some(p) = probe.as_mut() else {
+            return vec![];
+        };
+        let listed = p.listed.as_deref().map(parse_listed).unwrap_or_default();
+        let (projects, me, at) = (cfg.projects_dir(), std::process::id(), p.at);
+        let (procs, roots) = (procs.clone(), roots.clone());
+        let mut cwd_of = std::mem::take(&mut p.cwds);
+        let ((found, again), cwd_of) = tokio::task::spawn_blocking(move || {
+            let found = scan_procs(
+                &projects,
+                &procs,
+                &roots,
+                me,
+                &listed,
+                at,
+                renew,
+                &mut cwd_of,
+            );
+            (found, cwd_of)
+        })
+        .await
+        .unwrap_or_default();
+        p.cwds = cwd_of;
+        let (background, again_bg) = scan_background(cfg, p.listed.as_deref(), at, renew).await;
+        if renew || !(again || again_bg) {
+            break (background, found);
+        }
+        renew = true;
     };
-    let listed = text.as_deref().map(parse_listed).unwrap_or_default();
-    let procs =
-        tokio::task::spawn_blocking(move || scan_procs(&projects, &roots, me, &listed)).await;
-    let background = scan_background(cfg, text.as_deref()).await;
     let mut out = background;
-    for f in procs.unwrap_or_default() {
+    for f in found {
         let dup = out.iter().any(|b| {
             (f.info.pid.is_some() && b.info.pid == f.info.pid)
                 || (f.info.session_id.is_some() && b.info.session_id == f.info.session_id)
@@ -1224,5 +1415,159 @@ mod tests {
         let mine = procs.iter().find(|p| p.pid == me).expect("this process");
         assert!(mine.start.is_some(), "{mine:?}");
         assert!(mine.ppid > 0);
+    }
+
+    fn proc_at(pid: u32, start: u64, args: &str) -> Proc {
+        Proc {
+            pid,
+            ppid: 1,
+            start: Some(start),
+            comm: args.split_whitespace().next().unwrap().into(),
+            args: args.into(),
+        }
+    }
+
+    #[test]
+    fn the_claude_processes_are_sessions_and_helpers_but_not_subcommands() {
+        let procs = vec![
+            proc_at(30, 100, "claude --resume abc"),
+            proc_at(10, 100, "/usr/local/bin/claude"),
+            proc_at(20, 100, "claude -p hello"),
+            proc_at(40, 100, "claude agents --json"),
+            proc_at(
+                50,
+                100,
+                "node /x/@anthropic-ai/claude-code/cli.js mcp serve",
+            ),
+            proc_at(60, 100, "bash"),
+        ];
+        let some = |pid| (pid, Some(100));
+        assert_eq!(claude_procs(&procs), vec![some(10), some(20), some(30)]);
+        // the same pid started again is another process
+        let mut again = procs.clone();
+        again[1].start = Some(200);
+        assert_ne!(claude_procs(&again), claude_procs(&procs));
+    }
+
+    #[test]
+    fn a_listed_status_stands_until_the_transcript_changes_after_the_list() {
+        assert_eq!(
+            pick_state(Some("working"), "idle", false, false),
+            Some("working")
+        );
+        assert_eq!(
+            pick_state(Some("waiting"), "working", true, false),
+            Some("working")
+        );
+        assert_eq!(
+            pick_state(Some("working"), "idle", true, false),
+            Some("idle")
+        );
+        // a transcript that can't be read says nothing new
+        assert_eq!(
+            pick_state(Some("idle"), "unknown", true, false),
+            Some("idle")
+        );
+        assert_eq!(pick_state(None, "idle", false, false), Some("idle"));
+        // an open tool call may be running or waiting for an answer: ask again
+        assert_eq!(pick_state(Some("working"), "waiting", true, false), None);
+        assert_eq!(
+            pick_state(Some("working"), "waiting", true, true),
+            Some("working")
+        );
+        assert_eq!(pick_state(None, "waiting", true, false), Some("waiting"));
+    }
+
+    #[tokio::test]
+    async fn the_agents_list_runs_only_when_a_claude_process_starts_or_stops() {
+        let tmp = tempfile::tempdir().unwrap();
+        let count = tmp.path().join("runs");
+        // a stand-in for `claude agents --json` that counts its runs
+        let cfg = Config {
+            session_list_command: Some(vec![
+                "sh".into(),
+                "-c".into(),
+                "echo run >> \"$0\"; echo '[]'".into(),
+                count.to_string_lossy().into(),
+            ]),
+            claude_projects_dir: Some(tmp.path().join("projects")),
+            ..Config::default()
+        };
+        let runs = || {
+            std::fs::read_to_string(&count)
+                .map(|s| s.lines().count())
+                .unwrap_or(0)
+        };
+        // pids no process has, so their folders can't be read
+        let one = vec![proc_at(4_000_001, 100, "claude")];
+        let mut probe = None;
+        let found = scan_with(&cfg, one.clone(), vec![], &mut probe, false).await;
+        assert_eq!((runs(), found.len()), (1, 1));
+        for _ in 0..3 {
+            scan_with(&cfg, one.clone(), vec![], &mut probe, false).await;
+        }
+        assert_eq!(runs(), 1, "nothing started or stopped: ps alone");
+        let mut two = one.clone();
+        two.push(proc_at(4_000_002, 150, "claude --resume x"));
+        let found = scan_with(&cfg, two, vec![], &mut probe, false).await;
+        assert_eq!((runs(), found.len()), (2, 2), "a session started");
+        scan_with(&cfg, one.clone(), vec![], &mut probe, false).await;
+        assert_eq!(runs(), 3, "and stopped");
+        // the list running (a subcommand) is not a session starting
+        let mut listing = one.clone();
+        listing.push(proc_at(4_000_003, 160, "claude agents --json"));
+        scan_with(&cfg, listing, vec![], &mut probe, false).await;
+        assert_eq!(runs(), 3);
+        // a take-over asks afresh
+        scan_with(&cfg, one, vec![], &mut probe, true).await;
+        assert_eq!(runs(), 4);
+    }
+
+    #[tokio::test]
+    async fn an_open_tool_call_written_after_the_list_asks_for_it_again() {
+        let tmp = tempfile::tempdir().unwrap();
+        let count = tmp.path().join("runs");
+        // the list knows the session of pid 4000001 and says it is busy
+        let cfg = Config {
+            session_list_command: Some(vec![
+                "sh".into(),
+                "-c".into(),
+                r#"echo run >> "$0"; echo '[{"sessionId":"s1","pid":4000001,"status":"busy","kind":"interactive"}]'"#.into(),
+                count.to_string_lossy().into(),
+            ]),
+            claude_projects_dir: Some(tmp.path().join("projects")),
+            ..Config::default()
+        };
+        let runs = || {
+            std::fs::read_to_string(&count)
+                .map(|s| s.lines().count())
+                .unwrap_or(0)
+        };
+        let dir = tmp.path().join("projects").join("-x");
+        std::fs::create_dir_all(&dir).unwrap();
+        let write =
+            |lines: &[&str]| std::fs::write(dir.join("s1.jsonl"), lines.join("\n") + "\n").unwrap();
+        let prompt = r#"{"type":"user","message":{"role":"user","content":"add a flag"}}"#;
+        let call = r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"cargo test"}}]}}"#;
+        let result = r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"ok"}]}}"#;
+        let done = r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Done."}],"stop_reason":"end_turn"}}"#;
+        write(&[prompt]);
+        let one = vec![proc_at(4_000_001, 100, "claude")];
+        let mut probe = None;
+        let state = |f: &[Found]| f[0].info.state.clone();
+        let found = scan_with(&cfg, one.clone(), vec![], &mut probe, false).await;
+        assert_eq!((runs(), state(&found).as_str()), (1, "working"));
+        // a tool call: running or waiting for an answer, which only the list knows
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        write(&[prompt, call]);
+        let found = scan_with(&cfg, one.clone(), vec![], &mut probe, false).await;
+        assert_eq!((runs(), state(&found).as_str()), (2, "working"));
+        scan_with(&cfg, one.clone(), vec![], &mut probe, false).await;
+        assert_eq!(runs(), 2, "asked once");
+        // its result and the end of the turn: the transcript says
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        write(&[prompt, call, result, done]);
+        let found = scan_with(&cfg, one, vec![], &mut probe, false).await;
+        assert_eq!((runs(), state(&found).as_str()), (2, "idle"));
     }
 }

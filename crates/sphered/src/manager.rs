@@ -96,8 +96,16 @@ pub struct Manager {
     ctl: Mutex<HashMap<String, oneshot::Sender<CtlReply>>>,
     ctl_seq: AtomicU64,
     info: Mutex<Info>,
-    /// The last scan for sessions outside Sphere, and when it ran.
-    outside: tokio::sync::Mutex<Option<(std::time::Instant, Vec<outside::Found>)>>,
+    outside: tokio::sync::Mutex<Outside>,
+}
+
+/// Sessions running outside Sphere: the last scan and when it ran, and what
+/// the slow part of a scan found, reused while no Claude process starts or
+/// stops.
+#[derive(Default)]
+struct Outside {
+    last: Option<(std::time::Instant, Vec<outside::Found>)>,
+    probe: Option<outside::Probe>,
 }
 
 /// How long a scan for sessions outside Sphere is reused.
@@ -380,7 +388,7 @@ impl Manager {
             ctl: Mutex::new(HashMap::new()),
             ctl_seq: AtomicU64::new(0),
             info: Mutex::new(Info::default()),
-            outside: tokio::sync::Mutex::new(None),
+            outside: tokio::sync::Mutex::new(Outside::default()),
         })
     }
 
@@ -1723,12 +1731,14 @@ impl Manager {
     /// Sessions running outside Sphere, minus the ones a Sphere task owns.
     /// Reuses a scan under a few seconds old unless `fresh`.
     async fn outside_found(&self, fresh: bool) -> Vec<outside::Found> {
-        let mut cache = self.outside.lock().await;
-        let all = match cache.as_ref() {
+        let mut guard = self.outside.lock().await;
+        let o = &mut *guard;
+        let all = match o.last.as_ref() {
             Some((at, found)) if !fresh && at.elapsed() < OUTSIDE_TTL => found.clone(),
             _ => {
-                let found = outside::scan(&self.cfg, self.agent_roots().await).await;
-                *cache = Some((std::time::Instant::now(), found.clone()));
+                let roots = self.agent_roots().await;
+                let found = outside::scan(&self.cfg, roots, &mut o.probe, fresh).await;
+                o.last = Some((std::time::Instant::now(), found.clone()));
                 found
             }
         };
@@ -1826,7 +1836,7 @@ impl Manager {
         outside::stop(&self.cfg, &f)
             .await
             .map_err(|e| api_err(kind::AGENT_ERROR, format!("could not stop it there: {e:#}")))?;
-        *self.outside.lock().await = None;
+        self.outside.lock().await.last = None;
         let projects = self.cfg.projects_dir();
         let path = outside::find_transcript(&projects, &id, Some(&cwd));
         let (mut state, mut last) = ("unknown", None);
