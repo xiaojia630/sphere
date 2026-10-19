@@ -235,6 +235,12 @@ async fn a_lost_host_means_resume_from_the_saved_session() {
         .clone()
         .expect("session id was saved");
     let old_host = env.host_pid();
+    // "starting" can arrive before the Read's result: under load the host
+    // would otherwise go while the step is still open, and cut it off.
+    w.wait("the Read to finish", |e| {
+        matches!(e.body, EventBody::StepDone { .. })
+    })
+    .await;
 
     // The host goes away and takes the agent with it (an update, a crash).
     env.host_call("shutdown");
