@@ -33,6 +33,8 @@ pub struct Shared {
     pub runs: std::collections::HashMap<String, Run>,
     /// finished tasks whose branch is already in the repo (the app checks with git, see `live::check_merged`)
     pub merged: std::collections::HashSet<String>,
+    /// `merged` has been worked out at least once (until then a finished task's branch may or may not be merged)
+    pub merged_checked: bool,
     /// what today's agents have cost, and how many sphered runs at once (from the snapshot)
     pub cost_today_usd: f64,
     pub max_concurrent: Option<usize>,

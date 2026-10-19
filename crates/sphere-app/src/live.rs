@@ -122,7 +122,9 @@ fn pick(tasks: &[TaskView], merged: &HashSet<String>) -> Vec<Agent> {
 pub fn check_merged(time: Res<Time<Real>>, svc: Res<Service>, mut t: Local<f32>, mut busy: Local<Option<std::sync::Arc<std::sync::atomic::AtomicBool>>>) {
     use std::sync::atomic::{AtomicBool, Ordering};
     *t += time.delta_secs();
-    if *t < 4.0 || busy.as_ref().is_some_and(|b| b.load(Ordering::Relaxed)) {
+    // the first check runs at once (the swarm waits for it before it shows finished agents), then every 4 s
+    let first = !svc.shared.lock().unwrap().merged_checked;
+    if (*t < 4.0 && !first) || busy.as_ref().is_some_and(|b| b.load(Ordering::Relaxed)) {
         return;
     }
     *t = 0.0;
@@ -131,6 +133,12 @@ pub fn check_merged(time: Res<Time<Real>>, svc: Res<Service>, mut t: Local<f32>,
         s.tasks.iter().filter(|t| t.state == TaskState::Done && !t.in_place && t.branch.is_some()).filter_map(|t| Some((t.id.clone(), t.workdir.clone()?, t.base.clone()?))).collect()
     };
     if todo.is_empty() && svc.shared.lock().unwrap().merged.is_empty() {
+        // nothing finished yet: nothing can be merged (a task list that hasn't arrived waits for the next pass)
+        let mut s = svc.shared.lock().unwrap();
+        if !s.tasks.is_empty() && !s.merged_checked {
+            s.merged_checked = true;
+            s.version += 1;
+        }
         return;
     }
     let flag = busy.get_or_insert_with(|| std::sync::Arc::new(AtomicBool::new(false))).clone();
@@ -139,8 +147,9 @@ pub fn check_merged(time: Res<Time<Real>>, svc: Res<Service>, mut t: Local<f32>,
     std::thread::spawn(move || {
         let ids: HashSet<String> = todo.into_iter().filter(|(_, wd, base)| crate::review::is_merged(wd, base)).map(|(id, _, _)| id).collect();
         let mut s = shared.lock().unwrap();
-        if s.merged != ids {
+        if s.merged != ids || !s.merged_checked {
             s.merged = ids;
+            s.merged_checked = true;
             s.version += 1;
         }
         flag.store(false, Ordering::Relaxed);

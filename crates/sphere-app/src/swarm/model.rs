@@ -188,6 +188,9 @@ pub fn from_shared(s: &Shared, prev: &Model, now: i64) -> Model {
             TaskState::Queued => State::Queued,
             TaskState::Working => State::Working,
             TaskState::NeedsYou => State::Needs,
+            // until the app knows which finished branches are merged, finished agents wait off screen (otherwise
+            // a launch shows old merged work as ready, then plays its merge again)
+            TaskState::Done if !s.merged_checked => continue,
             TaskState::Done => {
                 if s.merged.contains(&t.id) {
                     if before == Some(State::Done) {
@@ -227,6 +230,12 @@ pub fn from_shared(s: &Shared, prev: &Model, now: i64) -> Model {
                     }
                 })
                 .unwrap_or_else(status_or_say),
+            // a finished agent shows what it came to (sphered's status reads "Done: <its result>"), not its last command
+            State::Done | State::Merged => {
+                let st = status_or_say();
+                let r = st.strip_prefix("Done: ").unwrap_or(&st).trim().to_string();
+                if r.is_empty() { steps.first().map(|x| x.text.clone()).unwrap_or_default() } else { r }
+            }
             _ => steps.first().map(|x| x.text.clone()).filter(|x| !x.is_empty()).unwrap_or_else(status_or_say),
         };
         let p = match state {
@@ -1008,7 +1017,7 @@ mod tests {
     }
 
     fn shared(tasks: Vec<TaskView>) -> Shared {
-        Shared { tasks, ..Default::default() }
+        Shared { tasks, merged_checked: true, ..Default::default() }
     }
 
     fn state_of(m: &Model, id: &str) -> Option<State> {
@@ -1051,6 +1060,26 @@ mod tests {
         ]);
         let m = from_shared(&s, &Model::default(), now());
         assert_eq!(m.agents.iter().map(|a| a.id.as_str()).collect::<Vec<_>>(), vec!["ok"]);
+    }
+
+    #[test]
+    fn finished_agents_wait_until_the_merged_check_is_in() {
+        let mut s = shared(vec![task("ok", TaskState::Done, &t_ago(100), serde_json::json!({})), task("w", TaskState::Working, &t_ago(100), serde_json::json!({}))]);
+        s.merged_checked = false;
+        let m = from_shared(&s, &Model::default(), now());
+        assert_eq!(m.agents.iter().map(|a| a.id.as_str()).collect::<Vec<_>>(), vec!["w"]);
+        // an old merge found by the first check never shows (no "Merged" replayed at launch)
+        s.merged_checked = true;
+        s.merged.insert("ok".into());
+        let m2 = from_shared(&s, &m, now());
+        assert_eq!(m2.agents.iter().map(|a| a.id.as_str()).collect::<Vec<_>>(), vec!["w"]);
+        assert!(diff(&m, &m2).iter().all(|e| !matches!(e, Event::Merged(_))));
+    }
+
+    #[test]
+    fn a_finished_agent_shows_its_result_not_its_last_command() {
+        let s = shared(vec![task("ok", TaskState::Done, &t_ago(100), serde_json::json!({"status": "Done: Flake fixed"}))]);
+        assert_eq!(from_shared(&s, &Model::default(), now()).agents[0].step, "Flake fixed");
     }
 
     #[test]

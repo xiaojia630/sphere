@@ -572,7 +572,11 @@ fn drive(mut ev: MessageReader<KeyboardInput>, keys: Res<ButtonInput<KeyCode>>, 
     for (id, ok, text) in notes {
         st.merging.remove(&id);
         if ok {
-            e.toasts.push_ok(text);
+            // the swarm's Merged event toasts "Merged into …" when the satellite reaches the core; a merge done
+            // while the swarm is closed still says so here
+            if !e.swarm.open {
+                e.toasts.push_ok(text);
+            }
         } else {
             e.toasts.push_bad(text);
             e.sound.play_with("error", 0.6, 0.0);
@@ -598,6 +602,13 @@ fn drive(mut ev: MessageReader<KeyboardInput>, keys: Res<ButtonInput<KeyCode>>, 
         return;
     }
     let now = e.sim.t;
+    // the agent in focus was merged, stopped or is gone: back to the overview quietly, so its collapse shows
+    if let Mode::Focus(id) = &e.swarm.mode {
+        if e.swarm.model.agent(id).is_none_or(|a| matches!(a.state, State::Merged | State::Stopped)) {
+            e.swarm.mode = Mode::Overview;
+            e.swarm.version += 1;
+        }
+    }
     // a request arrived: from the overview, go to it (otherwise only the toast the feedback worker makes)
     for ev in fresh {
         if let Event::NeedsYou(id) = ev {
@@ -1013,6 +1024,22 @@ mod tests {
     }
 
     #[test]
+    fn focus_lets_go_of_an_agent_that_was_merged_or_is_gone() {
+        let mut app = world();
+        app.world_mut().resource_mut::<Swarm>().mode = Mode::Focus("b".into());
+        app.update();
+        assert_eq!(app.world().resource::<Swarm>().mode, Mode::Focus("b".into()));
+        for a in app.world_mut().resource_mut::<Swarm>().model.agents.iter_mut().filter(|a| a.id == "b") {
+            a.state = State::Merged;
+        }
+        app.update();
+        assert_eq!(app.world().resource::<Swarm>().mode, Mode::Overview);
+        app.world_mut().resource_mut::<Swarm>().mode = Mode::Focus("nobody".into());
+        app.update();
+        assert_eq!(app.world().resource::<Swarm>().mode, Mode::Overview);
+    }
+
+    #[test]
     fn focus_keys_open_in_code_ask_and_stop() {
         let mut app = world();
         app.world_mut().resource_mut::<Swarm>().mode = Mode::Focus("b".into());
@@ -1039,8 +1066,15 @@ mod tests {
         tx.send(("d".to_string(), false, "Merge failed: conflict".to_string())).unwrap();
         app.update();
         let kinds: Vec<(String, ToastKind)> = app.world().resource::<Toasts>().list.iter().map(|t| (t.0.clone(), t.2)).collect();
-        assert!(kinds.contains(&("Merged agent/d".to_string(), ToastKind::Ok)), "{kinds:?}");
+        // with the swarm open the Merged event toasts when the satellite lands; a failure is red at once
+        assert!(!kinds.iter().any(|k| k.0 == "Merged agent/d"), "{kinds:?}");
         assert!(kinds.contains(&("Merge failed: conflict".to_string(), ToastKind::Bad)), "{kinds:?}");
+        // a merge that finishes after the swarm closed toasts green itself
+        app.world_mut().resource_mut::<Swarm>().open = false;
+        tx.send(("d".to_string(), true, "Merged agent/d".to_string())).unwrap();
+        app.update();
+        assert!(app.world().resource::<Toasts>().list.iter().any(|t| t.0 == "Merged agent/d" && t.2 == ToastKind::Ok));
+        app.world_mut().resource_mut::<Swarm>().open = true;
         // Stop toasts plain
         app.world_mut().resource_mut::<Swarm>().mode = Mode::Focus("b".into());
         app.world_mut().resource_mut::<HudKeys>().0.push(KeyCode::KeyX);

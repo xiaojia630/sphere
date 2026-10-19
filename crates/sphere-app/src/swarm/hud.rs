@@ -435,9 +435,11 @@ fn overlay(
     let dt = sim.dt;
     let size = cam.logical_viewport_size().unwrap_or(Vec2::new(args.size.0 as f32, args.size.1 as f32));
     let proj = |p: Vec3| cam.world_to_viewport(&gt, p).ok().filter(|v| v.is_finite());
-    // the strip's bottom edge (stage y 58) + 10; the dock top - 12
+    // the strip's bottom edge (stage y 58) + 10; above Sphere's spoken line (its panel's top, stage y 858) - 8, which
+    // sits over the dock
     let y0 = proj(crate::panel::stage_to_world(800.0, 58.0)).map(|v| v.y).unwrap_or(68.0) + 10.0;
-    let safe = Rect { min: Vec2::new(36.0, y0), max: Vec2::new(size.x - 36.0, (size.y - 94.0).max(y0 + 60.0)) };
+    let y1 = proj(crate::panel::stage_to_world(800.0, 858.0)).map(|v| v.y - 8.0).unwrap_or(size.y - 94.0).min(size.y - 94.0);
+    let safe = Rect { min: Vec2::new(36.0, y0), max: Vec2::new(size.x - 36.0, y1.max(y0 + 60.0)) };
     let model = &swarm.model;
     let now = now_secs(&args, &sim);
     let dim = clamp(swarm.dim.x, 0.0, 1.0);
