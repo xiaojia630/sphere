@@ -416,6 +416,17 @@ mod tests {
     }
 
     #[test]
+    fn a_snapshot_from_an_older_sphered_has_no_waited_time() {
+        let old = r#"{"seq":7,"tasks":[],"requests":[],"cost_today_usd":1.5}"#;
+        let s: Snapshot = serde_json::from_str(old).unwrap();
+        assert_eq!(s.waited_today_secs, 0);
+        let new =
+            r#"{"seq":7,"tasks":[],"requests":[],"cost_today_usd":1.5,"waited_today_secs":95}"#;
+        let s: Snapshot = serde_json::from_str(new).unwrap();
+        assert_eq!(s.waited_today_secs, 95);
+    }
+
+    #[test]
     fn rpc_message_parses_both_shapes() {
         let r: RpcMessage =
             serde_json::from_str(r#"{"jsonrpc":"2.0","id":1,"result":{"a":1}}"#).unwrap();

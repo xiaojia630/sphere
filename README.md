@@ -192,7 +192,7 @@ sphere doctor                       check the installation
 
 ### Policy
 
-`~/.sphere/policy.toml` and a repo's `.sphere/policy.toml` are compiled into the agent's `--settings` (permission rules plus `sandbox.enabled`, on by default), plus `[[auto]]` rules that Sphere itself decides (for example `git push origin {branch}`). A repo policy can only add restrictions unless the user file says `trust_repos = true`. Force pushes and history rewrites are denied unless a task starts with `--allow-rewrites`.
+`~/.sphere/policy.toml` and a repo's `.sphere/policy.toml` are compiled into the agent's `--settings` (permission rules plus `sandbox.enabled`, on by default), plus `[[auto]]` rules that Sphere itself decides (for example `git push origin {branch}`). A repo policy can only add restrictions unless the user file says `trust_repos = true`. The sandbox can reach the package registries (crates.io, npm and Yarn, PyPI, the Go module proxy) by default, so installs and builds don't stop to ask; `[sandbox] allowed_domains` adds more hosts, and publishing still asks. Force pushes and history rewrites are denied unless a task starts with `--allow-rewrites`.
 
 A repo's `.sphere/config.toml` can list files to `copy` into each worktree and a `setup` command to run there.
 
