@@ -218,7 +218,7 @@ pub fn setup(
 }
 
 /// Which task the view follows: the one asked for, else the most recently updated.
-fn pick<'a>(w: &Working, tasks: &'a [TaskView]) -> Option<&'a TaskView> {
+pub fn pick<'a>(w: &Working, tasks: &'a [TaskView]) -> Option<&'a TaskView> {
     match &w.task {
         Some(id) => tasks.iter().find(|t| &t.id == id),
         None => tasks.iter().max_by(|a, b| a.updated_at.cmp(&b.updated_at)),
@@ -567,6 +567,27 @@ fn elapsed(t: &TaskView) -> String {
     }
 }
 
+/// The head's tooltip: the task, and where it stands. `now` is unix seconds.
+pub fn head_tip(t: &TaskView, run: &Run, now: i64) -> (String, String) {
+    let live = matches!(t.state, TaskState::Working | TaskState::NeedsYou | TaskState::Queued);
+    let end = if live { now } else { parse_rfc3339(&t.updated_at).unwrap_or(now) };
+    let dur = parse_rfc3339(&t.started_at).map_or(String::new(), |s| {
+        let d = (end - s).max(0);
+        if d < 60 { format!("{d}s") } else if d < 3600 { format!("{}m", d / 60) } else { format!("{}h {}m", d / 3600, d % 3600 / 60) }
+    });
+    let n = run.steps.last().map_or(t.steps as u64, |s| s.seq + 1);
+    let l2 = match t.state {
+        TaskState::Working => format!("Step {n} · {} · {dur}", clip(run.steps.last().map_or("", |s| s.title.as_str()), 40)),
+        TaskState::NeedsYou => "Needs you · waiting on your answer".to_string(),
+        TaskState::Done if t.files.is_empty() => format!("Answered · {n} steps · {dur} · ≈${:.2}", t.cost_usd),
+        TaskState::Done => format!("Done · {} files changed · click to review", t.files.len()),
+        TaskState::Failed => format!("Failed · {}", clip(t.status.strip_prefix("Failed: ").unwrap_or(&t.status), 60)),
+        TaskState::Stopped => "Stopped".to_string(),
+        TaskState::Queued => "Queued".to_string(),
+    };
+    (t.title.to_uppercase(), l2)
+}
+
 /// "2026-10-17T00:55:33.309Z" (or with an offset) as unix seconds.
 pub fn parse_rfc3339(s: &str) -> Option<i64> {
     if s.len() < 19 {
@@ -797,6 +818,28 @@ fn build_chip(c: &mut Commands, root: Entity, f: &UiFonts, s: &RunStep, index: u
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn tv(state: &str, status: &str, files: usize) -> TaskView {
+        serde_json::from_value(serde_json::json!({
+            "id": "t1", "title": "Fix it", "prompt": "", "state": state, "status": status, "repo": "/r", "in_place": false,
+            "budget_usd": 0.0, "cost_usd": 0.5, "started_at": "2026-10-19T00:00:00Z", "updated_at": "2026-10-19T00:03:05Z",
+            "files": (0..files).map(|i| serde_json::json!({"path": format!("f{i}"), "added": 1, "removed": 0})).collect::<Vec<_>>(),
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn the_head_tip_follows_the_state() {
+        let run = Run::default();
+        let now = parse_rfc3339("2026-10-19T00:00:45Z").unwrap();
+        assert_eq!(head_tip(&tv("working", "", 0), &run, now), ("FIX IT".into(), "Step 0 ·  · 45s".into()));
+        assert_eq!(head_tip(&tv("needs_you", "", 0), &run, now).1, "Needs you · waiting on your answer");
+        assert_eq!(head_tip(&tv("done", "Done", 0), &run, now).1, "Answered · 0 steps · 3m · ≈$0.50");
+        assert_eq!(head_tip(&tv("done", "Done", 2), &run, now).1, "Done · 2 files changed · click to review");
+        assert_eq!(head_tip(&tv("failed", "Failed: boom\nmore", 0), &run, now).1, "Failed · boom");
+        assert_eq!(head_tip(&tv("stopped", "", 0), &run, now).1, "Stopped");
+        assert_eq!(head_tip(&tv("queued", "", 0), &run, now).1, "Queued");
+    }
 
     #[test]
     fn rfc3339_reads_utc_and_offsets() {
