@@ -7,6 +7,7 @@ mod editors;
 mod containers;
 mod cmdbar;
 mod core;
+mod depthsort;
 mod filesapp;
 mod fonts;
 mod fx;
@@ -198,7 +199,7 @@ fn main() {
     app.insert_resource(args.clone())
         .insert_resource(ClearColor(Color::BLACK))
         .add_plugins(default_plugins(&args))
-        .add_plugins((glow::GlowPlugin, panel::PanelPlugin))
+        .add_plugins((glow::GlowPlugin, panel::PanelPlugin, depthsort::DepthSortPlugin))
         .add_systems(PreStartup, (setup_offscreen, panel::setup_atlas, no_gpu_clustering))
         .add_systems(PostStartup, panel::finish_atlas)
         .insert_resource(Sim { dt: 1.0 / 60.0, t: 0.0, boot_t: 0.0, fixed_dt: if args.shot.is_some() || args.record.is_some() { Some(args.dt) } else { None }, frozen: false })
