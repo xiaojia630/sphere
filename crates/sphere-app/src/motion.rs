@@ -265,7 +265,7 @@ mod tests {
         let app = crate::codeapp::CodeApp::default().amt;
         let work = crate::working::Working::default().amt;
         let orb = crate::orbit::Orb::default();
-        let tiles: Vec<(f32, Spring)> = (0..8).map(|k| (0.16 + k as f32 * 0.075, orb.em[k])).collect();
+        let tiles: Vec<(f32, Spring)> = orb.em.iter().enumerate().map(|(k, s)| (0.16 + k as f32 * 0.075, *s)).collect();
         let rows = [
             ("app open (panes)", settle_chain(Motion::Cinematic, app, &panes, &[]), settle_chain(Motion::Fast, app, &panes, &[])),
             ("Working view (W)", settle_chain(Motion::Cinematic, work, &panes, &[]), settle_chain(Motion::Fast, work, &panes, &[])),
