@@ -16,6 +16,9 @@ pub struct Hotkey(#[allow(dead_code)] global_hotkey::GlobalHotKeyManager);
 pub fn install(app: &mut App) {
     use global_hotkey::hotkey::{Code, HotKey, Modifiers};
     use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
+    // first: the notification buttons don't need the hotkey (another app may hold Option+Space)
+    native::authorize();
+    native::setup();
     let manager = match GlobalHotKeyManager::new() {
         Ok(m) => m,
         Err(e) => {
@@ -27,8 +30,6 @@ pub fn install(app: &mut App) {
         eprintln!("could not register Option+Space: {e}");
         return;
     }
-    native::authorize();
-    native::setup();
     GlobalHotKeyEvent::set_event_handler(Some(|e: GlobalHotKeyEvent| {
         if e.state() == HotKeyState::Pressed {
             toggle();

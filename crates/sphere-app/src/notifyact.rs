@@ -6,8 +6,9 @@ use crate::moment::{always_rule, options, same_ask};
 use serde_json::Value;
 use sphere_proto::{AnswerKind, RequestKind, RequestStatus, RequestView};
 
-/// The longest body that still shows the whole command: Allow and Always are offered only when it fits.
-pub const BODY_LIMIT: usize = 200;
+/// The longest body Allow and Always are offered for. A banner shows only the first two lines or so of its body, so
+/// this keeps the whole command in view: a longer one could hide what comes after the cut.
+pub const BODY_LIMIT: usize = 80;
 /// A body too long (or too many lines) to trust is cut to this, with an ellipsis.
 const CLIP: usize = 180;
 /// The most options of a question that get a button each; more are answered with Reply or on the card.
@@ -136,6 +137,12 @@ pub fn categories(notes: &[Note]) -> Vec<(String, Vec<Act>)> {
     out
 }
 
+/// A character that breaks the line or reorders the text around it, so a body holding one may not show the command
+/// as it runs (a run of line breaks pushes the rest out of the banner).
+fn hides(c: char) -> bool {
+    c.is_control() || matches!(c, '\u{2028}' | '\u{2029}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
+}
+
 fn compact(t: &str) -> String {
     t.split_whitespace().collect::<Vec<_>>().join(" ")
 }
@@ -195,7 +202,7 @@ pub fn plan(requests: &[RequestView], title_of: impl Fn(&str) -> String) -> Vec<
                 } else {
                     (title, exact(r))
                 };
-                let fits = !body.contains('\n') && !exact(r).is_empty() && body.chars().count() <= BODY_LIMIT;
+                let fits = !body.chars().any(hides) && !exact(r).is_empty() && body.chars().count() <= BODY_LIMIT;
                 let (category, actions) = if !fits {
                     (PERM_OPEN, vec![Act::Open, Act::Deny, Act::Reply])
                 } else if always_rule(r).is_some() {
@@ -346,7 +353,7 @@ mod tests {
     #[test]
     fn a_command_that_does_not_fit_gets_open_deny_and_reply_but_no_allow() {
         let long = format!("echo {}", "x".repeat(BODY_LIMIT));
-        for cmd in [long.as_str(), "echo a\necho b", ""] {
+        for cmd in [long.as_str(), "echo a\necho b", "", "echo a\r\r\r\rrm -rf x", "echo \u{202E}x fr- mr"] {
             let n = plan(&[bash("r1", "t1", cmd, true)], titles);
             assert_eq!(n[0].category, "perm-open", "{cmd:?}");
             assert_eq!(n[0].actions, vec![Act::Open, Act::Deny, Act::Reply]);
