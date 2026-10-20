@@ -162,3 +162,16 @@ async fn stopping_a_parent_stops_the_helpers_still_working() {
     let snap = c.snapshot().await.unwrap();
     assert!(snap.tasks.iter().all(|t| t.state == TaskState::Stopped));
 }
+
+#[tokio::test]
+async fn a_waiting_parent_holds_no_slot_so_its_helper_can_run() {
+    let mut env = Env::new("helpers").set("max_concurrent", "1");
+    env.start_daemon().await;
+    let c = env.client().await;
+    let mut w = env.watcher(0, None).await;
+    env.start_task(&c, "Parent", "go").await;
+    let waited = say_text(&w.wait("the wait", say_has("The helper has finished")).await);
+    assert!(waited.contains("Wrote notes.txt for you"), "{waited}");
+    w.wait("the parent's turn", |e| e.task == "t1" && is_turn(e))
+        .await;
+}

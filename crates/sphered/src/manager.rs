@@ -79,6 +79,34 @@ struct Rt {
     launching: HashSet<String>,
     /// The wait for the daily cap to end, while queued tasks sit it out.
     cap_wait: Option<AbortHandle>,
+    /// Parents inside `wait_for_helpers`. They hold no concurrency slot, or
+    /// their queued helpers could never start.
+    waiting: HashSet<String>,
+}
+
+/// Marks a parent as waiting for its helpers until dropped, on any exit.
+struct WaitGuard {
+    mgr: Arc<Manager>,
+    task: String,
+}
+
+impl WaitGuard {
+    fn new(mgr: &Arc<Manager>, task: &str) -> WaitGuard {
+        mgr.rt.lock().unwrap().waiting.insert(task.to_string());
+        // The slot it held is free: queued helpers may start.
+        mgr.pump();
+        WaitGuard {
+            mgr: mgr.clone(),
+            task: task.to_string(),
+        }
+    }
+}
+
+impl Drop for WaitGuard {
+    fn drop(&mut self) {
+        // The parent carries on, even if that briefly exceeds the limit.
+        self.mgr.rt.lock().unwrap().waiting.remove(&self.task);
+    }
 }
 
 #[derive(Default)]
@@ -547,7 +575,12 @@ impl Manager {
         let start: Vec<String> = {
             let mut rt = self.rt.lock().unwrap();
             let launching = rt.launching.clone();
+            let waiting = rt.waiting.clone();
             let (active, queued) = self.hub.view(|v| {
+                let waiting = waiting
+                    .iter()
+                    .filter(|t| v.task(t).is_some_and(|t| t.state.is_active()))
+                    .count();
                 let queued_launching = launching
                     .iter()
                     .filter(|t| v.task(t).is_some_and(|t| t.state == TaskState::Queued))
@@ -558,7 +591,10 @@ impl Manager {
                     .filter(|t| !launching.contains(&t.id))
                     .map(|t| t.id.clone())
                     .collect();
-                (v.active_count() + queued_launching, queued)
+                (
+                    (v.active_count() + queued_launching).saturating_sub(waiting),
+                    queued,
+                )
             });
             let free = self.cfg.max_concurrent.saturating_sub(active);
             let pick: Vec<String> = queued.into_iter().take(free).collect();
@@ -1763,6 +1799,7 @@ impl Manager {
                     return Ok(Some("You have not started any helpers.".into()));
                 }
                 let reported = self.reported_asks.lock().unwrap().clone();
+                let _waiting = WaitGuard::new(self, parent);
                 let began = std::time::Instant::now();
                 let end = helpers::wait(&self.hub, parent, &ids, timeout, &reported).await;
                 match &end {
