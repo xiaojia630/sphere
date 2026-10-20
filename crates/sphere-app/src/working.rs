@@ -7,7 +7,7 @@ use crate::core::{CoreCtl, CoreRoot};
 use crate::fonts::UiFonts;
 use crate::glow::{GlowMaterial, GlowSlots, Kind, ATTR_HOLO};
 use crate::panel::*;
-use crate::service::{Cmd, Run, RunStep, Service};
+use crate::service::{is_live, Cmd, Run, RunStep, Service};
 use crate::util::*;
 use bevy::asset::RenderAssetUsages;
 use bevy::mesh::PrimitiveTopology;
@@ -183,8 +183,12 @@ pub fn setup(
     mut atlas: ResMut<crate::panel::PanelAtlas>,
     mut pmats: ResMut<Assets<PanelMaterial>>,
     args: Res<crate::Args>,
+    svc: Res<Service>,
 ) {
     let c = &mut commands;
+    if let Some(kind) = args.output.as_deref().filter(|_| args.offline()) {
+        demo_output(&svc, kind == "live");
+    }
     if args.work {
         let mut w = Working::default();
         w.open_latest();
@@ -226,6 +230,49 @@ pub fn setup(
         *ch = ui.root;
     }
     c.insert_resource(WorkRoots { run, out, edit, chips });
+}
+
+/// The look test's agent for `--output`: a question answered after reading code and running the tests (one run failed
+/// on the way), as sphered would have it; `live` stops it mid-run, before its last reply.
+fn demo_output(svc: &Service, live: bool) {
+    use sphere_proto::{Event, EventBody, Excerpt, StepKind, TaskView};
+    let t: TaskView = serde_json::from_value(serde_json::json!({
+        "id": "t-output", "title": "Why is the login test flaky?", "prompt": "", "state": if live { "working" } else { "done" },
+        "status": if live { "Running the login tests" } else { "" }, "repo": "/demo/web-app", "in_place": false, "budget_usd": 5.0,
+        "cost_usd": 0.42, "started_at": "2026-10-20T08:02:00Z", "updated_at": "2026-10-20T08:09:00Z", "steps": 6,
+    }))
+    .expect("demo task");
+    let ev = |body| Event { seq: 0, task: "t-output".into(), at: "2026-10-20T08:09:00Z".into(), body };
+    let mut run = Run::default();
+    let steps: [(&str, StepKind, &str, bool, &str); 6] = [
+        ("a", StepKind::Read, "tests/login.spec.ts", true, "import { test, expect } from '@playwright/test';\nimport { login } from './helpers';\n\ntest('logs in', async ({ page }) => {\n  await login(page, 'ada@example.com');\n  expect(await page.context().cookies()).toContainEqual(expect.objectContaining({ name: 'sid' }));\n});"),
+        ("b", StepKind::Search, "waitForSession in src/", true, "src/auth/session.ts:88:  setTimeout(() => writeCookie(res, sid), 0);\nsrc/auth/session.ts:91:export async function waitForSession() {\ntests/helpers.ts:14:  await waitForSession();"),
+        ("c", StepKind::Read, "src/auth/session.ts", true, "export async function waitForSession() {\n  return pending.size === 0 ? undefined : once(events, 'session');\n}"),
+        ("d", StepKind::Run, "npm test -- --grep login --repeat-each 20", false, "Running 20 tests using 4 workers\n  ✘ 7 [chromium] › login.spec.ts:4:5 › logs in (1.2s)\n    Error: expect(received).toContainEqual(expected)\n    Expected value: ObjectContaining {\"name\": \"sid\"}\n  19 passed, 1 failed (14.8s)"),
+        ("e", StepKind::Read, "tests/helpers.ts", true, "export async function login(page, email) {\n  await page.goto('/login');\n  await page.fill('#email', email);\n  await page.click('text=Sign in');\n  await waitForSession();\n}"),
+        ("f", StepKind::Plan, "Update the plan", true, ""),
+    ];
+    let n = if live { 5 } else { steps.len() };
+    for (k, (id, kind, title, ok, out)) in steps.iter().take(n).enumerate() {
+        if k == 3 {
+            run.apply(&ev(EventBody::Say { text: "The cookie check reads the session before it is written. Let me run the test many times to confirm.".into() }));
+        }
+        run.apply(&ev(EventBody::Step { id: (*id).into(), step_kind: *kind, tool: kind_word(*kind).into(), title: (*title).into(), detail: String::new(), parent: None }));
+        if live && k + 1 == n {
+            break;
+        }
+        let output = (!out.is_empty()).then(|| Excerpt { head: (*out).into(), tail: None, bytes: out.len() as u64, source: None });
+        run.apply(&ev(EventBody::StepDone { id: (*id).into(), ok: *ok, output }));
+    }
+    if !live {
+        run.apply(&ev(EventBody::Say {
+            text: "## Why it's flaky\n\nThe test races the session cookie. **`waitForSession()`** returns as soon as nothing is pending, but the cookie is written in a `setTimeout(…, 0)` after that, so about 1 run in 20 reads no `sid` cookie.\n\n- `tests/login.spec.ts:6` checks the cookie right after login\n- `src/auth/session.ts:88` writes it on the next tick\n\n### Fix\n\n1. In `tests/helpers.ts`, wait for the `sid` cookie itself instead of `waitForSession()`\n2. Leave the app code as it is\n\n```\nawait expect.poll(() => cookie(page, 'sid')).toBeTruthy();\n```\n\nWith `--repeat-each 20` it failed 1 run in 20, which matches. Want me to make the change?".into(),
+        }));
+    }
+    let mut s = svc.shared.lock().unwrap();
+    s.runs.insert(t.id.clone(), run);
+    s.tasks = vec![t];
+    s.version += 1;
 }
 
 /// Which task the view follows: the one asked for, else the most recently updated.
@@ -513,7 +560,7 @@ fn wrap(s: &str, n: usize) -> Vec<String> {
 
 /// Rebuilds the work panels' UI when the run changes (and once a second for the clock).
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
-pub fn draw(mut commands: Commands, svc: Res<Service>, roots: Option<Res<WorkRoots>>, f: Res<UiFonts>, time: Res<Time<Real>>, sim: Res<crate::core::Sim>, mut w: ResMut<Working>, mut seen: Local<(u64, Option<String>, u64, i64, usize)>, mut last: Local<(String, usize)>) {
+pub fn draw(mut commands: Commands, svc: Res<Service>, roots: Option<Res<WorkRoots>>, f: Res<UiFonts>, time: Res<Time<Real>>, sim: Res<crate::core::Sim>, mut w: ResMut<Working>, mut seen: Local<(u64, Option<String>, u64, i64, usize)>, mut last: Local<(String, usize, bool)>) {
     let Some(roots) = roots else { return };
     if w.amt.x < 0.001 && !w.open {
         return;
@@ -527,11 +574,12 @@ pub fn draw(mut commands: Commands, svc: Res<Service>, roots: Option<Res<WorkRoo
     };
     // the clock ticks once a second (a frozen look test stops it, so its screenshot can settle)
     let clock = if sim.frozen { seen.3 } else { time.elapsed_secs() as i64 };
-    // a new task or a new reply snaps the output back to the bottom
-    let cur = (task.as_ref().map(|t| t.id.clone()).unwrap_or_default(), run.says.len());
+    // a new task or a new reply moves the output: a finished answer opens at its top, a run still going follows its end
+    let done = task.as_ref().is_some_and(|t| !is_live(t));
+    let cur = (task.as_ref().map(|t| t.id.clone()).unwrap_or_default(), run.says.len(), done);
     if *last != cur {
         *last = cur;
-        w.out_scroll = 0;
+        w.out_scroll = if done { usize::MAX } else { 0 };
     }
     let key = (run.version, task.as_ref().map(|t| format!("{}{:?}{}{:?}{:?}", t.id, t.state, t.status, kin.helpers, kin.parent)), w.version, clock, w.out_scroll);
     if *seen == key {
@@ -824,6 +872,323 @@ fn build_run(c: &mut Commands, root: Entity, f: &UiFonts, t: &TaskView, run: &Ru
     c.entity(b).add_child(keys);
 }
 
+/// A row of the output panel: what the agent said, read as light markdown, and the run's few lines around it.
+#[derive(Clone, Debug, PartialEq)]
+enum Row {
+    /// what the run did, in one line ("Read 2 files · ran 2 commands")
+    Meta(String),
+    Heading(String),
+    Body(String),
+    /// a list item's first line (with its marker) and, `false`, the lines that wrap under it
+    Item(String, bool),
+    Code(String),
+    /// a step that failed and wasn't put right since, and its first error lines
+    Bad(String),
+    /// the step running now
+    Now(String),
+    Gap,
+}
+
+impl Row {
+    fn height(&self) -> f32 {
+        match self {
+            Row::Heading(_) => 24.0,
+            Row::Body(_) | Row::Item(..) => 19.0,
+            Row::Code(_) | Row::Bad(_) => 17.0,
+            Row::Meta(_) | Row::Now(_) => 20.0,
+            Row::Gap => 8.0,
+        }
+    }
+}
+
+/// The height the output panel's rows get, under its header.
+const OUT_ROWS_H: f32 = 236.0;
+/// Characters a line of the reply holds (the UI font, 13 px, in the panel's 524 px), and a line of code (mono).
+const OUT_COLS: usize = 92;
+const CODE_COLS: usize = 70;
+
+/// `s` with links read as their text and `__bold__` as `**bold**`; the bold and code marks stay for `spans`.
+fn plain(s: &str) -> String {
+    let s = s.replace("__", "**");
+    // [text](url) → text
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s.as_str();
+    while let Some(open) = rest.find('[') {
+        let Some(close) = rest[open..].find("](").map(|i| open + i) else { break };
+        let Some(end) = rest[close..].find(')').map(|i| close + i) else { break };
+        out.push_str(&rest[..open]);
+        out.push_str(&rest[open + 1..close]);
+        rest = &rest[end + 1..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// `wrap`, with each line's bold and code marks closed at its end and opened again on the next, so every line reads
+/// on its own.
+fn marked_wrap(s: &str, cols: usize) -> Vec<String> {
+    let (mut bold, mut code) = (false, false);
+    wrap(s, cols)
+        .into_iter()
+        .map(|l| {
+            let mut out = String::new();
+            if bold {
+                out.push_str("**");
+            }
+            if code {
+                out.push('`');
+            }
+            out.push_str(&l);
+            // what is still open at the end of this line
+            let (b, c) = open_marks(&out);
+            if c {
+                out.push('`');
+            }
+            if b {
+                out.push_str("**");
+            }
+            (bold, code) = (b, c);
+            out
+        })
+        .collect()
+}
+
+/// Whether a bold and a code span are still open at the end of `s`.
+fn open_marks(s: &str) -> (bool, bool) {
+    let (mut bold, mut code) = (false, false);
+    let mut it = s.char_indices().peekable();
+    while let Some((i, ch)) = it.next() {
+        if ch == '`' {
+            code = !code;
+        } else if !code && s[i..].starts_with("**") {
+            bold = !bold;
+            it.next();
+        }
+    }
+    (bold, code)
+}
+
+/// How a run of a reply's line is drawn.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+enum Mark {
+    #[default]
+    Plain,
+    Bold,
+    Code,
+}
+
+/// A line split at its bold (`**`) and code (`` ` ``) marks, the marks dropped; empty runs are left out.
+fn spans(s: &str) -> Vec<(String, Mark)> {
+    let mut out: Vec<(String, Mark)> = Vec::new();
+    let (mut bold, mut code) = (false, false);
+    let mut cur = String::new();
+    let mark = |b: bool, c: bool| if c { Mark::Code } else if b { Mark::Bold } else { Mark::Plain };
+    let mut it = s.char_indices().peekable();
+    while let Some((i, ch)) = it.next() {
+        let flip_code = ch == '`';
+        let flip_bold = !code && s[i..].starts_with("**");
+        if flip_code || flip_bold {
+            if !cur.is_empty() {
+                out.push((std::mem::take(&mut cur), mark(bold, code)));
+            }
+            if flip_code {
+                code = !code;
+            } else {
+                bold = !bold;
+                it.next();
+            }
+            continue;
+        }
+        cur.push(ch);
+    }
+    if !cur.is_empty() {
+        out.push((cur, mark(bold, code)));
+    }
+    out
+}
+
+/// The rows of a reply: headings, paragraphs, list items and code blocks, wrapped to `cols`; blank lines become one gap.
+fn reply_rows(text: &str, cols: usize) -> Vec<Row> {
+    let mut rows: Vec<Row> = Vec::new();
+    let mut code = false;
+    let gap = |rows: &mut Vec<Row>| {
+        if !rows.is_empty() && rows.last() != Some(&Row::Gap) {
+            rows.push(Row::Gap);
+        }
+    };
+    for raw in text.lines() {
+        let l = raw.trim_end();
+        if l.trim_start().starts_with("```") {
+            code = !code;
+            continue;
+        }
+        if code {
+            rows.push(Row::Code(clip(l, CODE_COLS)));
+            continue;
+        }
+        let t = l.trim_start();
+        if t.is_empty() {
+            gap(&mut rows);
+            continue;
+        }
+        // a table's rule; its rows read as cells with dots between
+        if t.starts_with('|') && t.chars().all(|c| matches!(c, '|' | '-' | ':' | ' ')) {
+            continue;
+        }
+        if t.starts_with('|') {
+            let cells: Vec<String> = t.trim_matches('|').split('|').map(|c| plain(c.trim())).filter(|c| !c.is_empty()).collect();
+            rows.extend(marked_wrap(&cells.join(" · "), cols).into_iter().map(Row::Body));
+            continue;
+        }
+        if t.starts_with('#') {
+            let h = plain(t.trim_start_matches('#').trim()).replace("**", "").replace('`', "");
+            if !h.is_empty() {
+                gap(&mut rows);
+                rows.push(Row::Heading(clip(&h, cols)));
+            }
+            continue;
+        }
+        if matches!(t, "---" | "***" | "___") {
+            gap(&mut rows);
+            continue;
+        }
+        let t = t.strip_prefix("> ").unwrap_or(t);
+        // a list item: "- ", "* ", "+ " become a bullet; "1. " keeps its number
+        let marker = if let Some(r) = t.strip_prefix("- ").or_else(|| t.strip_prefix("* ")).or_else(|| t.strip_prefix("+ ")) {
+            Some(("•".to_string(), r))
+        } else {
+            let digits = t.chars().take_while(|c| c.is_ascii_digit()).count();
+            (digits > 0 && t[digits..].starts_with(". ")).then(|| (t[..digits + 1].to_string(), &t[digits + 2..]))
+        };
+        match marker {
+            Some((m, r)) => {
+                for (i, w) in marked_wrap(&plain(r), cols - 4).into_iter().enumerate() {
+                    rows.push(if i == 0 { Row::Item(format!("{m}  {w}"), true) } else { Row::Item(w, false) });
+                }
+            }
+            None => rows.extend(marked_wrap(&plain(t), cols).into_iter().map(Row::Body)),
+        }
+    }
+    while rows.last() == Some(&Row::Gap) {
+        rows.pop();
+    }
+    rows
+}
+
+fn count(n: usize, one: &str, many: &str) -> String {
+    format!("{n} {}", if n == 1 { one } else { many })
+}
+
+/// What the run did, in one line: "2 files read · 1 search · 2 commands run, 1 failed · 1 file edited".
+fn activity(run: &Run) -> String {
+    let of = |k: StepKind| run.steps.iter().filter(move |s| s.kind == k);
+    let mut parts = Vec::new();
+    let read = of(StepKind::Read).map(|s| s.title.as_str()).collect::<std::collections::HashSet<_>>().len();
+    if read > 0 {
+        parts.push(format!("{} read", count(read, "file", "files")));
+    }
+    let search = of(StepKind::Search).count() + of(StepKind::Web).count();
+    if search > 0 {
+        parts.push(count(search, "search", "searches"));
+    }
+    let ran = of(StepKind::Run).count();
+    if ran > 0 {
+        let failed = of(StepKind::Run).filter(|s| s.ok == Some(false)).count();
+        parts.push(if failed > 0 { format!("{} run, {failed} failed", count(ran, "command", "commands")) } else { format!("{} run", count(ran, "command", "commands")) });
+    }
+    let edited = if run.files.is_empty() { of(StepKind::Edit).map(|s| s.title.as_str()).collect::<std::collections::HashSet<_>>().len() } else { run.files.len() };
+    if edited > 0 {
+        parts.push(format!("{} edited", count(edited, "file", "files")));
+    }
+    let helpers = of(StepKind::Delegate).count();
+    if helpers > 0 {
+        parts.push(count(helpers, "helper", "helpers"));
+    }
+    parts.join("  ·  ")
+}
+
+/// The command that failed last, while nothing ran fine after it, and its first error lines.
+fn open_failure(run: &Run) -> Option<(String, Vec<String>)> {
+    let last = run.steps.iter().rev().find(|s| s.kind == StepKind::Run && s.ok.is_some())?;
+    if last.ok != Some(false) {
+        return None;
+    }
+    let out = if last.output.is_empty() { &last.detail } else { &last.output };
+    let lines: Vec<&str> = out.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    let errs: Vec<&str> = lines.iter().copied().filter(|l| { let l = l.to_lowercase(); l.contains("error") || l.contains("fail") || l.starts_with('✘') || l.starts_with('✗') || l.contains("panicked") }).collect();
+    let pick = if errs.is_empty() { lines } else { errs };
+    // the test runners' crosses aren't in the mono font
+    Some((last.title.clone(), pick.into_iter().take(2).map(|l| clip(&l.replace(['✘', '✗', '✕'], "×"), 68)).collect()))
+}
+
+/// Every row of the output panel for `t`: what the run did, the agent's latest reply, a failure still open, and the
+/// step running now.
+fn out_rows(t: &TaskView, run: &Run) -> Vec<Row> {
+    let mut rows = Vec::new();
+    let what = activity(run);
+    if !what.is_empty() {
+        rows.push(Row::Meta(what));
+        rows.push(Row::Gap);
+    }
+    match run.says.last() {
+        Some(say) => rows.extend(reply_rows(say, OUT_COLS)),
+        None if run.steps.is_empty() && is_live(t) => rows.push(Row::Body("Starting up…".into())),
+        None if !is_live(t) && t.state != TaskState::Failed => rows.push(Row::Body("The agent finished without a reply.".into())),
+        None => {}
+    }
+    if t.state == TaskState::Failed {
+        let why = t.status.strip_prefix("Failed: ").unwrap_or(&t.status);
+        rows.push(Row::Gap);
+        rows.push(Row::Bad(format!("FAILED  {}", clip(why.lines().next().unwrap_or(""), 64))));
+    } else if is_live(t) {
+        if let Some((cmd, errs)) = open_failure(run) {
+            rows.push(Row::Gap);
+            rows.push(Row::Bad(format!("FAILED  {}", clip(&cmd, 62))));
+            rows.extend(errs.into_iter().map(|e| Row::Bad(format!("   {e}"))));
+        }
+    }
+    if t.state == TaskState::NeedsYou {
+        rows.push(Row::Gap);
+        rows.push(Row::Now("WAITING ON YOU  ·  N TO ANSWER".into()));
+    } else if t.state == TaskState::Working {
+        if let Some(s) = run.steps.last().filter(|s| s.ok.is_none()) {
+            rows.push(Row::Gap);
+            rows.push(Row::Now(format!("{}  {}", kind_word(s.kind), clip(&s.title, 60))));
+        }
+    }
+    while rows.last() == Some(&Row::Gap) {
+        rows.pop();
+    }
+    if rows.first() == Some(&Row::Gap) {
+        rows.remove(0);
+    }
+    rows
+}
+
+/// The rows on screen: the most that fit in `h`, ending `scroll` rows above the last (never past the first). Returns
+/// the range and the largest scroll that still moves it.
+fn out_window(rows: &[Row], scroll: usize, h: f32) -> (usize, usize, usize) {
+    let fits_from = |end: usize| {
+        let mut used = 0.0;
+        let mut start = end;
+        while start > 0 && used + rows[start - 1].height() <= h {
+            used += rows[start - 1].height();
+            start -= 1;
+        }
+        start
+    };
+    // the largest scroll: the window that starts at the first row
+    let mut used = 0.0;
+    let mut top_end = 0;
+    while top_end < rows.len() && used + rows[top_end].height() <= h {
+        used += rows[top_end].height();
+        top_end += 1;
+    }
+    let max = rows.len() - top_end;
+    let end = rows.len() - scroll.min(max);
+    (fits_from(end), end, max)
+}
+
 fn build_out(c: &mut Commands, root: Entity, f: &UiFonts, t: &TaskView, run: &Run, scroll: usize) -> usize {
     let line = role_color(Role::Line);
     let hot = role_color(Role::Hot);
@@ -831,7 +1196,7 @@ fn build_out(c: &mut Commands, root: Entity, f: &UiFonts, t: &TaskView, run: &Ru
     c.entity(root).add_child(b);
     let live = matches!(t.state, TaskState::Working | TaskState::NeedsYou);
     let hdr = c
-        .spawn((Node { flex_direction: FlexDirection::Row, align_items: AlignItems::Center, column_gap: px(9), padding: UiRect { bottom: px(8), ..default() }, margin: UiRect { bottom: px(6), ..default() }, border: UiRect { bottom: px(1), ..default() }, ..default() }, BorderColor::all(with_alpha(line, 0.72))))
+        .spawn((Node { flex_direction: FlexDirection::Row, align_items: AlignItems::Center, column_gap: px(9), padding: UiRect { bottom: px(8), ..default() }, margin: UiRect { bottom: px(8), ..default() }, border: UiRect { bottom: px(1), ..default() }, ..default() }, BorderColor::all(with_alpha(line, 0.72))))
         .id();
     let sq = c.spawn((Node { width: px(6), height: px(6), ..default() }, BackgroundColor(if live { role_color(Role::Fill) } else { role_color(Role::Dim) }))).id();
     let tt = c.spawn((Text::new("OUTPUT"), font(&f.ui600, 12.0, 3.84), TextColor(hot), LineHeight::Px(14.4))).id();
@@ -843,35 +1208,61 @@ fn build_out(c: &mut Commands, root: Entity, f: &UiFonts, t: &TaskView, run: &Ru
         _ => "LIVE · AGENT",
     };
     let r = c.spawn((Text::new(st), font(&f.ui500, 12.0, 2.16), TextColor(role_color(Role::Dim)), LineHeight::Px(14.4), Node { margin: UiRect { left: auto(), ..default() }, ..default() })).id();
-    c.entity(hdr).add_children(&[sq, tt, r]);
     c.entity(b).add_child(hdr);
-    // the last lines: each step as a command, then its output (errors in red), newest at the bottom
-    let mut lines: Vec<(String, Role)> = Vec::new();
-    for s in run.steps.iter().rev().take(6).collect::<Vec<_>>().into_iter().rev() {
-        lines.push((format!("$ {}", clip(&s.title, 70)), Role::Hot));
-        let out = if !s.output.is_empty() { s.output.clone() } else { s.detail.clone() };
-        for l in wrap(&out, 74).into_iter().take(3) {
-            lines.push((l, if s.ok == Some(false) { Role::Bad } else { Role::Line }));
-        }
+    let rows = out_rows(t, run);
+    let (mut start, mut end, max) = out_window(&rows, scroll, OUT_ROWS_H);
+    // a gap at either edge of the window shows nothing: the row past it is the one to dim
+    while start < end && rows[start] == Row::Gap {
+        start += 1;
     }
-    // the whole latest reply, wrapped; continuation lines indent under the first
-    if let Some(say) = run.says.last() {
-        for (i, l) in wrap(say, 70).into_iter().enumerate() {
-            lines.push((if i == 0 { format!("» {l}") } else { format!("  {l}") }, Role::Fill));
-        }
+    while end > start && rows[end - 1] == Row::Gap {
+        end -= 1;
     }
-    // the window of 12 lines, `scroll` lines above the bottom (never past the top)
-    let end = lines.len().saturating_sub(scroll.min(lines.len().saturating_sub(12)));
-    let start = end.saturating_sub(12);
-    let shown = &lines[start..end];
-    for (k, (text, role)) in shown.iter().enumerate() {
-        let fade = if (k == 0 && start > 0) || (k + 1 == shown.len() && end < lines.len()) { 0.45 } else { 1.0 };
-        let e = c
-            .spawn((Text::new(text.clone()), font(&f.mono, 12.0, 0.0), TextColor(with_alpha(role_color(*role), fade)), LineHeight::Px(19.0), TextLayout { linebreak: LineBreak::NoWrap, ..default() }, Node { overflow: Overflow::clip(), ..default() }))
-            .id();
+    // more past the bottom: the header says so (the wheel scrolls)
+    let more = (end < rows.len()).then(|| c.spawn((Text::new("↓ MORE"), font(&f.ui600, 11.0, 2.0), TextColor(role_color(Role::Fill)), LineHeight::Px(14.4), Node { margin: UiRect { left: px(14), ..default() }, ..default() })).id());
+    c.entity(hdr).add_children(&[sq, tt, r]);
+    if let Some(m) = more {
+        c.entity(hdr).add_child(m);
+    }
+    for (k, row) in rows[start..end].iter().enumerate() {
+        // the edge rows dim when there is more past them (the wheel scrolls)
+        let fade = if (k == 0 && start > 0) || (start + k + 1 == end && end < rows.len()) { 0.4 } else { 1.0 };
+        let text = |s: &str, h: &Handle<Font>, size: f32, sp: f32, col: Color, lh: f32| (Text::new(s.to_string()), font(h, size, sp), TextColor(with_alpha(col, fade)), LineHeight::Px(lh), TextLayout { linebreak: LineBreak::NoWrap, ..default() });
+        let e = match row {
+            Row::Meta(s) => c.spawn((text(s, &f.ui500, 12.0, 0.6, role_color(Role::Dim), 20.0), Node { overflow: Overflow::clip(), ..default() })).id(),
+            Row::Heading(s) => c.spawn((text(s, &f.ui600, 13.5, 0.4, hot, 24.0), Node { overflow: Overflow::clip(), ..default() })).id(),
+            Row::Body(s) => prose(c, f, s, fade, 0.0),
+            Row::Item(s, first) => prose(c, f, s, fade, if *first { 2.0 } else { 19.0 }),
+            Row::Code(s) => c
+                .spawn((text(s, &f.mono, 11.5, 0.0, role_color(Role::Fill), 17.0), Node { overflow: Overflow::clip(), margin: UiRect { left: px(2), ..default() }, padding: UiRect { left: px(10), ..default() }, border: UiRect { left: px(1), ..default() }, ..default() }, BorderColor::all(with_alpha(line, 0.3 * fade))))
+                .id(),
+            Row::Bad(s) => c.spawn((text(s, &f.mono, 11.5, 0.0, role_color(Role::Bad), 17.0), Node { overflow: Overflow::clip(), ..default() })).id(),
+            Row::Now(s) => c.spawn((text(s, &f.ui600, 11.5, 1.6, role_color(Role::Fill), 20.0), Node { overflow: Overflow::clip(), ..default() })).id(),
+            Row::Gap => c.spawn(Node { height: px(8), flex_shrink: 0.0, ..default() }).id(),
+        };
         c.entity(b).add_child(e);
     }
-    lines.len().saturating_sub(12)
+    max
+}
+
+/// A line of the reply in the UI font: bold runs bright, code runs in mono.
+fn prose(c: &mut Commands, f: &UiFonts, s: &str, fade: f32, indent: f32) -> Entity {
+    let style = |m: Mark| match m {
+        Mark::Plain => (&f.ui500, 13.0, 0.2, role_color(Role::Line)),
+        Mark::Bold => (&f.ui600, 13.0, 0.2, role_color(Role::Hot)),
+        Mark::Code => (&f.mono, 11.5, 0.0, role_color(Role::Fill)),
+    };
+    let runs = spans(s);
+    let (first, m0) = runs.first().cloned().unwrap_or_default();
+    let (h, size, sp, col) = style(m0);
+    let e = c
+        .spawn((Text::new(first), font(h, size, sp), TextColor(with_alpha(col, fade)), LineHeight::Px(19.0), TextLayout { linebreak: LineBreak::NoWrap, ..default() }, Node { overflow: Overflow::clip(), margin: UiRect { left: px(indent), ..default() }, ..default() }))
+        .id();
+    for (run, m) in runs.into_iter().skip(1) {
+        let (h, size, sp, col) = style(m);
+        c.spawn((TextSpan::new(run), font(h, size, sp), TextColor(with_alpha(col, fade)), LineHeight::Px(19.0), ChildOf(e)));
+    }
+    e
 }
 
 fn build_edit(c: &mut Commands, root: Entity, f: &UiFonts, run: &Run) {
@@ -1000,6 +1391,98 @@ mod tests {
         assert_eq!(steps(t.clone()), 8);
         t.briefed = 2;
         assert_eq!(steps(t), 7);
+    }
+
+    fn step_run(steps: &[(&str, StepKind, &str, Option<bool>, &str)], say: Option<&str>) -> Run {
+        use sphere_proto::{Event, EventBody, Excerpt};
+        let ev = |body| Event { seq: 0, task: "t1".into(), at: "2026-10-19T00:00:00Z".into(), body };
+        let mut run = Run::default();
+        for (id, kind, title, ok, out) in steps {
+            run.apply(&ev(EventBody::Step { id: (*id).into(), step_kind: *kind, tool: "T".into(), title: (*title).into(), detail: String::new(), parent: None }));
+            if let Some(ok) = ok {
+                let output = (!out.is_empty()).then(|| Excerpt { head: (*out).into(), tail: None, bytes: 0, source: None });
+                run.apply(&ev(EventBody::StepDone { id: (*id).into(), ok: *ok, output }));
+            }
+        }
+        if let Some(say) = say {
+            run.apply(&ev(EventBody::Say { text: say.into() }));
+        }
+        run
+    }
+
+    fn row_texts(rows: &[Row]) -> Vec<String> {
+        rows.iter()
+            .map(|r| match r {
+                Row::Meta(s) | Row::Heading(s) | Row::Body(s) | Row::Code(s) | Row::Bad(s) | Row::Now(s) | Row::Item(s, _) => s.clone(),
+                Row::Gap => String::new(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_reply_reads_as_headings_paragraphs_lists_and_code() {
+        let rows = reply_rows("## Why\n\nIt **races** the `sid` cookie, see [the docs](https://x.y).\n\n\n- one\n* two\n3. three\n\n```\nlet a = 1;\n```\n| a | b |\n|---|---|\n| 1 | 2 |\n---\n> quoted", 92);
+        assert_eq!(
+            rows,
+            vec![
+                Row::Heading("Why".into()),
+                Row::Gap,
+                Row::Body("It **races** the `sid` cookie, see the docs.".into()),
+                Row::Gap,
+                Row::Item("•  one".into(), true),
+                Row::Item("•  two".into(), true),
+                Row::Item("3.  three".into(), true),
+                Row::Gap,
+                Row::Code("let a = 1;".into()),
+                Row::Body("a · b".into()),
+                Row::Body("1 · 2".into()),
+                Row::Gap,
+                Row::Body("quoted".into()),
+            ]
+        );
+        // a long item wraps under its text, not under its marker
+        let rows = reply_rows("- aaaa bbbb cccc", 10);
+        assert_eq!(rows, vec![Row::Item("•  aaaa".into(), true), Row::Item("bbbb".into(), false), Row::Item("cccc".into(), false)]);
+    }
+
+    #[test]
+    fn bold_and_code_marks_close_at_each_line_end() {
+        assert_eq!(marked_wrap("see `a b c` now", 6), ["see `a`", "`b c`", "now"]);
+        assert_eq!(marked_wrap("**aa bb** cc", 5), ["**aa**", "**bb**", "cc"]);
+        assert_eq!(spans("x **b** `c` y"), vec![("x ".into(), Mark::Plain), ("b".into(), Mark::Bold), (" ".into(), Mark::Plain), ("c".into(), Mark::Code), (" y".into(), Mark::Plain)]);
+        // inside code, ** is text
+        assert_eq!(spans("`a**b`"), vec![("a**b".into(), Mark::Code)]);
+    }
+
+    #[test]
+    fn the_output_shows_the_answer_and_not_the_tools_raw_output() {
+        let run = step_run(&[("a", StepKind::Read, "src/a.rs", Some(true), "fn secret_file_contents() {}"), ("b", StepKind::Run, "cargo test", Some(true), "test result: ok")], Some("It works."));
+        let rows = row_texts(&out_rows(&tv("done", "", 0), &run));
+        assert_eq!(rows, ["1 file read  ·  1 command run", "", "It works."]);
+    }
+
+    #[test]
+    fn a_failed_command_shows_until_one_runs_fine_after_it() {
+        let failed = ("a", StepKind::Run, "npm test", Some(false), "Running 3 tests\n  ✘ logs in\n    Error: expected sid");
+        let run = step_run(&[failed, ("b", StepKind::Read, "src/a.rs", None, "")], Some("Looking."));
+        let rows = row_texts(&out_rows(&tv("working", "", 0), &run));
+        assert_eq!(rows, ["1 file read  ·  1 command run, 1 failed", "", "Looking.", "", "FAILED  npm test", "   × logs in", "   Error: expected sid", "", "READ  src/a.rs"]);
+        let run = step_run(&[failed, ("b", StepKind::Run, "npm test", Some(true), "ok")], Some("Fixed."));
+        assert!(!row_texts(&out_rows(&tv("working", "", 0), &run)).iter().any(|r| r.starts_with("FAILED")));
+        // a failed task says why
+        let rows = row_texts(&out_rows(&tv("failed", "Failed: budget reached\nmore", 0), &Run::default()));
+        assert_eq!(rows, ["FAILED  budget reached"]);
+    }
+
+    #[test]
+    fn the_output_window_fits_its_height_and_scrolls_to_the_top() {
+        let rows: Vec<Row> = (0..30).map(|i| Row::Body(format!("{i}"))).collect();
+        // 19 px rows in 100 px: five fit
+        assert_eq!(out_window(&rows, 0, 100.0), (25, 30, 25));
+        assert_eq!(out_window(&rows, 3, 100.0), (22, 27, 25));
+        assert_eq!(out_window(&rows, usize::MAX, 100.0), (0, 5, 25));
+        assert_eq!(out_window(&rows[..3], 0, 100.0), (0, 3, 0));
+        assert_eq!(out_window(&[], 0, 100.0), (0, 0, 0));
     }
 
     #[test]

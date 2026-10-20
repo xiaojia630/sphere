@@ -136,6 +136,9 @@ pub struct Args {
     pub goto: Option<String>,
     /// `--tasks`: the demo's sphered holds sample tasks (a parent with two helpers, new results), for screenshots
     pub tasks: bool,
+    /// `--output answer|live`: the Working view opens on a sample agent whose output panel holds a finished answer, or
+    /// a run still going
+    pub output: Option<String>,
 }
 
 impl Args {
@@ -150,7 +153,7 @@ impl Args {
 }
 
 fn parse_args() -> Args {
-    let mut a = Args { cmd: None, bench: None, shot: None, record: None, record_frames: 180, frames: 120, depth: false, orbit: false, apps: false, work: false, swarm: false, code: false, git: false, open_app: None, icon: false, aa: std::env::var("SPHERE_AA").unwrap_or_else(|_| "smaa".into()), offscreen: false, collapsed: false, focus_term: false, msaa: true, size: (1600, 1000), dt: 1.0 / 20.0, demo: false, live: false, moment: false, elsewhere: false, calendar: false, takeover: None, memory: None, protocols: None, fixit: None, theme: None, motion: None, goto: None, tasks: false };
+    let mut a = Args { cmd: None, bench: None, shot: None, record: None, record_frames: 180, frames: 120, depth: false, orbit: false, apps: false, work: false, swarm: false, code: false, git: false, open_app: None, icon: false, aa: std::env::var("SPHERE_AA").unwrap_or_else(|_| "smaa".into()), offscreen: false, collapsed: false, focus_term: false, msaa: true, size: (1600, 1000), dt: 1.0 / 20.0, demo: false, live: false, moment: false, elsewhere: false, calendar: false, takeover: None, memory: None, protocols: None, fixit: None, theme: None, motion: None, goto: None, tasks: false, output: None };
     let mut it = std::env::args().skip(1).peekable();
     while let Some(s) = it.next() {
         match s.as_str() {
@@ -182,6 +185,10 @@ fn parse_args() -> Args {
             "--moment" => a.moment = true,
             "--elsewhere" => a.elsewhere = true,
             "--calendar" => a.calendar = true,
+            "--output" => {
+                a.output = Some(it.next_if(|v| !v.starts_with('-')).unwrap_or_else(|| "answer".into()));
+                a.work = true;
+            }
             "--takeover" => {
                 a.takeover = it.next();
                 a.elsewhere = true;
@@ -216,7 +223,7 @@ fn parse_args() -> Args {
                 }
             }
             "-h" | "--help" => {
-                println!("sphere-app [--demo] [--live] [--moment] [--elsewhere] [--calendar] [--takeover card|armed|ambiguous|list|after] [--memory card|armed|chip] [--protocols card|armed|empty|rail|tags|bar|mistake] [--fixit strip|after] [--goto [filter]] [--tasks] [--theme name] [--motion fast|cinematic] [--cmd \"<command>\"] [--bench <seconds>] [--shot <png> [--frames N] [--depth] [--term]] [--size WxH] [--no-msaa]");
+                println!("sphere-app [--demo] [--live] [--moment] [--elsewhere] [--calendar] [--output answer|live] [--takeover card|armed|ambiguous|list|after] [--memory card|armed|chip] [--protocols card|armed|empty|rail|tags|bar|mistake] [--fixit strip|after] [--goto [filter]] [--tasks] [--theme name] [--motion fast|cinematic] [--cmd \"<command>\"] [--bench <seconds>] [--shot <png> [--frames N] [--depth] [--term]] [--size WxH] [--no-msaa]");
                 std::process::exit(0);
             }
             other => eprintln!("ignoring unknown argument {other}"),
