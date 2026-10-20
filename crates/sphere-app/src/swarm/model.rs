@@ -116,10 +116,6 @@ impl Model {
     pub fn ready(&self) -> usize {
         self.agents.iter().filter(|a| a.ready()).count()
     }
-    /// The agent's helpers, in model order.
-    pub fn helpers_of(&self, id: &str) -> Vec<&Agent> {
-        self.agents.iter().filter(|a| a.parent.as_deref() == Some(id)).collect()
-    }
     /// The agents in a run slot (working or waiting on you), in model order.
     pub fn running(&self) -> Vec<&Agent> {
         self.agents.iter().filter(|a| matches!(a.state, State::Working | State::Needs)).collect()
