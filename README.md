@@ -41,6 +41,11 @@ developer reaches for all day, all on your real data: code review, git, containe
 </p>
 
 <p align="center">
+  <img src="docs/media/game.gif" width="960" alt="Hold the Swarm"><br>
+  <sub><b>Hold the Swarm.</b> A daily game in the swarm. Agents ask before every step: let the safe ones through, catch the token sent to a stranger.</sub>
+</p>
+
+<p align="center">
   <img src="docs/media/review.gif" width="960" alt="Reviewing the agent's work in Code"><br>
   <sub><b>Review before it lands.</b> The diff by hunk with the agent's reason pinned, the tests in its worktree, then merge.</sub>
 </p>
