@@ -42,6 +42,7 @@ mod takeover;
 mod theme;
 mod restart;
 mod review;
+mod scan;
 mod stats;
 mod term;
 mod motion;
