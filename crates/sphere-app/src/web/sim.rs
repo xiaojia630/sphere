@@ -95,7 +95,7 @@ impl Sim {
         let id = format!("t{}", self.tasks);
         let t0 = now_ms() - ago * 1000;
         let sl = slug(title);
-        self.emit(svc, &id, t0, EventBody::TaskCreated { title: title.into(), prompt: prompt.into(), repo: repo.into(), in_place: false, budget_usd: 5.0, mode: None, model: Some("claude-opus-5-5".into()), allow_rewrites: false, resume_session: None, protocol: None });
+        self.emit(svc, &id, t0, EventBody::TaskCreated { title: title.into(), prompt: prompt.into(), repo: repo.into(), parent_task: None, in_place: false, budget_usd: 5.0, mode: None, model: Some("claude-opus-5-5".into()), allow_rewrites: false, resume_session: None, protocol: None });
         let workdir = format!("{}/.sphere/worktrees/{}/{sl}", crate::machine::HOME, repo_name(repo));
         self.emit(svc, &id, t0 + 400, EventBody::WorkspaceReady { workdir, branch: Some(format!("sphere/{sl}")), base: "main".into() });
         let briefed = svc.shared.lock().unwrap().memory.iter().filter(|n| n.repo.as_deref().is_none_or(|r| r == repo)).count() as u32;
@@ -391,6 +391,7 @@ fn command(sim: &mut Sim, svc: &Service, c: Cmd, now: f64) {
             sim.runs.retain(|r| r.task != task);
             sim.emit(svc, &task, now_ms(), EventBody::Stopped {});
         }
+        Cmd::Seen { task } => sim.emit(svc, &task, now_ms(), EventBody::Seen {}),
         Cmd::Remember { repo, text, source } => {
             let mut s = svc.shared.lock().unwrap();
             match crate::memory::keep_here(&mut s, repo.as_deref(), &text, source) {

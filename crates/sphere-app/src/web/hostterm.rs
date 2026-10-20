@@ -7,6 +7,7 @@ pub const LABEL: &str = "sphere-term";
 #[derive(Clone, Debug)]
 pub struct ChildInfo {
     pub cmd: String,
+    pub cwd: Option<String>,
 }
 
 pub struct HostWriter;
