@@ -1,0 +1,8 @@
+#!/bin/sh
+# A stand-in `lsof` for the README clips: the three ports the demo containers publish, owned by the container runtime.
+case "$*" in
+*LISTEN*-F*) printf 'p4412\ncOrbStack Helper\nn*:15432\nn*:16379\nn*:18025\n' ;;
+*LISTEN*-t*) echo 4412 ;;
+*ESTABLISHED*) case "$*" in *15432*) printf 'p4412\nn127.0.0.1:15432->127.0.0.1:52144\nn127.0.0.1:15432->127.0.0.1:52146\n' ;; esac ;;
+*) exit 1 ;;
+esac
