@@ -43,8 +43,9 @@ if command -v wasm-opt >/dev/null; then
     wasm-opt -O2 --enable-bulk-memory --enable-nontrapping-float-to-int --enable-sign-ext --enable-mutable-globals \
         "$out/sphere_bg.wasm" -o "$out/sphere_bg.opt.wasm" && mv "$out/sphere_bg.opt.wasm" "$out/sphere_bg.wasm"
 fi
-# Hosts that don't compress .wasm get it gzipped anyway: the page inflates it (DecompressionStream)
-gzip -9 -c "$out/sphere_bg.wasm" > "$out/sphere_bg.wasm.gz" && rm "$out/sphere_bg.wasm"
+# Gzipped under its own name, so hosts that don't compress .wasm (or only serve known types) still send a third
+# of it: the page inflates it (DecompressionStream)
+gzip -9 -c "$out/sphere_bg.wasm" > "$out/sphere_bg.wasm.gz" && mv "$out/sphere_bg.wasm.gz" "$out/sphere_bg.wasm"
 cp web/index.html "$out/index.html"
 # The sounds load beside the page once the visitor first clicks or types; MP3 plays in every browser
 mkdir -p "$out/sounds"

@@ -139,7 +139,7 @@
   }
 
   async function wasm() {
-    const res = await fetch("./sphere_bg.wasm.gz");
+    const res = await fetch("./sphere_bg.wasm");
     if (!res.ok) throw new Error(`the app didn't download (${res.status})`);
     // the gzip's own size, for the bar (when the host says it)
     const total = +res.headers.get("content-length") || 0;
