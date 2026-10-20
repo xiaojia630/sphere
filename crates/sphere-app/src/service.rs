@@ -183,7 +183,8 @@ impl Run {
 }
 
 pub enum Cmd {
-    Start { repo: String, prompt: String },
+    /// `title`: the agent's name; none lets sphered take it from the prompt
+    Start { repo: String, prompt: String, title: Option<String> },
     /// `always`: also save the rule the agent suggested (a yes only)
     Answer { request: String, answer: AnswerKind, text: Option<String>, always: bool },
     Send { task: String, text: String },
@@ -674,11 +675,11 @@ async fn command(c: &Client, cmd: Cmd, sh: &Mutex<Shared>) -> Result<(), String>
             s.version += 1;
             Ok(())
         }
-        Cmd::Start { repo, prompt } => {
+        Cmd::Start { repo, prompt, title } => {
             let p = StartParams {
                 repo,
                 prompt,
-                title: None,
+                title,
                 in_place: false,
                 budget_usd: None,
                 mode: None,

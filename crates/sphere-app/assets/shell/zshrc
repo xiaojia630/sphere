@@ -1,0 +1,98 @@
+# Sphere's shell integration for zsh, 3 of 4. See zshenv. Besides reading your .zshrc, this adds the hooks that tell
+# Sphere's terminal when a command starts and ends, with its exit status and the directory it ran in, so a failed
+# command can offer "Fix it". Sphere reads these sequences from the terminal's output:
+#   OSC 7700 ; cmd ; <base64 of the command line> BEL    the command about to run
+#   OSC 133 ; C BEL                                       its output starts
+#   OSC 7 ; file://host/path BEL                          the working directory
+#   OSC 133 ; D ; <exit status> BEL                       the command finished
+#   OSC 133 ; A BEL                                       the prompt is about to be drawn
+# The hooks swallow their own errors and never change your options, variables or prompt.
+# Adapted from VS Code's shellIntegration-rc.zsh (MIT License, Copyright (c) Microsoft Corporation).
+
+__sphere_dir=$ZDOTDIR
+ZDOTDIR=${SPHERE_USER_ZDOTDIR-}
+[[ -n $ZDOTDIR ]] || builtin unset ZDOTDIR
+# zsh puts a HISTFILE nobody set into ZDOTDIR (macOS's /etc/zshrc does too): your history stays where it always was
+if [[ ${HISTFILE-} == "$__sphere_dir"/* ]]; then
+	HISTFILE=${ZDOTDIR:-$HOME}/${HISTFILE#"$__sphere_dir"/}
+fi
+if [[ ${ZDOTDIR:-$HOME} != $__sphere_dir && -r ${ZDOTDIR:-$HOME}/.zshrc ]]; then
+	. "${ZDOTDIR:-$HOME}/.zshrc"
+fi
+SPHERE_USER_ZDOTDIR=${ZDOTDIR-}
+__sphere_zdir=$__sphere_dir
+ZDOTDIR=$__sphere_dir
+builtin unset __sphere_dir
+
+# A directory as a file URL path. Percent-encoded byte by byte, so that nothing in a directory name (a space, a newline, an
+# escape) can end or forge a sequence. $1 is the directory; the result is __sphere_url.
+__sphere_encode() {
+	builtin emulate -L zsh
+	builtin local LC_ALL=C s=$1 out= c i hex
+	for ((i = 1; i <= ${#s}; i++)); do
+		c=$s[i]
+		case $c in
+			[-/._~0-9A-Za-z]) out+=$c ;;
+			*)
+				builtin printf -v hex '%02X' $((#c & 255))
+				out+=%$hex
+				;;
+		esac
+	done
+	__sphere_url=$out
+}
+
+# Before each prompt: the directory, the end of the command that just ran, the start of the prompt.
+__sphere_precmd() {
+	builtin local s=$?
+	builtin emulate -L zsh
+	builtin local o=
+	if [[ $PWD != ${__sphere_pwd-} ]]; then
+		__sphere_pwd=$PWD
+		__sphere_encode "$PWD"
+	fi
+	o=$'\e]7;file://'${HOST-}${__sphere_url-}$'\a'
+	if ((${__sphere_ran:-0})); then
+		__sphere_ran=0
+		o+=$'\e]133;D;'$s$'\a'
+	fi
+	o+=$'\e]133;A\a'
+	builtin print -rn -- $o 2>/dev/null
+	# If zsh never got to .zlogin, hand ZDOTDIR back to you now.
+	if [[ -n ${__sphere_zdir-} ]]; then
+		if [[ ${ZDOTDIR-} == $__sphere_zdir ]]; then
+			ZDOTDIR=${SPHERE_USER_ZDOTDIR-}
+			[[ -n $ZDOTDIR ]] || builtin unset ZDOTDIR
+			builtin unset SPHERE_USER_ZDOTDIR
+		fi
+		builtin unset __sphere_zdir
+	fi
+	builtin return $s
+}
+
+# Before each command: what it is (the line as you typed it, $1), and that its output starts.
+__sphere_preexec() {
+	builtin emulate -L zsh
+	builtin local line=$1 b64
+	__sphere_ran=1
+	b64=$(\command base64 <<<"${line[1,4096]}" 2>/dev/null)
+	builtin print -rn -- $'\e]7700;cmd;'${b64//$'\n'/}$'\a\e]133;C\a' 2>/dev/null
+}
+
+__sphere_install() {
+	builtin emulate -L zsh
+	[[ -o interactive && -t 1 && -z ${__sphere_hooked-} ]] || return 0
+	[[ ${SPHERE_SHELL_INTEGRATION-1} == (0|false|off|no) ]] && return 0
+	__sphere_hooked=1
+	__sphere_ran=0
+	__sphere_pwd=
+	__sphere_url=
+	builtin autoload -Uz add-zsh-hook
+	add-zsh-hook precmd __sphere_precmd
+	add-zsh-hook preexec __sphere_preexec
+	# first, so the status is still the command's
+	precmd_functions=(__sphere_precmd ${precmd_functions:#__sphere_precmd})
+	preexec_functions=(${preexec_functions:#__sphere_preexec} __sphere_preexec)
+}
+__sphere_install 2>/dev/null || :
+builtin unfunction __sphere_install 2>/dev/null
