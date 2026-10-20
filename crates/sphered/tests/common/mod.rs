@@ -215,6 +215,13 @@ impl Env {
         if let Some(mut d) = self.daemon.take() {
             let _ = d.kill();
             let _ = d.wait();
+            // A child sphered had only just started (ps, git) holds a copy of its listening socket until its exec is
+            // through, which on a busy machine can be long enough to see: until nothing answers there, a new sphered
+            // takes this one for still running.
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while StdStream::connect(&self.socket).is_ok() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(10));
+            }
         }
     }
 
