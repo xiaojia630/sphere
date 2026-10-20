@@ -152,7 +152,7 @@ pub fn keys(
     mut toasts: ResMut<Toasts>,
     mut terms: ResMut<crate::term::Terms>,
     moment: Res<crate::moment::Moment>,
-    (mut acts, mut open, mut say, mut sound, mut working, mut swarm): (ResMut<crate::home::Acts>, ResMut<crate::apps::Open>, ResMut<crate::homepanels::Say>, ResMut<crate::sound::Sound>, ResMut<crate::working::Working>, ResMut<crate::swarm::Swarm>),
+    (mut acts, mut open, mut say, mut sound, mut working, mut swarm, goto): (ResMut<crate::home::Acts>, ResMut<crate::apps::Open>, ResMut<crate::homepanels::Say>, ResMut<crate::sound::Sound>, ResMut<crate::working::Working>, ResMut<crate::swarm::Swarm>, Res<crate::goto::Goto>),
 ) {
     let cmd = super_down(&keys);
     for e in ev.read() {
@@ -160,6 +160,10 @@ pub fn keys(
             continue;
         }
         if !bar.open {
+            // Go to has the keyboard
+            if goto.open {
+                continue;
+            }
             let slash = matches!(&e.logical_key, Key::Character(c) if c == "/") && !focus.terminal && !moment.editing;
             if (cmd && e.key_code == KeyCode::KeyK) || slash {
                 bar.open = true;
@@ -181,6 +185,7 @@ pub fn keys(
                 if let Some(target) = bar.target.take() {
                     match target {
                         BarTarget::Task(task, title) if !t.is_empty() => {
+                            svc.seen(&task);
                             svc.send(Cmd::Send { task, text: t.to_string() });
                             toasts.push(format!("Sent to {title}"));
                             sound.play("confirm");
@@ -270,6 +275,11 @@ pub(crate) fn home_command(t: &str, acts: &mut crate::home::Acts, open: &mut cra
         open.app(2, toasts);
         return true;
     }
+    // `go` opens Go to; `go <filter>` types the filter for you. A longer sentence that starts with "go" is a task
+    if let Some(f) = parse_go(&l) {
+        open.goto = Some(f);
+        return true;
+    }
     if starts(&["swarm", "agents swarm", "agent swarm", "all agents"]) {
         open.swarm = true;
         return true;
@@ -341,6 +351,13 @@ pub(crate) fn home_command(t: &str, acts: &mut crate::home::Acts, open: &mut cra
     true
 }
 
+/// What `go`, `goto` and `go to` ask Go to to filter by (up to three words: "go fix the flaky login test" is a task).
+pub(crate) fn parse_go(l: &str) -> Option<String> {
+    let rest = ["go to", "goto", "go"].iter().find_map(|p| l.strip_prefix(p).filter(|r| r.is_empty() || r.starts_with(' ')))?;
+    let rest = rest.trim();
+    (rest.split_whitespace().count() <= 3 && !rest.contains(':')).then(|| rest.to_string())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run(text: &str, svc: &Service, toasts: &mut Toasts, terms: &mut crate::term::Terms, focus: &mut Focus, say: &mut crate::homepanels::Say, sound: &mut crate::sound::Sound, working: &mut crate::working::Working) {
     if text.is_empty() {
@@ -378,6 +395,7 @@ fn run(text: &str, svc: &Service, toasts: &mut Toasts, terms: &mut crate::term::
         match latest {
             Some((task, title)) => {
                 toasts.push(format!("To {title}"));
+                svc.seen(&task);
                 svc.send(Cmd::Send { task, text: msg.trim().to_string() });
             }
             None => toasts.push("No agent to talk to yet"),
@@ -545,6 +563,28 @@ pub fn draw(
     let caret = if on { role_color(Role::Fill) } else { Color::NONE };
     for mut c in &mut q.p2() {
         c.set_if_neq(BackgroundColor(caret));
+    }
+}
+
+#[cfg(test)]
+mod go_tests {
+    use super::parse_go;
+
+    #[test]
+    fn go_opens_go_to_with_a_filter() {
+        assert_eq!(parse_go("go"), Some(String::new()));
+        assert_eq!(parse_go("go api"), Some("api".into()));
+        assert_eq!(parse_go("go to api login"), Some("api login".into()));
+        assert_eq!(parse_go("goto  web"), Some("web".into()));
+        assert_eq!(parse_go("go to"), Some(String::new()));
+    }
+
+    #[test]
+    fn a_sentence_is_still_a_task() {
+        assert_eq!(parse_go("go fix the flaky login test"), None);
+        assert_eq!(parse_go("go: fix it"), None);
+        assert_eq!(parse_go("goal tracking"), None);
+        assert_eq!(parse_go("google it"), None);
     }
 }
 

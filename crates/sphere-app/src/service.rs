@@ -93,6 +93,8 @@ pub struct Shared {
     pub taken: Vec<(String, Result<sphere_proto::api::TakeOverResult, String>)>,
     /// seconds agents waited on you today over requests already closed (the mirror's; `Live` adds the open ones)
     pub waited_today_secs: u64,
+    /// results already reported as seen (`task.seen`), until sphered's task stops being new
+    pub seen_sent: std::collections::HashSet<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -179,6 +181,8 @@ pub enum Cmd {
     Send { task: String, text: String },
     Interrupt { task: String },
     Stop { task: String },
+    /// You looked at a task's result (`task.seen`).
+    Seen { task: String },
     /// Sphere is on screen again: the link starts pinging and looking for outside sessions (both stop while the
     /// window is hidden).
     Shown,
@@ -197,12 +201,95 @@ impl Service {
         let _ = self.tx.send(c);
     }
 
+    /// You looked at a task's result: tells sphered once, and only while the result is new.
+    pub fn seen(&self, task: &str) -> bool {
+        let fire = {
+            let mut s = self.shared.lock().unwrap();
+            s.tasks.iter().any(|t| t.id == task && t.unseen) && s.seen_sent.insert(task.to_string())
+        };
+        if fire {
+            self.send(Cmd::Seen { task: task.to_string() });
+        }
+        fire
+    }
+
     /// A service with no link thread, whose commands can be read back from the receiver (tests).
     #[cfg(test)]
     pub fn with_receiver() -> (Service, mpsc::UnboundedReceiver<Cmd>) {
         let (tx, rx) = mpsc::unbounded_channel();
         (Service { shared: Arc::new(Mutex::new(Shared::default())), tx }, rx)
     }
+}
+
+/// The look tests' sphered for `--tasks` and `--goto`: a parent with two helpers (one working, one done), a question that
+/// needs you, two finished results you haven't looked at, and older work, in three repos. Times are relative to now.
+pub fn seed_demo(svc: &Service) {
+    let now = crate::core::unix_now();
+    let (tasks, runs) = demo_tasks(now);
+    let mut s = svc.shared.lock().unwrap();
+    s.tasks = tasks;
+    s.runs = runs;
+    s.merged_checked = true;
+    s.max_concurrent = Some(4);
+    s.link = Some(Link::Connected);
+    s.roster += 1;
+    s.states += 1;
+    s.spans += 1;
+    s.version += 1;
+}
+
+fn demo_tasks(now: i64) -> (Vec<TaskView>, HashMap<String, Run>) {
+    let at = |ago: i64| sphere_proto::rfc3339_from_unix_ms(((now - ago).max(0) as u64) * 1000);
+    // (id, title, state, repo, status, started ago, changed ago, files, parent, unseen, steps)
+    type Def = (&'static str, &'static str, &'static str, &'static str, &'static str, i64, i64, &'static [(&'static str, u64, u64)], Option<&'static str>, bool, u32);
+    let defs: [Def; 10] = [
+        ("t1", "Add rate limiting to /login", "working", "api-server", "Running cargo test · 18 / 31", 840, 4, &[("src/auth.rs", 42, 3), ("src/middleware/limit.rs", 31, 0)], None, false, 9),
+        ("t2", "Move sessions to Redis", "needs_you", "api-server", "Waiting for your answer", 1500, 130, &[("src/session.rs", 64, 21)], None, false, 12),
+        ("t3", "Write limiter tests", "working", "api-server", "Writing tests/login_rate.rs", 380, 18, &[("tests/login_rate.rs", 36, 0)], Some("t1"), false, 5),
+        ("t4", "Audit the login routes", "done", "api-server", "Done: three routes bypass the limiter", 700, 240, &[], Some("t1"), false, 7),
+        ("t5", "Bump Postgres to 16.4", "done", "api-server", "Done: bumped, migrations pass", 2100, 660, &[("Cargo.toml", 2, 2), ("docker/postgres.yml", 1, 1)], None, true, 14),
+        ("t6", "Fix flaky checkout test", "working", "web-app", "Running pnpm test:e2e · repeat 13 / 20", 520, 40, &[("e2e/checkout.spec.ts", 18, 9)], None, false, 8),
+        ("t7", "Upgrade React to 19", "queued", "web-app", "Queued", 90, 90, &[], None, false, 0),
+        ("t8", "Add --json flag to sphere run", "done", "sphere-cli", "Done: PR #77 · CI green", 3300, 1560, &[("src/cmd/run.rs", 48, 6), ("src/output.rs", 22, 2), ("tests/run_json.rs", 31, 0)], None, true, 16),
+        ("t9", "Speed up cold start", "done", "sphere-cli", "Done: 410 → 210 ms", 14_000, 11_000, &[("src/boot.rs", 30, 12)], None, false, 11),
+        ("t10", "Reply to the API review", "done", "api-server", "Done: draft ready", 20_000, 18_000, &[], None, false, 4),
+    ];
+    let tasks = defs
+        .iter()
+        .map(|d| {
+            let files: Vec<serde_json::Value> = d.7.iter().map(|f| serde_json::json!({"path": f.0, "added": f.1, "removed": f.2})).collect();
+            serde_json::from_value(serde_json::json!({
+                "id": d.0, "title": d.1, "prompt": d.1, "state": d.2, "status": d.4, "repo": format!("/demo/{}", d.3),
+                "workdir": format!("/demo/wt/{}", d.0), "branch": format!("sphere/{}", d.0), "base": "main", "in_place": false,
+                "budget_usd": 5.0, "cost_usd": 0.12 + d.10 as f64 * 0.03, "session_id": format!("s-{}", d.0), "started_at": at(d.5), "updated_at": at(d.6),
+                "files": files, "steps": d.10, "last_say": d.4, "parent_task": d.8, "unseen": d.9,
+            }))
+            .expect("demo task")
+        })
+        .collect();
+    // the parent's run: what the Working view shows
+    let mut run = Run::default();
+    let steps: [(sphere_proto::StepKind, &str, &str, Option<bool>); 8] = [
+        (sphere_proto::StepKind::Plan, "Planning the limiter", "Plan", Some(true)),
+        (sphere_proto::StepKind::Read, "Reading src/auth.rs", "Read", Some(true)),
+        (sphere_proto::StepKind::Edit, "Editing src/auth.rs", "Edit", Some(true)),
+        (sphere_proto::StepKind::Delegate, "Starting a helper: write limiter tests", "Task", Some(true)),
+        (sphere_proto::StepKind::Edit, "Editing src/middleware/limit.rs", "Edit", Some(true)),
+        (sphere_proto::StepKind::Delegate, "Starting a helper: audit the login routes", "Task", Some(true)),
+        (sphere_proto::StepKind::Run, "Running cargo test · 18 / 31", "Bash", Some(true)),
+        (sphere_proto::StepKind::Edit, "Editing src/routes.rs", "Edit", None),
+    ];
+    for (i, (kind, title, tool, ok)) in steps.iter().enumerate() {
+        run.steps.push(RunStep { id: format!("s{i}"), kind: *kind, tool: tool.to_string(), title: title.to_string(), detail: String::new(), ok: *ok, output: String::new(), at: at(800 - 90 * i as i64), seq: i as u64 });
+    }
+    run.says = vec!["I'll put the limiter in a middleware and test it separately, so I'm starting a helper for the tests.".into(), "Both helpers are going. The limiter is in; now wiring it into the routes.".into()];
+    run.says_seq = vec![2, 5];
+    run.seq = steps.len() as u64;
+    run.files = vec![sphere_proto::FileStat { path: "src/auth.rs".into(), added: 42, removed: 3 }, sphere_proto::FileStat { path: "src/middleware/limit.rs".into(), added: 31, removed: 0 }];
+    run.version = 1;
+    let mut runs = HashMap::new();
+    runs.insert("t1".to_string(), run);
+    (tasks, runs)
 }
 
 /// Starts the link thread. `offline` (screenshots, benches) never touches the service.
@@ -268,6 +355,7 @@ impl Mirror {
         s.waited_today_secs = views.waited_on(&day);
         // only a finished task can read merged
         s.merged.retain(|id| at.get(id).is_some_and(|&i| s.tasks[i].state == TaskState::Done));
+        s.seen_sent.clear();
         s.roster += 1;
         s.states += 1;
         s.spans += 1;
@@ -323,6 +411,9 @@ fn put(at: &mut HashMap<String, usize>, t: &TaskView, s: &mut Shared) {
         s.spans += 1;
         return;
     };
+    if !t.unseen {
+        s.seen_sent.remove(&t.id);
+    }
     let old = &s.tasks[i];
     if old.state != t.state {
         s.states += 1;
@@ -638,6 +729,7 @@ async fn command(c: &Client, cmd: Cmd, sh: &Mutex<Shared>) -> Result<(), String>
         Cmd::Send { task, text } => c.send(&task, &text).await.map_err(|e| format!("could not send: {e}")),
         Cmd::Interrupt { task } => c.interrupt(&task).await.map_err(|e| format!("could not interrupt: {e}")),
         Cmd::Stop { task } => c.stop(&task).await.map_err(|e| format!("could not stop: {e}")),
+        Cmd::Seen { task } => c.seen(&task).await.map_err(|e| format!("could not mark seen: {e}")),
         Cmd::Shown => Ok(()),
     }
 }

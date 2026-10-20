@@ -117,6 +117,8 @@ pub struct Terminal {
     pub back_to: Option<usize>,
     /// The program's name for the header (`zsh`, `bash`).
     pub name: String,
+    /// The folder the shell started in (Go to files the tab under that repo).
+    pub cwd: Option<String>,
 }
 
 /// The terminal tabs. Shells live in the app for now: sphered has no terminal API yet, so they end when the
@@ -231,6 +233,7 @@ impl Terminal {
             c.cwd(std::env::var_os("HOME").unwrap_or_default());
             c
         };
+        let cwd = if look { Some(repo_dir()) } else { std::env::var_os("HOME").map(std::path::PathBuf::from) }.map(|p| p.to_string_lossy().to_string());
         let name = if look { "bash".to_string() } else { std::path::Path::new(&shell).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default() };
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
@@ -270,6 +273,7 @@ impl Terminal {
             exited: false,
             back_to: None,
             name,
+            cwd,
         })
     }
 
@@ -300,6 +304,7 @@ impl Terminal {
             exited: false,
             back_to: None,
             name,
+            cwd: attach.and_then(|c| c.cwd.clone()).or_else(|| std::env::var("HOME").ok()),
         })
     }
 

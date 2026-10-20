@@ -536,7 +536,7 @@ pub fn draw(mut commands: Commands, mut m: ResMut<Moment>, live: Res<Live>, root
     commands.entity(root.0).despawn_children();
     // while folding, the answered card stays
     if let Some((r, title)) = m.holding.clone() {
-        let body = build(&mut commands, &f, &r, &title, &m, 1, m.same);
+        let body = build(&mut commands, &f, &r, &title, &who_line(&live, &r), &m, 1, m.same);
         commands.entity(root.0).add_child(body);
         return;
     }
@@ -545,7 +545,7 @@ pub fn draw(mut commands: Commands, mut m: ResMut<Moment>, live: Res<Live>, root
     let title = live.title(&r.info.task).to_string();
     let n = w.len();
     let same = same_ask_others(&live, &m, &r).len();
-    let body = build(&mut commands, &f, &r, &title, &m, n, same);
+    let body = build(&mut commands, &f, &r, &title, &who_line(&live, &r), &m, n, same);
     commands.entity(root.0).add_child(body);
     let m = m.bypass_change_detection();
     m.current = Some((r, title));
@@ -593,8 +593,17 @@ fn more_ways(c: &mut Commands, f: &UiFonts, rule: Option<String>, same: usize) -
     row
 }
 
-/// `n`: how many requests wait; `same`: how many other agents' requests ask the same as `r`.
-fn build(c: &mut Commands, f: &UiFonts, r: &RequestView, title: &str, m: &Moment, n: usize, same: usize) -> Entity {
+/// The caption over the agent's words: "AGENT", or whose helper it is, so you know why it is asking.
+fn who_line(live: &Live, r: &RequestView) -> String {
+    match live.parent_title(&r.info.task) {
+        Some(p) => format!("HELPER OF {}", clip(p, 30).to_uppercase()),
+        None => "AGENT".to_string(),
+    }
+}
+
+/// `n`: how many requests wait; `same`: how many other agents' requests ask the same as `r`; `who`: the caption over its words.
+#[allow(clippy::too_many_arguments)]
+fn build(c: &mut Commands, f: &UiFonts, r: &RequestView, title: &str, who: &str, m: &Moment, n: usize, same: usize) -> Entity {
     let line = role_color(Role::Line);
     let hot = role_color(Role::Hot);
     let acc = role_color(Role::Acc);
@@ -653,7 +662,7 @@ fn build(c: &mut Commands, f: &UiFonts, r: &RequestView, title: &str, m: &Moment
     let avt = c.spawn((Text::new("A"), font(&f.display, 14.0, 0.0), TextColor(hot))).id();
     c.entity(av).add_child(avt);
     let msg = c.spawn(Node { flex_direction: FlexDirection::Column, row_gap: px(6), flex_grow: 1.0, flex_shrink: 1.0, ..default() }).id();
-    let who = c.spawn((Text::new("AGENT"), font(&f.ui700, 12.5, 2.5), TextColor(hot), LineHeight::Px(15.0))).id();
+    let who = c.spawn((Text::new(who), font(&f.ui700, 12.5, 2.5), TextColor(hot), LineHeight::Px(15.0))).id();
     let summary = if r.info.summary.is_empty() { r.info.description.clone().unwrap_or_default() } else { r.info.summary.clone() };
     let said = c.spawn((Text::new(clip(&summary, 150)), font(&f.ui500, 17.0, 0.17), TextColor(line), LineHeight::Px(23.8))).id();
     c.entity(msg).add_children(&[who, said]);

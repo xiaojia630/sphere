@@ -104,6 +104,7 @@ else works without it. Optional: Docker Desktop or [OrbStack](https://orbstack.d
 | <kbd>/</kbd> or <kbd>Cmd</kbd> <kbd>K</kbd> | The command bar. `repo: what to do` starts an agent in its own worktree; `> message` talks to it. |
 | <kbd>A</kbd> | Open the core: the app orbit. <kbd>←</kbd> <kbd>→</kbd> spin, <kbd>Enter</kbd> opens, <kbd>Esc</kbd> goes back. |
 | <kbd>W</kbd> / <kbd>N</kbd> | The Working view / what needs you. <kbd>Enter</kbd> says yes, <kbd>A</kbd> always (saves the rule), <kbd>Shift</kbd> <kbd>Enter</kbd> says yes to every agent asking the same, <kbd>E</kbd> changes, <kbd>L</kbd> is later. |
+| <kbd>G</kbd> | Go to: every agent and terminal tab, grouped by repo, new results first. Type to filter, <kbd>Enter</kbd> jumps. `go api` in the command bar opens it already filtered. |
 | <kbd>S</kbd> | The Agent swarm: every agent at once, one orbit per repo. |
 | `motion` | In the command bar: transitions are Fast by default. `motion cinematic` slows them down, `motion fast` brings them back, `motion 1.5` makes Fast quicker still. |
 | <kbd>T</kbd> | The terminal. Its tabs survive quitting the app. |

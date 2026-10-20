@@ -268,7 +268,8 @@ fn build_label(c: &mut Commands, f: &UiFonts, root: Entity, owner: usize, a: &mo
     c.entity(title).insert(Node { max_width: px(LABEL_W - 26.0), overflow: Overflow::clip(), ..default() });
     // repo, chip, percent
     let meta = c.spawn(Node { width: percent(100), flex_direction: dir, align_items: AlignItems::Center, column_gap: px(8), ..default() }).id();
-    let rp = text(c, owner, repo.to_uppercase(), &f.ui600, 9.5, 1.6, mute());
+    // a NEW chip takes the repo's place: the ring already says which repo it is
+    let rp = text(c, owner, if a.unseen { String::new() } else { repo.to_uppercase() }, &f.ui600, 9.5, 1.6, mute());
     let (cb, cbg, ctx) = match a.state {
         State::Needs => (acc, Some(acc), Color::BLACK),
         State::Done | State::Merged => (ok, None, ok),
@@ -280,11 +281,23 @@ fn build_label(c: &mut Commands, f: &UiFonts, root: Entity, owner: usize, a: &mo
         let sq = boxed(c, owner, Node { width: px(5), height: px(5), ..default() }, Some(tc(Role::Fill)), None);
         c.entity(chip).add_child(sq);
     }
-    let ct = text(c, owner, model::chip(a.state).to_uppercase(), &f.ui600, 9.5, 1.5, ctx);
+    let ct = text(c, owner, model::chip_of(a).to_uppercase(), &f.ui600, 9.5, 1.5, ctx);
     c.entity(chip).add_child(ct);
+    let new = a.unseen.then(|| {
+        let fill = tc(Role::Fill);
+        let n = boxed(c, owner, Node { padding: UiRect { left: px(6), right: px(6), top: px(3), bottom: px(2) }, border: UiRect::all(px(1)), flex_direction: dir, align_items: AlignItems::Center, column_gap: px(5), ..default() }, None, Some(fill));
+        let sq = boxed(c, owner, Node { width: px(5), height: px(5), ..default() }, Some(fill), None);
+        let t = text(c, owner, "NEW", &f.ui600, 9.5, 1.5, fill);
+        c.entity(n).add_children(&[sq, t]);
+        n
+    });
     let sp = c.spawn(Node { flex_grow: 1.0, ..default() }).id();
     let pc = text(c, owner, model::pct(a), &f.mono, 10.5, 0.0, if done { ok } else { hot });
-    c.entity(meta).add_children(&[rp, chip, sp, pc]);
+    c.entity(meta).add_children(&[rp, chip]);
+    if let Some(n) = new {
+        c.entity(meta).add_child(n);
+    }
+    c.entity(meta).add_children(&[sp, pc]);
     // step and cost
     let st = c.spawn(Node { width: percent(100), flex_direction: dir, align_items: AlignItems::Center, column_gap: px(7), ..default() }).id();
     if !queued {
@@ -508,9 +521,9 @@ fn overlay(
         // which side: the scene's rule (80 px from the core), else ours from the node's offset to the core
         let side = if n.4 != 0.0 { n.4 } else { side_for(ov.side[o], p.x - proj(Vec3::new(0.0, 22.0, 0.0)).map(|c| c.x).unwrap_or(size.x / 2.0)) };
         let left = side < 0.0;
-        let repo = model.repos.get(a.repo).map(|r| r.key.as_str()).unwrap_or("");
+        let repo = if a.parent.is_some() { "helper" } else { model.repos.get(a.repo).map(|r| r.key.as_str()).unwrap_or("") };
         let hov_on = hv_t > 0.5;
-        let key = format!("{}|{}|{}|{:?}|{}|{}|{}|{}|{}", a.title, repo, model::pct(a), a.state, a.step, model::cost(a), left, hov_on, ov.theme);
+        let key = format!("{}|{}|{}|{:?}|{}|{}|{}|{}|{}|{}", a.title, repo, model::pct(a), a.state, a.step, model::cost(a), left, hov_on, ov.theme, a.unseen);
         if ov.key[o] != key {
             ov.key[o] = key;
             let at = nodes.get(ov.roots[o]).map(|x| (x.0.left, x.0.top)).unwrap_or_default();
@@ -591,7 +604,7 @@ fn overlay(
         ring(RING0 + r, p, name, sub, 0.85 * rd, &mut ov, &mut commands, &mut nodes);
     }
     let (rn, rs) = model::ready_label(model);
-    ring(READY, (!model.repos.is_empty()).then_some(scene.ready_label_pos), rn, rs, (if model.count(State::Done) > 0 { 0.85 } else { 0.5 }) * rd, &mut ov, &mut commands, &mut nodes);
+    ring(READY, (!model.repos.is_empty()).then_some(scene.ready_label_pos), rn, rs, (if model.ready() > 0 { 0.85 } else { 0.5 }) * rd, &mut ov, &mut commands, &mut nodes);
 
     // ---- conflict chips at the arcs' crests
     for i in 0..N_CHIPS {

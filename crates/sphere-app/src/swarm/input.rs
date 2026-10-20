@@ -148,7 +148,7 @@ pub fn next_needing(m: &Model, cur: Option<&str>) -> Nav {
 
 /// The agent a "merge" (command) aims at: the focused one if it is done, else the first done agent.
 pub fn merge_target(m: &Model, focused: Option<&str>) -> Option<String> {
-    focused.and_then(|f| m.agent(f)).filter(|a| a.state == State::Done).or_else(|| m.agents.iter().find(|a| a.state == State::Done)).map(|a| a.id.clone())
+    focused.and_then(|f| m.agent(f)).filter(|a| a.ready()).or_else(|| m.agents.iter().find(|a| a.ready())).map(|a| a.id.clone())
 }
 
 /// What a merge press does.
@@ -437,7 +437,7 @@ fn press(e: &mut Env, st: &mut Input, k: Key) {
         }
         Key::Enter => {
             if let Some(id) = focused {
-                if e.swarm.model.agent(&id).is_some_and(|a| a.state == State::Done) {
+                if e.swarm.model.agent(&id).is_some_and(|a| a.ready()) {
                     merge(e, st, &id);
                 } else {
                     open_in_code(e, &id);
@@ -937,7 +937,7 @@ mod tests {
     // ---- the systems, on a bare App
 
     fn args() -> crate::Args {
-        crate::Args { cmd: None, bench: None, shot: None, record: None, record_frames: 180, frames: 120, depth: false, orbit: false, apps: false, work: false, swarm: false, code: false, git: false, open_app: None, icon: false, aa: "smaa".into(), offscreen: false, collapsed: false, focus_term: false, msaa: true, size: (1600, 1000), dt: 0.05, demo: true, live: false, moment: false, elsewhere: false, calendar: false, takeover: None, theme: None, motion: None }
+        crate::Args { cmd: None, bench: None, shot: None, record: None, record_frames: 180, frames: 120, depth: false, orbit: false, apps: false, work: false, swarm: false, code: false, git: false, open_app: None, icon: false, aa: "smaa".into(), offscreen: false, collapsed: false, focus_term: false, msaa: true, size: (1600, 1000), dt: 0.05, demo: true, live: false, moment: false, elsewhere: false, calendar: false, takeover: None, theme: None, motion: None, goto: None, tasks: false }
     }
 
     fn request(task: &str) -> sphere_proto::RequestView {

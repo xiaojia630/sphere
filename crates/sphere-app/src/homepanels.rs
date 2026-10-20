@@ -98,7 +98,7 @@ impl Say {
     }
 }
 
-const IDLE: &str = "/ TO TYPE · DRAG TO ROTATE · F TO FIT · R TO RESET";
+const IDLE: &str = "/ TO TYPE · G TO GO TO · DRAG TO ROTATE · F TO FIT · R TO RESET";
 
 fn hdr(c: &mut Commands, f: &UiFonts, title: &str, right: &str) -> Entity {
     let line = role_color(Role::Line);

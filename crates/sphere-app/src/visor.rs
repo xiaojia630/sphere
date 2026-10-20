@@ -364,7 +364,7 @@ pub fn ticker(
                 items.push(format!("CONTAINERS {}", s.docker.label().to_lowercase()));
             }
             items.push(format!("THEME {}", theme.id.label().to_lowercase()));
-            items.push("KEYS 1 2 3 views · C theme · X collapse · F fit · R reset · M sound".into());
+            items.push("KEYS 1 2 3 views · G go to · C theme · X collapse · F fit · R reset · M sound".into());
             let line = items.join("        ");
             let s2 = format!("{line}        {line}        ");
             if t.0 != s2 {
