@@ -2,9 +2,10 @@
 //! terminal.
 
 use serde_json::Value;
-use sphere_proto::api::Snapshot;
+use sphere_proto::api::{MemoryAdded, Snapshot};
+use sphere_proto::memory::{ago, by_repo, repo_name};
 use sphere_proto::{
-    AnswerKind, Event, EventBody, RequestInfo, RequestKind, RequestStatus, TaskView,
+    AnswerKind, Event, EventBody, Note, RequestInfo, RequestKind, RequestStatus, TaskView,
 };
 
 pub struct Style {
@@ -206,9 +207,18 @@ pub fn event_lines(e: &Event, st: &Style) -> Vec<String> {
             Some(b) => one(format!("workspace {workdir} on branch {b}")),
             None => one(format!("working in place at {workdir}")),
         },
-        EventBody::AgentStarted { pid, resumed, .. } => one(format!(
-            "agent started (pid {pid}{})",
-            if *resumed { ", resumed" } else { "" }
+        EventBody::AgentStarted {
+            pid,
+            resumed,
+            briefed,
+            ..
+        } => one(format!(
+            "agent started (pid {pid}{}{})",
+            if *resumed { ", resumed" } else { "" },
+            match briefed {
+                0 => String::new(),
+                n => format!(", told {}", count_notes(*n as usize)),
+            }
         )),
         EventBody::AgentExited { reason, .. } => one(format!("agent exited ({reason})")),
         EventBody::SessionId { .. } => vec![],
@@ -351,7 +361,64 @@ pub fn event_lines(e: &Event, st: &Style) -> Vec<String> {
         }
         EventBody::Warning { message } => one(format!("warning: {message}")),
         EventBody::TakenOver { from } => one(format!("taken over from {from}")),
+        EventBody::MemoryChanged { notes } => one(format!(
+            "notes changed ({} now)",
+            count_notes(*notes as usize)
+        )),
     }
+}
+
+fn count_notes(n: usize) -> String {
+    format!("{n} note{}", if n == 1 { "" } else { "s" })
+}
+
+/// What `sphere remember` answers.
+pub fn remembered(r: &MemoryAdded) -> String {
+    let wher = match &r.note.repo {
+        Some(repo) => repo_name(repo),
+        None => "all repos",
+    };
+    format!(
+        "{} for {wher} · {}",
+        if r.added {
+            "Remembered"
+        } else {
+            "Already remembered"
+        },
+        count_notes(r.count)
+    )
+}
+
+/// `sphere memory`: the notes by repo, each with the id that `sphere memory rm` takes.
+pub fn memory_table(notes: &[Note], st: &Style) -> Vec<String> {
+    if notes.is_empty() {
+        return vec!["no notes yet; add one with: sphere remember \"<note>\"".into()];
+    }
+    let mut out = vec![];
+    for (repo, group) in by_repo(notes) {
+        out.push(match repo {
+            Some(r) => format!(
+                "{}  {}",
+                st.bold(repo_name(r)),
+                st.dim(&format!("{r} · {}", count_notes(group.len())))
+            ),
+            None => format!(
+                "{}  {}",
+                st.bold("All repos"),
+                st.dim(&format!("every agent · {}", count_notes(group.len())))
+            ),
+        });
+        for n in group {
+            out.push(format!(
+                "  {:>4}  {:<9} {:<7} {}",
+                format!("#{}", n.id),
+                ago(n.age_secs()),
+                n.source.as_str(),
+                n.text
+            ));
+        }
+    }
+    out
 }
 
 /// `sphere ls`.
@@ -411,7 +478,7 @@ fn task_row(t: &TaskView) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
-    use sphere_proto::{Excerpt, FileStat};
+    use sphere_proto::{Excerpt, FileStat, NoteSource};
 
     fn plain() -> Style {
         Style { color: false }
@@ -442,6 +509,101 @@ mod tests {
             agent_request: None,
             revises: Some("r2".into()),
         }
+    }
+
+    fn note(id: u64, repo: Option<&str>, text: &str, source: NoteSource) -> Note {
+        Note {
+            id,
+            repo: repo.map(str::to_string),
+            text: text.into(),
+            created_at: sphere_proto::now_rfc3339(),
+            source,
+        }
+    }
+
+    #[test]
+    fn the_notes_are_listed_by_repo_with_their_ids() {
+        let notes = [
+            note(
+                1,
+                Some("/code/sphere"),
+                "use pnpm, never npm",
+                NoteSource::Change,
+            ),
+            note(2, None, "answer in plain words", NoteSource::Typed),
+            note(
+                3,
+                Some("/code/sphere"),
+                "tests live in spec/",
+                NoteSource::Cli,
+            ),
+        ];
+        let lines = memory_table(&notes, &plain());
+        assert_eq!(
+            lines,
+            vec![
+                "sphere  /code/sphere · 2 notes".to_string(),
+                "    #3  just now  cli     tests live in spec/".into(),
+                "    #1  just now  change  use pnpm, never npm".into(),
+                "All repos  every agent · 1 note".into(),
+                "    #2  just now  typed   answer in plain words".into(),
+            ]
+        );
+    }
+
+    #[test]
+    fn with_no_notes_the_list_says_how_to_add_one() {
+        let lines = memory_table(&[], &plain());
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains("sphere remember"), "{lines:?}");
+    }
+
+    #[test]
+    fn remembering_says_where_and_how_many() {
+        let added = |repo: Option<&str>, added, count| MemoryAdded {
+            note: note(4, repo, "x", NoteSource::Cli),
+            added,
+            count,
+        };
+        assert_eq!(
+            remembered(&added(Some("/code/sphere"), true, 4)),
+            "Remembered for sphere · 4 notes"
+        );
+        assert_eq!(
+            remembered(&added(None, true, 1)),
+            "Remembered for all repos · 1 note"
+        );
+        assert_eq!(
+            remembered(&added(Some("/code/sphere"), false, 4)),
+            "Already remembered for sphere · 4 notes"
+        );
+    }
+
+    #[test]
+    fn events_about_notes_read_plainly() {
+        let started = |briefed| {
+            ev(
+                "t1",
+                EventBody::AgentStarted {
+                    child: "c".into(),
+                    pid: 7,
+                    resumed: false,
+                    briefed,
+                },
+            )
+        };
+        assert_eq!(
+            event_lines(&started(0), &plain()),
+            vec!["[t1] agent started (pid 7)"]
+        );
+        assert_eq!(
+            event_lines(&started(3), &plain()),
+            vec!["[t1] agent started (pid 7, told 3 notes)"]
+        );
+        assert_eq!(
+            event_lines(&ev("", EventBody::MemoryChanged { notes: 1 }), &plain()),
+            vec!["[-] notes changed (1 note now)"]
+        );
     }
 
     #[test]

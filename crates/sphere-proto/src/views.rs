@@ -79,6 +79,9 @@ pub struct TaskView {
     /// Where the session ran before it was taken over into Sphere.
     #[serde(default)]
     pub taken_over_from: Option<String>,
+    /// How many of the user's notes the latest agent process was told when it started.
+    #[serde(default)]
+    pub briefed: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -117,7 +120,7 @@ fn hint_key(task: &str, tool: &str) -> String {
 
 /// Whole seconds from one RFC 3339 time to a later one. 0 when either won't parse or the span
 /// runs backwards.
-fn seconds_between(from: &str, to: &str) -> u64 {
+pub(crate) fn seconds_between(from: &str, to: &str) -> u64 {
     let parse = |s: &str| OffsetDateTime::parse(s, &Rfc3339).ok();
     match (parse(from), parse(to)) {
         (Some(a), Some(b)) => u64::try_from((b - a).whole_seconds()).unwrap_or(0),
@@ -323,11 +326,12 @@ impl Views {
                         last_total_cost: 0.0,
                         starts: 0,
                         taken_over_from: None,
+                        briefed: 0,
                     },
                 );
                 return;
             }
-            EventBody::Warning { .. } => return,
+            EventBody::Warning { .. } | EventBody::MemoryChanged { .. } => return,
             _ => {}
         }
 
@@ -415,9 +419,15 @@ impl Views {
                 t.branch = branch.clone();
                 t.base = Some(base.clone());
             }
-            EventBody::AgentStarted { child, pid, .. } => {
+            EventBody::AgentStarted {
+                child,
+                pid,
+                briefed,
+                ..
+            } => {
                 t.child = Some(child.clone());
                 t.pid = Some(*pid);
+                t.briefed = *briefed;
                 t.state = TaskState::Working;
                 t.last_total_cost = 0.0;
                 if t.starts == 0 && t.prompt.trim().is_empty() {
@@ -603,6 +613,7 @@ mod tests {
                 child: "c1".into(),
                 pid: 5,
                 resumed: false,
+                briefed: 0,
             },
         )
     }
@@ -725,6 +736,41 @@ mod tests {
         assert_eq!((t.cost_usd, t.last_total_cost), (0.0, 0.26));
         v.apply(&turn(5, Some(1)));
         assert_eq!(v.task("t1").unwrap().status, "Done");
+    }
+
+    #[test]
+    fn a_task_keeps_how_many_notes_its_latest_agent_was_told() {
+        let mut v = Views::default();
+        v.apply(&created(1, "t1"));
+        assert_eq!(v.task("t1").unwrap().briefed, 0);
+        let start = |seq, briefed| {
+            ev(
+                seq,
+                "t1",
+                EventBody::AgentStarted {
+                    child: "c1".into(),
+                    pid: 5,
+                    resumed: seq > 2,
+                    briefed,
+                },
+            )
+        };
+        v.apply(&start(2, 3));
+        assert_eq!(v.task("t1").unwrap().briefed, 3);
+        // a resumed process is briefed again, with the notes as they are by then
+        v.apply(&start(3, 1));
+        assert_eq!(v.task("t1").unwrap().briefed, 1);
+    }
+
+    #[test]
+    fn a_memory_change_moves_the_seq_and_touches_no_task() {
+        let mut v = Views::default();
+        v.apply(&created(1, "t1"));
+        let before = v.task("t1").unwrap().clone();
+        v.apply(&ev(2, "", EventBody::MemoryChanged { notes: 4 }));
+        assert_eq!(v.seq, 2);
+        assert_eq!(v.task("t1"), Some(&before));
+        assert_eq!(v.tasks().len(), 1);
     }
 
     #[test]
@@ -943,6 +989,7 @@ mod tests {
             daily_cap_usd: None,
             max_concurrent: None,
             waited_today_secs: v.waited_on(TODAY),
+            memory: vec![],
         }
     }
 

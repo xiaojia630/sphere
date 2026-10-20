@@ -1,6 +1,7 @@
 //! sphered: the Sphere service. See docs/sphered.md.
 
 pub mod agent_proto;
+pub mod briefing;
 pub mod config;
 pub mod envpath;
 pub mod host_link;

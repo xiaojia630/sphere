@@ -6,7 +6,7 @@ use serde::Serialize;
 use serde_json::Value;
 use sphere_proto::api::Snapshot;
 use sphere_proto::api::{self, kind, method, notify, RpcError, RpcMessage};
-use sphere_proto::Event;
+use sphere_proto::{Event, Note, NoteSource};
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -316,6 +316,47 @@ impl Client {
             .call::<api::StartResult>(method::SESSION_BRING_IN, p)
             .await?
             .task)
+    }
+
+    // ---- notes ---------------------------------------------------------------------
+
+    /// The user's notes, newest first. With `repo`, only the ones an agent working there is told.
+    pub async fn memory_list(&self, repo: Option<&str>) -> Result<Vec<Note>> {
+        let list: api::MemoryList = self
+            .call(
+                method::MEMORY_LIST,
+                api::MemoryListParams {
+                    repo: repo.map(str::to_string),
+                },
+            )
+            .await?;
+        Ok(list.notes)
+    }
+
+    /// Keep a note for `repo` (a folder inside it will do), or for every repo with `None`.
+    pub async fn memory_add(
+        &self,
+        repo: Option<&str>,
+        text: &str,
+        source: NoteSource,
+    ) -> Result<api::MemoryAdded> {
+        self.call(
+            method::MEMORY_ADD,
+            api::MemoryAddParams {
+                repo: repo.map(str::to_string),
+                all: repo.is_none(),
+                text: text.into(),
+                source,
+            },
+        )
+        .await
+    }
+
+    pub async fn memory_remove(&self, id: u64) -> Result<()> {
+        let _: api::Ack = self
+            .call(method::MEMORY_REMOVE, api::MemoryRemoveParams { id })
+            .await?;
+        Ok(())
     }
 
     // ---- requests ------------------------------------------------------------------

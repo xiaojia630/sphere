@@ -2,10 +2,10 @@
 //! Durable events are stored before anyone hears of them; live frames are only
 //! broadcast, and may be dropped under load.
 
-use crate::store::{OffsetUpdate, Store};
+use crate::store::{NoteAdd, OffsetUpdate, Store};
 use anyhow::Result;
 use sphere_proto::api::LiveFrame;
-use sphere_proto::{Event, EventBody, Views};
+use sphere_proto::{Event, EventBody, Note, NoteSource, Views};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -108,8 +108,17 @@ impl Hub {
         offset: Option<OffsetUpdate>,
     ) -> Result<Vec<Event>> {
         let mut g = self.inner.lock().unwrap();
+        Self::commit_in(&mut g, task, bodies, offset)
+    }
+
+    fn commit_in(
+        g: &mut Inner,
+        task: &str,
+        bodies: Vec<EventBody>,
+        offset: Option<OffsetUpdate>,
+    ) -> Result<Vec<Event>> {
         let events = g.store.append(task, &bodies, offset.as_ref())?;
-        let Inner { views, subs, .. } = &mut *g;
+        let Inner { views, subs, .. } = g;
         for ev in &events {
             views.apply(ev);
         }
@@ -134,6 +143,51 @@ impl Hub {
 
     pub fn publish(&self, task: &str, body: EventBody) -> Result<Event> {
         Ok(self.commit(task, vec![body], None)?.remove(0))
+    }
+
+    // ---- the user's notes ----------------------------------------------------------
+
+    /// Keep a note (see [`Store::add_note`]). The subscribers hear of a new one with a `MemoryChanged` event.
+    pub fn add_note(&self, repo: Option<&str>, text: &str, source: NoteSource) -> Result<NoteAdd> {
+        let mut g = self.inner.lock().unwrap();
+        let added = g.store.add_note(repo, text, source)?;
+        if matches!(added, NoteAdd::Added(_)) {
+            Self::announce_notes(&mut g)?;
+        }
+        Ok(added)
+    }
+
+    /// Delete a note. False when there is none with that id.
+    pub fn remove_note(&self, id: u64) -> Result<bool> {
+        let mut g = self.inner.lock().unwrap();
+        let removed = g.store.remove_note(id)?;
+        if removed {
+            Self::announce_notes(&mut g)?;
+        }
+        Ok(removed)
+    }
+
+    /// Every note, newest first.
+    pub fn notes(&self) -> Result<Vec<Note>> {
+        self.inner.lock().unwrap().store.notes()
+    }
+
+    /// Read the views and the notes together, so a snapshot's `seq` and its notes are from the same moment: a
+    /// client that subscribes after `seq` hears of every later change.
+    pub fn view_with_notes<R>(&self, f: impl FnOnce(&Views, Vec<Note>) -> R) -> R {
+        let g = self.inner.lock().unwrap();
+        let notes = g.store.notes().unwrap_or_else(|e| {
+            tracing::warn!("could not read the notes: {e:#}");
+            vec![]
+        });
+        f(&g.views, notes)
+    }
+
+    /// Tell everyone the notes changed. The event holds no text, only how many notes there are.
+    fn announce_notes(g: &mut Inner) -> Result<()> {
+        let notes = g.store.note_count()? as u32;
+        Self::commit_in(g, "", vec![EventBody::MemoryChanged { notes }], None)?;
+        Ok(())
     }
 
     /// Broadcast a live frame to subscribers. Never stored; dropped when a
@@ -314,6 +368,60 @@ mod tests {
         // The queue holds what fitted, then reports closed.
         assert!(slow.rx.try_recv().is_ok());
         assert!(other.rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn a_new_or_removed_note_is_announced_once_and_a_repeat_is_not() {
+        let h = hub(16);
+        let mut all = h.subscribe(None);
+        let mut one_task = h.subscribe(Some("t1".into()));
+        let changed = |sub: &mut Subscription| match sub.rx.try_recv() {
+            Ok(Msg::Event(e)) => {
+                assert_eq!(e.task, "", "a note belongs to no task");
+                Some(e.body)
+            }
+            Ok(other) => panic!("{other:?}"),
+            Err(_) => None,
+        };
+        let NoteAdd::Added(note) = h
+            .add_note(Some("/r"), "use pnpm", NoteSource::Typed)
+            .unwrap()
+        else {
+            panic!("not added")
+        };
+        assert_eq!(
+            changed(&mut all),
+            Some(EventBody::MemoryChanged { notes: 1 })
+        );
+        let again = h
+            .add_note(Some("/r"), "use pnpm", NoteSource::Change)
+            .unwrap();
+        assert!(matches!(again, NoteAdd::Already(_)));
+        assert_eq!(changed(&mut all), None, "nothing changed, nothing to tell");
+        assert!(h.remove_note(note.id).unwrap());
+        assert_eq!(
+            changed(&mut all),
+            Some(EventBody::MemoryChanged { notes: 0 })
+        );
+        assert!(!h.remove_note(note.id).unwrap());
+        assert_eq!(changed(&mut all), None);
+        assert_eq!(changed(&mut one_task), None, "a task's watcher is not told");
+        // the changes are durable: a client that was away replays them
+        assert_eq!(h.replay_page(0, 10, None, 10).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn a_snapshot_reads_its_seq_and_its_notes_together() {
+        let h = hub(16);
+        h.publish("t1", created()).unwrap();
+        h.add_note(None, "for everyone", NoteSource::Cli).unwrap();
+        let (seq, notes) = h.view_with_notes(|v, notes| (v.seq, notes));
+        assert_eq!(seq, 2, "the task, then the note's announcement");
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].text, "for everyone");
+        // after the seq it names, everything else is a later event
+        h.remove_note(notes[0].id).unwrap();
+        assert_eq!(h.replay_page(seq, 10, None, 10).unwrap().len(), 1);
     }
 
     #[test]

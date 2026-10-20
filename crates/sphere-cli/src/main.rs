@@ -5,7 +5,8 @@ use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use render::Style;
 use sphere_client::{Client, ClientKind, StartParams, Update};
-use sphere_proto::{AnswerKind, EventBody};
+use sphere_proto::api::kind;
+use sphere_proto::{AnswerKind, EventBody, NoteSource};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -94,6 +95,20 @@ enum Command {
         #[arg(long)]
         prompt: Option<String>,
     },
+    /// Tell every agent started in this repository something, like "use pnpm, never npm".
+    Remember {
+        /// The note. Quotes are optional.
+        #[arg(required = true)]
+        text: Vec<String>,
+        /// Tell agents in every repository, not only this one.
+        #[arg(long)]
+        all: bool,
+    },
+    /// List the notes agents start with, by repo, with their ids.
+    Memory {
+        #[command(subcommand)]
+        action: Option<MemoryAction>,
+    },
     /// Check that everything Sphere needs is in place.
     Doctor {
         /// The agent command to check.
@@ -102,6 +117,12 @@ enum Command {
         #[arg(long)]
         state_dir: Option<PathBuf>,
     },
+}
+
+#[derive(Subcommand)]
+enum MemoryAction {
+    /// Remove a note: its id is the number in `sphere memory`.
+    Rm { id: u64 },
 }
 
 #[derive(Clone, Copy, clap::ValueEnum)]
@@ -361,7 +382,74 @@ async fn run() -> Result<ExitCode> {
                 .await?;
             println!("started {id}");
         }
+        Command::Remember { text, all } => {
+            let cwd = std::env::current_dir().context("cannot tell which folder you are in")?;
+            let repo = (!all).then(|| cwd.to_string_lossy().to_string());
+            let added = client
+                .memory_add(repo.as_deref(), &text.join(" "), NoteSource::Cli)
+                .await
+                .map_err(|e| match e.kind() {
+                    Some(kind::BAD_REPO) => anyhow::anyhow!(
+                        "{} is not in a git repository: run this in one, or add --all",
+                        cwd.display()
+                    ),
+                    _ => e.into(),
+                })?;
+            println!("{}", render::remembered(&added));
+        }
+        Command::Memory { action: None } => {
+            print_lines(render::memory_table(
+                &client.memory_list(None).await?,
+                &style(),
+            ));
+        }
+        Command::Memory {
+            action: Some(MemoryAction::Rm { id }),
+        } => {
+            client.memory_remove(id).await?;
+            println!("removed note {id}");
+        }
         Command::Daemon { .. } | Command::Doctor { .. } => unreachable!(),
     }
     Ok(ExitCode::SUCCESS)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> Command {
+        let mut all = vec!["sphere"];
+        all.extend(args);
+        Cli::try_parse_from(all).unwrap().command
+    }
+
+    #[test]
+    fn remember_takes_the_note_with_or_without_quotes() {
+        let Command::Remember { text, all } = parse(&["remember", "use pnpm, never npm"]) else {
+            panic!("not remember")
+        };
+        assert_eq!((text.join(" "), all), ("use pnpm, never npm".into(), false));
+        let Command::Remember { text, all } = parse(&["remember", "--all", "use", "pnpm"]) else {
+            panic!("not remember")
+        };
+        assert_eq!((text.join(" "), all), ("use pnpm".into(), true));
+        assert!(Cli::try_parse_from(["sphere", "remember"]).is_err());
+    }
+
+    #[test]
+    fn memory_lists_and_removes_by_id() {
+        assert!(matches!(
+            parse(&["memory"]),
+            Command::Memory { action: None }
+        ));
+        assert!(matches!(
+            parse(&["memory", "rm", "7"]),
+            Command::Memory {
+                action: Some(MemoryAction::Rm { id: 7 })
+            }
+        ));
+        assert!(Cli::try_parse_from(["sphere", "memory", "rm"]).is_err());
+        assert!(Cli::try_parse_from(["sphere", "memory", "rm", "x"]).is_err());
+    }
 }

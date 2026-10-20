@@ -49,6 +49,9 @@ pub enum EventBody {
         child: String,
         pid: u32,
         resumed: bool,
+        /// How many of the user's notes this process was told when it started.
+        #[serde(default)]
+        briefed: u32,
     },
     AgentExited {
         #[serde(default)]
@@ -165,6 +168,13 @@ pub enum EventBody {
         /// Where it ran: `herdr`, `Terminal`, `Claude background`, ...
         from: String,
     },
+    /// A note was added or removed. It belongs to no task and holds no text: the notes are in the
+    /// snapshot and `memory.list`, and this tells a client to read them again.
+    MemoryChanged {
+        /// How many notes there are now, in all.
+        #[serde(default)]
+        notes: u32,
+    },
 }
 
 impl EventBody {
@@ -195,6 +205,7 @@ impl EventBody {
             EventBody::Failed { .. } => "failed",
             EventBody::Warning { .. } => "warning",
             EventBody::TakenOver { .. } => "taken_over",
+            EventBody::MemoryChanged { .. } => "memory_changed",
         }
     }
 }
@@ -376,6 +387,16 @@ mod tests {
     }
 
     #[test]
+    fn an_agent_started_from_before_notes_was_briefed_with_none() {
+        let raw = r#"{"seq":4,"task":"t1","at":"x","kind":"agent_started","child":"c1","pid":9,"resumed":true}"#;
+        let ev: Event = serde_json::from_str(raw).unwrap();
+        assert!(matches!(
+            ev.body,
+            EventBody::AgentStarted { briefed: 0, .. }
+        ));
+    }
+
+    #[test]
     fn unix_ms_formats() {
         assert_eq!(rfc3339_from_unix_ms(0), "1970-01-01T00:00:00.000Z");
         assert_eq!(
@@ -419,6 +440,13 @@ mod tests {
             },
             EventBody::SessionId {
                 session_id: "s".into(),
+            },
+            EventBody::MemoryChanged { notes: 3 },
+            EventBody::AgentStarted {
+                child: "c".into(),
+                pid: 1,
+                resumed: false,
+                briefed: 2,
             },
         ];
         for b in bodies {

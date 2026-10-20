@@ -207,8 +207,20 @@ async fn dispatch(
             method::SESSION_BRING_IN => Ok(ok(mgr.bring_in(parse(params)?).await?)?),
             method::REQUEST_ANSWER => {
                 let p: api::AnswerParams = parse(params)?;
-                authorize_answer(mgr, conn).await?;
+                authorize_user(mgr, conn, "answer requests").await?;
                 mgr.answer(p).await?;
+                Ok(ok(api::Ack { ok: true })?)
+            }
+            method::MEMORY_LIST => Ok(ok(mgr.memory_list(parse(params)?).await?)?),
+            method::MEMORY_ADD => {
+                let p: api::MemoryAddParams = parse(params)?;
+                authorize_user(mgr, conn, "change your notes").await?;
+                Ok(ok(mgr.memory_add(p).await?)?)
+            }
+            method::MEMORY_REMOVE => {
+                let p: api::MemoryRemoveParams = parse(params)?;
+                authorize_user(mgr, conn, "change your notes").await?;
+                mgr.memory_remove(p.id)?;
                 Ok(ok(api::Ack { ok: true })?)
             }
             other => Err(ApiError(RpcError {
@@ -228,24 +240,25 @@ impl From<RpcError> for ApiError {
     }
 }
 
-/// Only you answer: not the assistant, and not anything an agent started.
-async fn authorize_answer(mgr: &Arc<Manager>, conn: &Conn) -> Result<(), ApiError> {
-    let forbidden = |why: &str| ApiError(RpcError::app(kind::FORBIDDEN, why));
+/// Only you decide what `what` names (answer requests, change your notes): not the assistant, and not anything
+/// an agent started.
+async fn authorize_user(mgr: &Arc<Manager>, conn: &Conn, what: &str) -> Result<(), ApiError> {
+    let forbidden = |why: String| ApiError(RpcError::app(kind::FORBIDDEN, why));
     if conn.kind == ClientKind::Assistant {
-        return Err(forbidden(
-            "the assistant cannot answer requests; only you can",
-        ));
+        return Err(forbidden(format!(
+            "the assistant cannot {what}; only you can"
+        )));
     }
     match conn.pid {
         Some(pid) => {
             let roots = mgr.agent_roots().await;
             if peer::descends_from(pid, &roots) {
-                return Err(forbidden(
-                    "requests cannot be answered from a process an agent started",
-                ));
+                return Err(forbidden(format!(
+                    "a process an agent started cannot {what}"
+                )));
             }
         }
-        None => tracing::warn!("could not identify the caller's process; allowing the answer"),
+        None => tracing::warn!("could not identify the caller's process; allowing it to {what}"),
     }
     Ok(())
 }

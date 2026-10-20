@@ -1,10 +1,13 @@
 //! The event store: SQLite in WAL mode. One `events` table with a global
 //! sequence number, plus the read offsets into the host's output files, saved
-//! in the same transaction as the events they produced.
+//! in the same transaction as the events they produced. The user's notes for
+//! agents have a table of their own, so a removed note is deleted, not left in
+//! the log.
 
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection, OptionalExtension};
-use sphere_proto::{now_rfc3339, Event, EventBody};
+use sphere_proto::memory::NOTES_MAX;
+use sphere_proto::{clean_note, now_rfc3339, Event, EventBody, Note, NoteSource};
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
@@ -18,6 +21,40 @@ pub struct OffsetUpdate {
     pub child: String,
     pub stream: &'static str,
     pub offset: u64,
+}
+
+/// What [`Store::add_note`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NoteAdd {
+    Added(Note),
+    /// The same note was there already.
+    Already(Note),
+    /// Nothing was left of the text once it was cleaned up.
+    Empty,
+    /// The store holds [`NOTES_MAX`] notes already.
+    Full,
+}
+
+/// How the notes for every repo are filed in the `scope` column. A repo is filed under its root, an absolute
+/// path, which can't be this.
+const ALL_SCOPE: &str = "all";
+
+fn scope_of(repo: Option<&str>) -> &str {
+    repo.filter(|r| *r != ALL_SCOPE).unwrap_or(ALL_SCOPE)
+}
+
+const NOTE_COLUMNS: &str = "id, scope, text, created_at, source";
+
+fn note_from_row(r: &rusqlite::Row) -> rusqlite::Result<Note> {
+    let scope: String = r.get(1)?;
+    let source: String = r.get(4)?;
+    Ok(Note {
+        id: r.get::<_, i64>(0)? as u64,
+        repo: (scope != ALL_SCOPE).then_some(scope),
+        text: r.get(2)?,
+        created_at: r.get(3)?,
+        source: NoteSource::parse(&source),
+    })
 }
 
 impl Store {
@@ -48,8 +85,18 @@ impl Store {
                  stream TEXT NOT NULL,
                  off    INTEGER NOT NULL,
                  PRIMARY KEY (child, stream)
+             );
+             CREATE TABLE IF NOT EXISTS memory (
+                 id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                 scope      TEXT NOT NULL,
+                 text       TEXT NOT NULL,
+                 created_at TEXT NOT NULL,
+                 source     TEXT NOT NULL,
+                 UNIQUE (scope, text)
              );",
         )?;
+        // a removed note's text is overwritten, not left in the free pages
+        conn.pragma_update(None, "secure_delete", "ON")?;
         if let Some(path) = path {
             // The store is user-only.
             let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
@@ -171,6 +218,73 @@ impl Store {
         Ok(out)
     }
 
+    /// Keep a note for `repo` (`None`: every repo). The text is cleaned up first (see `clean_note`). The same
+    /// note twice in one scope is kept once.
+    pub fn add_note(
+        &mut self,
+        repo: Option<&str>,
+        text: &str,
+        source: NoteSource,
+    ) -> Result<NoteAdd> {
+        let Some(text) = clean_note(text) else {
+            return Ok(NoteAdd::Empty);
+        };
+        let scope = scope_of(repo);
+        let tx = self.conn.transaction()?;
+        let same = tx
+            .query_row(
+                &format!("SELECT {NOTE_COLUMNS} FROM memory WHERE scope = ?1 AND text = ?2"),
+                params![scope, text],
+                note_from_row,
+            )
+            .optional()?;
+        if let Some(note) = same {
+            return Ok(NoteAdd::Already(note));
+        }
+        let count: i64 = tx.query_row("SELECT COUNT(*) FROM memory", [], |r| r.get(0))?;
+        if count as usize >= NOTES_MAX {
+            return Ok(NoteAdd::Full);
+        }
+        let created_at = now_rfc3339();
+        tx.execute(
+            "INSERT INTO memory (scope, text, created_at, source) VALUES (?1, ?2, ?3, ?4)",
+            params![scope, text, created_at, source.as_str()],
+        )?;
+        let id = tx.last_insert_rowid() as u64;
+        tx.commit()?;
+        Ok(NoteAdd::Added(Note {
+            id,
+            repo: repo.filter(|r| *r != ALL_SCOPE).map(str::to_string),
+            text,
+            created_at,
+            source,
+        }))
+    }
+
+    /// Every note, newest first.
+    pub fn notes(&self) -> Result<Vec<Note>> {
+        let mut stmt = self.conn.prepare_cached(&format!(
+            "SELECT {NOTE_COLUMNS} FROM memory ORDER BY id DESC"
+        ))?;
+        let rows = stmt.query_map([], note_from_row)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn note_count(&self) -> Result<usize> {
+        let n: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM memory", [], |r| r.get(0))?;
+        Ok(n as usize)
+    }
+
+    /// Delete a note. False when there is none with that id.
+    pub fn remove_note(&mut self, id: u64) -> Result<bool> {
+        let n = self
+            .conn
+            .execute("DELETE FROM memory WHERE id = ?1", params![id as i64])?;
+        Ok(n > 0)
+    }
+
     pub fn offset(&self, child: &str, stream: &str) -> Result<u64> {
         let n: Option<i64> = self
             .conn
@@ -272,6 +386,139 @@ mod tests {
         assert_eq!(evs[0].body, say("kept"));
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
+    }
+
+    fn add_as(s: &mut Store, repo: Option<&str>, text: &str, source: NoteSource) -> Note {
+        match s.add_note(repo, text, source).unwrap() {
+            NoteAdd::Added(n) => n,
+            other => panic!("{text}: {other:?}"),
+        }
+    }
+
+    fn add(s: &mut Store, repo: Option<&str>, text: &str) -> Note {
+        add_as(s, repo, text, NoteSource::Typed)
+    }
+
+    #[test]
+    fn notes_round_trip_newest_first() {
+        let mut s = Store::open_in_memory().unwrap();
+        assert!(s.notes().unwrap().is_empty());
+        let a = add(&mut s, Some("/code/sphere"), "use pnpm, never npm");
+        let b = add_as(&mut s, None, "answer in plain words", NoteSource::Cli);
+        let c = add_as(
+            &mut s,
+            Some("/code/other"),
+            "tests live in spec/",
+            NoteSource::Change,
+        );
+        assert!(a.id < b.id && b.id < c.id);
+        assert_eq!(a.repo.as_deref(), Some("/code/sphere"));
+        assert_eq!((b.repo.clone(), b.source), (None, NoteSource::Cli));
+        assert_eq!(a.created_at.len(), 24);
+        // what was returned is what is stored
+        assert_eq!(s.notes().unwrap(), vec![c, b, a]);
+        assert_eq!(s.note_count().unwrap(), 3);
+    }
+
+    #[test]
+    fn notes_survive_reopening_the_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sphere.db");
+        let kept = {
+            let mut s = Store::open(&path).unwrap();
+            add(&mut s, Some("/code/sphere"), "keep me")
+        };
+        let mut s = Store::open(&path).unwrap();
+        assert_eq!(s.notes().unwrap(), vec![kept.clone()]);
+        // ids go on from where they were
+        assert!(add(&mut s, None, "and me").id > kept.id);
+    }
+
+    #[test]
+    fn the_same_note_twice_is_kept_once_per_scope() {
+        let mut s = Store::open_in_memory().unwrap();
+        let first = add(&mut s, Some("/r"), "use pnpm");
+        // after cleaning up, these are the same note
+        for again in ["use pnpm", "  use   pnpm \n"] {
+            assert_eq!(
+                s.add_note(Some("/r"), again, NoteSource::Change).unwrap(),
+                NoteAdd::Already(first.clone())
+            );
+        }
+        assert_eq!(s.note_count().unwrap(), 1);
+        // another repo, or every repo, can have the same words
+        add(&mut s, Some("/other"), "use pnpm");
+        add(&mut s, None, "use pnpm");
+        assert_eq!(s.note_count().unwrap(), 3);
+        // case counts: only exact duplicates are dropped
+        add(&mut s, Some("/r"), "Use pnpm");
+    }
+
+    #[test]
+    fn the_word_all_files_a_note_for_every_repo() {
+        let mut s = Store::open_in_memory().unwrap();
+        let n = add(&mut s, Some("all"), "for everyone");
+        assert_eq!(n.repo, None);
+        assert_eq!(s.notes().unwrap()[0].repo, None);
+    }
+
+    #[test]
+    fn notes_are_cleaned_up_and_capped_in_length() {
+        let mut s = Store::open_in_memory().unwrap();
+        assert_eq!(
+            s.add_note(None, "  \n ", NoteSource::Typed).unwrap(),
+            NoteAdd::Empty
+        );
+        assert_eq!(s.note_count().unwrap(), 0);
+        let n = add(&mut s, None, "  two\nlines  ");
+        assert_eq!(n.text, "two lines");
+        let long = add(&mut s, None, &"word ".repeat(200));
+        assert_eq!(
+            long.text.chars().count(),
+            sphere_proto::memory::NOTE_MAX_CHARS
+        );
+        assert!(long.text.ends_with('…'));
+        assert_eq!(s.notes().unwrap()[0].text, long.text);
+    }
+
+    #[test]
+    fn the_store_holds_so_many_notes_and_no_more() {
+        let mut s = Store::open_in_memory().unwrap();
+        let mut first = None;
+        for i in 0..NOTES_MAX {
+            let n = add(&mut s, Some("/r"), &format!("note {i}"));
+            first.get_or_insert(n.id);
+        }
+        assert_eq!(
+            s.add_note(Some("/r"), "one too many", NoteSource::Typed)
+                .unwrap(),
+            NoteAdd::Full
+        );
+        // a note that is there already is not "too many"
+        assert!(matches!(
+            s.add_note(Some("/r"), "note 0", NoteSource::Typed).unwrap(),
+            NoteAdd::Already(_)
+        ));
+        assert!(s.remove_note(first.unwrap()).unwrap());
+        add(&mut s, Some("/r"), "one too many");
+        assert_eq!(s.note_count().unwrap(), NOTES_MAX);
+    }
+
+    #[test]
+    fn a_removed_note_is_gone_and_its_id_is_not_used_again() {
+        let mut s = Store::open_in_memory().unwrap();
+        let a = add(&mut s, Some("/r"), "first");
+        let b = add(&mut s, Some("/r"), "second");
+        assert!(s.remove_note(b.id).unwrap());
+        assert!(!s.remove_note(b.id).unwrap());
+        assert!(!s.remove_note(999).unwrap());
+        assert_eq!(s.notes().unwrap(), vec![a]);
+        // the id of the newest note is not handed out again
+        let c = add(&mut s, Some("/r"), "third");
+        assert!(c.id > b.id);
+        // and the same words can be written again
+        let again = add(&mut s, Some("/r"), "second");
+        assert!(again.id > c.id);
     }
 
     #[test]
