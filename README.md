@@ -23,15 +23,21 @@
 </p>
 
 Sphere is a desktop for working with coding agents. A live core sits at the centre of the screen with glass panels
-around it. You start Claude Code agents from a command bar and watch them work. When one needs you, the request
-rises out of the core and you answer it with a key. Around that sit the apps a developer reaches for all day,
-all on your real data: code review, git, containers, ports, system and files.
+around it. You start Claude Code agents from a command bar and watch them work. When one needs you, the request rises
+out of the core and you answer it with a key, or straight from the notification. Claude sessions you started in other
+terminals show up too, and you can move one into Sphere without losing its conversation. Around that sit the apps a
+developer reaches for all day, all on your real data: code review, git, containers, ports, system and files.
 
 ## See it in action
 
 <p align="center">
   <img src="docs/media/agent.gif" width="960" alt="An agent working"><br>
   <sub><b>Watch an agent work.</b> Steps stream along a track from the core while the run, output and edit panels follow along.</sub>
+</p>
+
+<p align="center">
+  <img src="docs/media/swarm.gif" width="960" alt="The Agent swarm"><br>
+  <sub><b>Every agent at once.</b> Each repo gets its own orbit. Two agents editing the same file are flagged, and the one that needs you comes forward.</sub>
 </p>
 
 <p align="center">
@@ -54,7 +60,7 @@ all on your real data: code review, git, containers, ports, system and files.
 <table>
   <tr>
     <td width="50%"><img src="docs/media/code.jpg" alt="Code"><br><b>Code</b>: review an agent's diff with its reasons, run the tests, then merge, open a PR or ask for a change. Or open a folder (`code ~/Projects/x`, `code .`, <kbd>O</kbd> in Files or Git): its tree, files and uncommitted diffs, <kbd>E</kbd> edits in Helix in a terminal tab, <kbd>Z</kbd> opens Zed.</td>
-    <td width="50%"><img src="docs/media/git.jpg" alt="Git"><br><b>Git</b>: your repos, a tilted commit graph, staging, commit, branches, pull, push and fetch.</td>
+    <td width="50%"><img src="docs/media/git.jpg" alt="Git"><br><b>Git</b>: your repos, a tilted commit graph, staging, commit, branches, pull, push and fetch. <kbd>R</kbd> lists the repo's pull requests with their checks: open one on GitHub, check it out or merge it.</td>
   </tr>
   <tr>
     <td width="50%"><img src="docs/media/containers.jpg" alt="Containers"><br><b>Containers</b>: start, stop, restart, pull and remove, with logs that follow.</td>
@@ -66,6 +72,14 @@ all on your real data: code review, git, containers, ports, system and files.
   </tr>
 </table>
 
+## Light on your Mac
+
+Sphere redraws at your display's refresh rate but only redoes what changed: layout, GPU buffers and the agents'
+views update when something moves, and the background services sleep until an agent writes or exits. Live figures
+(CPU, memory, GPU, network, containers) are read inside the app, and only while it is on screen. On an M2 Pro the home
+screen costs about 3.4 ms of CPU a frame, about 0.4 of a core at 120 Hz and a quarter of what 0.1.3 used, with
+about 455 MB of memory.
+
 ## Install
 
 1. Download the latest `Sphere-<version>.dmg` from [Releases](https://github.com/xiaojia630/sphere/releases), open
@@ -74,6 +88,8 @@ all on your real data: code review, git, containers, ports, system and files.
    double-click is refused once. If macOS still won't open it, run
    `xattr -dr com.apple.quarantine /Applications/Sphere.app`.
 3. That's it. Sphere starts its background service by itself and keeps its state in `~/.sphere`.
+4. To update, install the new version the same way. Sphere restarts its background service when it is out of date:
+   right away if no agent is running, otherwise once they finish. Terminal tabs keep running.
 
 **Requirements:** macOS 13 or later on Apple silicon. Agents run on your own
 [Claude Code](https://docs.anthropic.com/en/docs/claude-code), which must be installed and signed in; everything
@@ -87,7 +103,9 @@ else works without it. Optional: Docker Desktop or [OrbStack](https://orbstack.d
 | <kbd>Option</kbd> <kbd>Space</kbd> | Show or hide Sphere from anywhere. Closing the window hides it; <kbd>Cmd</kbd> <kbd>Q</kbd> quits. |
 | <kbd>/</kbd> or <kbd>Cmd</kbd> <kbd>K</kbd> | The command bar. `repo: what to do` starts an agent in its own worktree; `> message` talks to it. |
 | <kbd>A</kbd> | Open the core: the app orbit. <kbd>←</kbd> <kbd>→</kbd> spin, <kbd>Enter</kbd> opens, <kbd>Esc</kbd> goes back. |
-| <kbd>W</kbd> / <kbd>N</kbd> | The Working view / what needs you. <kbd>Enter</kbd> says yes, <kbd>E</kbd> changes, <kbd>L</kbd> is later; <kbd>A</kbd> says yes and saves the rule the agent suggested, <kbd>Shift</kbd> <kbd>Enter</kbd> says yes to every other agent asking exactly the same. |
+| <kbd>W</kbd> / <kbd>N</kbd> | The Working view / what needs you. <kbd>Enter</kbd> says yes, <kbd>A</kbd> always (saves the rule), <kbd>Shift</kbd> <kbd>Enter</kbd> says yes to every agent asking the same, <kbd>E</kbd> changes, <kbd>L</kbd> is later. |
+| <kbd>S</kbd> | The Agent swarm: every agent at once, one orbit per repo. |
+| `motion` | In the command bar: transitions are Fast by default. `motion cinematic` slows them down, `motion fast` brings them back, `motion 1.5` makes Fast quicker still. |
 | <kbd>T</kbd> | The terminal. Its tabs survive quitting the app. |
 | <kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd> · <kbd>C</kbd> · <kbd>M</kbd> | Flat, depth and orbit views · cycle the five themes · mute. |
 
@@ -177,6 +195,7 @@ sphere mode <task> <mode>           change the permission mode
 sphere model <task> <model>         change the model
 sphere sessions                     Claude Code sessions on this machine
 sphere bring-in <session>           continue a session as a Sphere task (refused while it runs elsewhere)
+sphere take-over <session>          stop a session running in a terminal (or the background) and continue it in Sphere
 sphere doctor                       check the installation
 ```
 
@@ -192,7 +211,7 @@ sphere doctor                       check the installation
 
 ### Policy
 
-`~/.sphere/policy.toml` and a repo's `.sphere/policy.toml` are compiled into the agent's `--settings` (permission rules plus `sandbox.enabled`, on by default), plus `[[auto]]` rules that Sphere itself decides (for example `git push origin {branch}`). A repo policy can only add restrictions unless the user file says `trust_repos = true`. The sandbox can reach the package registries (crates.io, npm and Yarn, PyPI, the Go module proxy) by default, so installs and builds don't stop to ask; `[sandbox] allowed_domains` adds more hosts, and publishing still asks. Force pushes and history rewrites are denied unless a task starts with `--allow-rewrites`.
+`~/.sphere/policy.toml` and a repo's `.sphere/policy.toml` are compiled into the agent's `--settings` (permission rules plus `sandbox.enabled`, on by default; out of the box the sandbox can reach only the package registries: crates.io, npm, Yarn, PyPI and the Go module proxy), plus `[[auto]]` rules that Sphere itself decides (for example `git push origin {branch}`). A repo policy can only add restrictions unless the user file says `trust_repos = true`. Force pushes and history rewrites are denied unless a task starts with `--allow-rewrites`.
 
 A repo's `.sphere/config.toml` can list files to `copy` into each worktree and a `setup` command to run there.
 
@@ -229,16 +248,20 @@ More keys:
 - Mouse: drag the core to turn it, drag panels anywhere, scroll to zoom (on a panel: push it back; on Apps: spin the rolodex), double-click the sphere to collapse, a ring to fold it, empty space to fit.
 - A (or hold the sphere, or the dock's Apps): core open, the app orbit. ← → or scroll spins it, Enter or a click opens an app, Esc closes.
 - S: the Agent swarm, every agent at once on one orbit per repo. Hover an agent for its recent steps, click it (or 1-9, Tab) to bring it forward, N for the next one that needs you, T shows every track, Esc goes back.
-- W: the Working view on the latest agent (it also opens when you start one). P interrupts its turn, T brings its output forward, Esc goes home.
-- N: the Agent moment for what needs you (it rises by itself when a request arrives). Enter answers yes, E changes (type, Enter), L is later, ← → steps through them, Esc puts them away. A permission that comes with a rule to remember has an Always button (A): yes, and the rule it names is saved to your policy. When other agents wait on exactly the same ask (the same tool and input), the card says so and Shift+Enter (Allow all) answers yes to all of them at once. Sphere reads each one out. The home's Needs you row and the swarm's status line say how long agents have waited on you today.
+- W: the Working view on the latest agent (it also opens when you start one). P interrupts its turn, T brings its output forward, F follows it up in the same session (resumed if it finished), Esc goes home. A task that changed no files ends Answered, with nothing to merge.
+- Elsewhere: Claude sessions running outside Sphere (Terminal, iTerm2, tmux, herdr, SSH, the Claude background) show as dim rows on the Agents panel and as ghosts in the swarm. Click one, or type `take over` in the command bar, for its card. Take over (two presses) stops the session where it runs and continues the same conversation in Sphere, in its folder, with no branch.
+- N: the Agent moment for what needs you (it rises by itself when a request arrives). Enter answers yes, A always allows (yes, and the rule the agent suggested is saved to your policy), E changes (type, Enter), L is later, ← → steps through them, Esc puts them away. When other agents ask for the exact same command, the card says so and Shift+Enter allows them all. Sphere reads each one out. The home's Needs you row and the swarm say how long agents have waited on you today.
 - Terminal: T focuses it, Esc releases it, Cmd+T new tab, Cmd+W close, Cmd+1..9 switch, Cmd+V paste. Tabs run your login shell inside sphere-host, so they survive the app closing: the next launch re-attaches them (replaying their output). If the host can't be reached they live in the app.
 - Motion: transitions play Fast by default (apps, the Working view, the Agent moment and the app orbit settle in about a fifth of a second). `motion cinematic` in the command bar brings back the slower original timing, `motion fast` returns, and `motion` alone switches. `motion 1.5` plays Fast 1.5 times quicker still (0.25 to 4). The choice is remembered.
-- Option+Space (macOS) brings Sphere up over anything and hides it again. When something needs you while Sphere isn't in front, you get a notification.
+- Next 24h: the home's rail lists this Mac's Calendar events for the next day, read every five minutes. Sphere.app asks for Calendar access once; without it the rail says "Nothing scheduled".
+- Option+Space (macOS) brings Sphere up over anything and hides it again. When something needs you while Sphere isn't in front, you get a notification. In Sphere.app it answers too: Allow, Always allow, Deny and Reply for a command that shows in full, a button per option for a short question, otherwise Open. Several agents asking the same share one notification.
 
-Sounds are synthesised and rendered to WAV (`crates/sphere-app/assets/sounds`). Speech uses macOS `say` with the Daniel voice.
+Sounds are synthesised and rendered to WAV (`crates/sphere-app/assets/sounds`). Speech is Kokoro's British George voice, loaded a moment after the window is up; until it is ready, or if it can't load, Sphere speaks through macOS `say` with the Daniel voice. `SPHERE_VOICE=system` keeps `say`.
 
-Flags: `--demo` (sample agents, no service), `--code`, `--git`, `--app containers|ports|system|files`, `--moment` (the Agent moment with sample requests), `--apps` (core open), `--work` (the Working view), `--swarm` (the Agent swarm), `--orbit`, `--collapsed`, `--theme <name>`, `--motion fast|cinematic`, `--live` (screenshots and benches against the real service), `--cmd "<command>"` (what the first terminal tab runs), `--bench <seconds>`, `--shot <png> [--frames N] [--depth] [--term]`, `--record <dir> [--record-frames N]` (every frame, for GIFs), `--size WxH`, `--no-msaa`. `SPHERE_STATS=1` prints startup timings and memory. `SPHERE_SOCKET` points the app at another sphered. `SPHERE_CODE_DIR=<folder>` opens Code on that folder at start (look tests; `SPHERE_CODE_KEYS` plays keys in it).
+Flags: `--demo` (sample agents, no service), `--code`, `--git`, `--app containers|ports|system|files`, `--moment` (the Agent moment with sample requests), `--elsewhere` (sample sessions running outside Sphere), `--calendar` (sample events in the Next 24h rail), `--takeover card|armed|ambiguous|list|after` (the take-over card), `--apps` (core open), `--work` (the Working view), `--swarm` (the Agent swarm), `--orbit`, `--collapsed`, `--theme <name>`, `--motion fast|cinematic`, `--live` (screenshots and benches against the real service), `--cmd "<command>"` (what the first terminal tab runs), `--bench <seconds>`, `--shot <png> [--frames N] [--depth] [--term]`, `--record <dir> [--record-frames N]` (every frame, for GIFs), `--size WxH`, `--no-msaa`. `SPHERE_STATS=1` prints startup timings and memory. `SPHERE_SOCKET` points the app at another sphered. `SPHERE_CODE_DIR=<folder>` opens Code on that folder at start (look tests; `SPHERE_CODE_KEYS` plays keys in it).
 
 `--shot` and `--record` render offscreen and need no window. `--bench`, `--shot` and `--record` use the demo data unless `--live` is given.
+
+The agent, review and ops clips above come from `scripts/readme-demo/run.sh`: a home of its own with a small Rust repo, its own sphered whose agent is fake-claude adding a `--json` flag, and stand-in `docker` and `lsof` with a sample compose project. Nothing of yours is touched. For example `scripts/readme-demo/run.sh /tmp/demo --task -- target/release/sphere-app --live` (after `cargo build -p sphered -p sphere-host -p fake-claude -p sphere-cli`).
 
 Linux: needs X11 dev libs by default (`--features wayland` for Wayland). The hotkey and notifications are macOS only for now. No GPU (CI, containers): `scripts/shot-swiftshader.sh --shot out.png --frames 120 --no-msaa` uses a software Vulkan driver.
