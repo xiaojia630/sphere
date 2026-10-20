@@ -351,6 +351,7 @@ pub fn event_lines(e: &Event, st: &Style) -> Vec<String> {
         }
         EventBody::Warning { message } => one(format!("warning: {message}")),
         EventBody::TakenOver { from } => one(format!("taken over from {from}")),
+        EventBody::Seen {} => vec![],
     }
 }
 

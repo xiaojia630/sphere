@@ -1270,6 +1270,7 @@ impl Manager {
             model: p.model,
             allow_rewrites: p.allow_rewrites,
             resume_session,
+            parent_task: None,
         }];
         bodies.extend(extra);
         self.hub.commit(&id, bodies, None).map_err(ApiError::from)?;
@@ -2016,6 +2017,7 @@ mod tests {
                 model: None,
                 allow_rewrites: false,
                 resume_session: None,
+                parent_task: None,
             },
         });
         v.task("t1").unwrap().clone()
@@ -2469,6 +2471,7 @@ mod tests {
                     model: None,
                     allow_rewrites: false,
                     resume_session: None,
+                    parent_task: None,
                 },
             )
             .unwrap();

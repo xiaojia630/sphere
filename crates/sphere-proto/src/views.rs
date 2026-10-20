@@ -79,6 +79,13 @@ pub struct TaskView {
     /// Where the session ran before it was taken over into Sphere.
     #[serde(default)]
     pub taken_over_from: Option<String>,
+    /// The task that started this one as its helper.
+    #[serde(default)]
+    pub parent_task: Option<String>,
+    /// It finished (or failed) and you haven't looked at it since.
+    /// Helpers never are: their parent reads their results.
+    #[serde(default)]
+    pub unseen: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -184,6 +191,21 @@ impl Views {
             .collect()
     }
 
+    /// The helpers a task started, in the order it started them.
+    pub fn helpers_of(&self, parent: &str) -> Vec<&TaskView> {
+        self.tasks()
+            .into_iter()
+            .filter(|t| t.parent_task.as_deref() == Some(parent))
+            .collect()
+    }
+
+    /// Finished results you haven't looked at yet, newest first.
+    pub fn unseen(&self) -> Vec<&TaskView> {
+        let mut v: Vec<&TaskView> = self.tasks().into_iter().filter(|t| t.unseen).collect();
+        v.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        v
+    }
+
     pub fn request(&self, id: &str) -> Option<&RequestView> {
         self.requests.get(id)
     }
@@ -285,6 +307,7 @@ impl Views {
                 model,
                 allow_rewrites,
                 resume_session,
+                parent_task,
             } => {
                 self.max_task = self.max_task.max(numeric_suffix(id));
                 if !self.tasks.contains_key(id) {
@@ -323,6 +346,8 @@ impl Views {
                         last_total_cost: 0.0,
                         starts: 0,
                         taken_over_from: None,
+                        parent_task: parent_task.clone(),
+                        unseen: false,
                     },
                 );
                 return;
@@ -448,7 +473,9 @@ impl Views {
                 }
                 t.slash_commands = slash_commands.clone();
             }
+            EventBody::Seen {} => t.unseen = false,
             EventBody::UserMessage { .. } => {
+                t.unseen = false;
                 if matches!(t.state, TaskState::Done | TaskState::Failed) {
                     t.state = TaskState::Working;
                     t.status = "Working".into();
@@ -501,6 +528,7 @@ impl Views {
                     t.state = TaskState::Done;
                 } else if *ok || *interrupted {
                     t.state = TaskState::Done;
+                    t.unseen = !*interrupted && t.parent_task.is_none();
                     let s = first_line(summary, 120);
                     t.status = if *interrupted {
                         "Interrupted".to_string()
@@ -512,14 +540,17 @@ impl Views {
                 } else {
                     t.state = TaskState::Failed;
                     t.status = format!("Failed: {}", first_line(summary, 120));
+                    t.unseen = t.parent_task.is_none();
                 }
             }
             EventBody::Stopped {} => {
+                t.unseen = false;
                 t.state = TaskState::Stopped;
                 t.status = "Stopped".into();
                 t.child = None;
             }
             EventBody::Failed { message } => {
+                t.unseen = t.parent_task.is_none();
                 t.state = TaskState::Failed;
                 t.status = format!("Failed: {}", first_line(message, 120));
             }
@@ -591,6 +622,7 @@ mod tests {
                 model: None,
                 allow_rewrites: false,
                 resume_session: None,
+                parent_task: None,
             },
         )
     }
@@ -684,6 +716,7 @@ mod tests {
                 model: None,
                 allow_rewrites: false,
                 resume_session: Some("s1".into()),
+                parent_task: None,
             },
         ));
         v.apply(&ev(

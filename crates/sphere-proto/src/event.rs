@@ -38,6 +38,9 @@ pub enum EventBody {
         /// Set when the task brings in an existing Claude session.
         #[serde(default)]
         resume_session: Option<String>,
+        /// Set when another task started this one as its helper.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent_task: Option<String>,
     },
     WorkspaceReady {
         workdir: String,
@@ -165,6 +168,8 @@ pub enum EventBody {
         /// Where it ran: `herdr`, `Terminal`, `Claude background`, ...
         from: String,
     },
+    /// You looked at the task's result, so it is no longer new.
+    Seen {},
 }
 
 impl EventBody {
@@ -195,6 +200,7 @@ impl EventBody {
             EventBody::Failed { .. } => "failed",
             EventBody::Warning { .. } => "warning",
             EventBody::TakenOver { .. } => "taken_over",
+            EventBody::Seen {} => "seen",
         }
     }
 }

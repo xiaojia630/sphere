@@ -698,7 +698,7 @@ mod tests {
     }
 
     fn created(seq: u64, task: &str) -> Event {
-        event(seq, task, EventBody::TaskCreated { title: format!("Task {task}"), prompt: "p".into(), repo: "/r".into(), in_place: false, budget_usd: 1.0, mode: None, model: None, allow_rewrites: false, resume_session: None })
+        event(seq, task, EventBody::TaskCreated { title: format!("Task {task}"), prompt: "p".into(), repo: "/r".into(), in_place: false, budget_usd: 1.0, mode: None, model: None, allow_rewrites: false, resume_session: None, parent_task: None })
     }
 
     fn started(seq: u64, task: &str) -> Event {

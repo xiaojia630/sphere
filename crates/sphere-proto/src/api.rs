@@ -21,6 +21,8 @@ pub mod method {
     pub const TASK_SET_MODEL: &str = "task.set_model";
     pub const TASK_REWIND: &str = "task.rewind";
     pub const TASK_STOP: &str = "task.stop";
+    /// You looked at a task's result: it is no longer new.
+    pub const TASK_SEEN: &str = "task.seen";
     pub const SESSION_LIST: &str = "session.list";
     pub const SESSION_BRING_IN: &str = "session.bring_in";
     pub const SESSION_OUTSIDE: &str = "session.outside";
