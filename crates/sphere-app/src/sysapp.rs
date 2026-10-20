@@ -10,7 +10,7 @@ use crate::service::Service;
 use crate::util::*;
 use bevy::prelude::*;
 use std::sync::{mpsc, Mutex};
-use std::time::Instant;
+use web_time::Instant;
 
 pub const APP: u8 = 4;
 const TOP: usize = 0;
@@ -212,7 +212,7 @@ pub fn keys(
                         app.armed = None;
                         let tx = app.notes.0.clone();
                         let (pid, name) = (p.pid, p.name.clone());
-                        std::thread::spawn(move || {
+                        crate::util::spawn(move || {
                             let _ = tx.send(opsdata::terminate_named(pid, &name));
                         });
                         sound.play("discard");
@@ -264,7 +264,7 @@ pub fn update(sim: Res<crate::core::Sim>, mut atlases: ResMut<AppAtlases>, mut a
     let slow = app.samples.is_multiple_of(SLOW_EVERY);
     let (tx, rx) = mpsc::channel();
     app.rx = Some(Mutex::new(rx));
-    std::thread::spawn(move || {
+    crate::util::spawn(move || {
         let _ = tx.send(opsdata::sample(prev, old.as_ref(), slow));
     });
 }

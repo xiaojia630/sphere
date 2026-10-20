@@ -7,6 +7,7 @@ use crate::core::Sim;
 use crate::fonts::UiFonts;
 use crate::panel::*;
 use crate::util::*;
+use web_time::Instant;
 use alacritty_terminal::{
     event::{Event, EventListener},
     grid::Dimensions,
@@ -19,11 +20,11 @@ use bevy::{
     input::{keyboard::{Key, KeyboardInput}, ButtonState},
     prelude::*,
 };
+#[cfg(not(target_arch = "wasm32"))]
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use std::{
     io::{Read, Write},
     sync::{mpsc, Arc, Mutex},
-    time::Instant,
 };
 
 pub const COLS: usize = 66;
@@ -104,7 +105,9 @@ struct Inner {
     rx: mpsc::Receiver<Vec<u8>>,
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
     /// a PTY in this process (look test, or when the host can't be reached)
+    #[cfg(not(target_arch = "wasm32"))]
     _master: Option<Box<dyn portable_pty::MasterPty + Send>>,
+    #[cfg(not(target_arch = "wasm32"))]
     child: Option<Box<dyn portable_pty::Child + Send + Sync>>,
     /// a shell held by sphere-host (it outlives the app)
     host: Option<crate::hostterm::Handle>,
@@ -127,7 +130,23 @@ impl Inner {
     /// `nonce`: what the marks of the tab's shell carry; none when it has no shell integration.
     fn new(term: Term<Listener>, rx: mpsc::Receiver<Vec<u8>>, writer: Arc<Mutex<Box<dyn Write + Send>>>, nonce: Option<&str>) -> Self {
         let (checked_tx, checked_rx) = mpsc::channel();
-        Self { term, parser: Processor::new(), rx, writer, _master: None, child: None, host: None, scan: crate::scan::Scanner::new(nonce), replay: 0, in_repo: false, checked_tx, checked_rx, _script: None }
+        Self {
+            term,
+            parser: Processor::new(),
+            rx,
+            writer,
+            #[cfg(not(target_arch = "wasm32"))]
+            _master: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            child: None,
+            host: None,
+            scan: crate::scan::Scanner::new(nonce),
+            replay: 0,
+            in_repo: false,
+            checked_tx,
+            checked_rx,
+            _script: None,
+        }
     }
 }
 
@@ -173,6 +192,13 @@ impl Terms {
     pub fn connect(&mut self, first: Option<String>) {
         let (tx, rx) = mpsc::channel();
         self.pending = Some(Mutex::new(rx));
+        // the web playground has no threads (and no host): its scripted shell, right away
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = tx.send(Terminal::spawn(first.as_deref(), true).into_iter().collect());
+            return;
+        }
+        #[cfg(not(target_arch = "wasm32"))]
         let _ = std::thread::Builder::new().name("sphere-terms-connect".into()).spawn(move || {
             let mut tabs: Vec<Terminal> = crate::stats::timed("hostterm::running (connect/start sphere-host)", crate::hostterm::running).iter().filter_map(|ch| Terminal::host(Some(ch))).collect();
             if tabs.is_empty() {
@@ -241,7 +267,20 @@ fn repo_dir() -> std::path::PathBuf {
 }
 
 impl Terminal {
+    /// The web playground's tab: a pretend shell with a few commands (`web::Shell`), running `first_cmd` first.
+    #[cfg(target_arch = "wasm32")]
+    pub fn spawn(first_cmd: Option<&str>, _look: bool) -> Result<Self, String> {
+        let (tx, rx) = mpsc::channel();
+        let writer: Arc<Mutex<Box<dyn Write + Send>>> = Arc::new(Mutex::new(Box::new(crate::web::Shell::new(tx.clone(), first_cmd))));
+        let term = Term::new(Config::default(), &Size, Listener { writer: writer.clone() });
+        let mut inner = Inner::new(term, rx, writer, Some(SCRIPT_NONCE));
+        inner.in_repo = true;
+        inner._script = Some(tx);
+        Ok(Self::with(inner, "zsh".to_string()))
+    }
+
     /// `look`: the look test's bash with the Sphere prompt; otherwise your own shell as a login shell.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn spawn(first_cmd: Option<&str>, look: bool) -> Result<Self, String> {
         let pty = native_pty_system();
         let pair = pty
@@ -343,6 +382,7 @@ impl Terminal {
 
     pub fn kill(&self) {
         if let Ok(mut i) = self.inner.lock() {
+            #[cfg(not(target_arch = "wasm32"))]
             if let Some(c) = i.child.as_mut() {
                 let _ = c.kill();
             }
@@ -353,7 +393,7 @@ impl Terminal {
     }
 
     /// A shell in sphere-host: new, or a tab from an earlier run re-attached.
-    pub fn host(attach: Option<&sphere_host::ChildInfo>) -> Option<Self> {
+    pub fn host(attach: Option<&crate::hostterm::ChildInfo>) -> Option<Self> {
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
         let (h, rx, w) = match attach {
             Some(ch) => crate::hostterm::attach(ch)?,

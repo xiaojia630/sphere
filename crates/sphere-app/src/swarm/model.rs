@@ -1021,7 +1021,7 @@ struct SyncState {
 }
 
 fn unix_now() -> i64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
+    web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
 }
 
 /// Rebuilds `Swarm.model` while the swarm is open (or opening): from sphered's data when its version changes
@@ -1067,7 +1067,7 @@ fn sync(svc: Res<crate::service::Service>, args: Res<crate::Args>, sim: Res<crat
             if due && st.branches.busy.lock().unwrap().insert(r.path.clone()) {
                 st.asked.insert(r.path.clone(), real);
                 let (path, br) = (r.path.clone(), st.branches.clone());
-                std::thread::spawn(move || {
+                crate::util::spawn(move || {
                     let b = repo_branch(&path);
                     br.known.lock().unwrap().insert(path.clone(), b);
                     br.busy.lock().unwrap().remove(&path);

@@ -56,6 +56,16 @@ impl Zone for FixedZone {
 pub struct LocalZone;
 
 impl Zone for LocalZone {
+    #[cfg(target_arch = "wasm32")]
+    fn offset(&self, utc: i64) -> i64 {
+        // minutes behind UTC, so east of Greenwich is negative
+        -(js_sys::Date::new(&js_sys::wasm_bindgen::JsValue::from_f64(
+            utc as f64 * 1000.0,
+        ))
+        .get_timezone_offset() as i64)
+            * 60
+    }
+    #[cfg(not(target_arch = "wasm32"))]
     fn offset(&self, utc: i64) -> i64 {
         extern "C" {
             fn tzset();

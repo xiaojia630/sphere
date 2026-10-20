@@ -323,7 +323,7 @@ pub fn check_merged(time: Res<Time<Real>>, svc: Res<Service>, mut t: Local<f32>,
     let flag = busy.get_or_insert_with(|| Arc::new(AtomicBool::new(false))).clone();
     flag.store(true, Ordering::Relaxed);
     let shared = svc.shared.clone();
-    std::thread::spawn(move || {
+    crate::util::spawn(move || {
         // the maps are this pass's alone (the next one waits for the flag), so git and the disk run off the lock
         let (mut looked, mut common) = {
             let mut m = memo.lock().unwrap();

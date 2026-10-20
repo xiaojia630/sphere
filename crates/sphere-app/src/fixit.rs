@@ -89,7 +89,7 @@ pub struct Checked {
 /// that are not committed, and sends the answer. `assume_repo`: no looking, the directory is the repo and it has
 /// none (the look test's tab).
 pub fn check(done: scan::Finished, seq: u64, assume_repo: bool, tx: mpsc::Sender<Checked>) {
-    let _ = std::thread::Builder::new().name("sphere-fixit-git".into()).spawn(move || {
+    crate::util::spawn(move || {
         let _ = tx.send(Checked { seq, failure: failure_of(done, assume_repo) });
     });
 }
@@ -614,7 +614,7 @@ pub(crate) fn base64(s: &str) -> String {
 pub fn demo_tab() -> crate::term::Terminal {
     let (mut tab, tx) = crate::term::Terminal::scripted(true);
     let (start, end) = demo_parts();
-    let now = std::time::Instant::now();
+    let now = web_time::Instant::now();
     let _ = tx.send(start);
     crate::term::pump_at(&mut tab, now.checked_sub(Duration::from_millis(3240)).unwrap_or(now));
     let _ = tx.send(end);
@@ -1354,7 +1354,7 @@ mod tests {
     #[test]
     fn the_look_tests_output_ends_in_a_failed_cargo_test() {
         let mut sc = scan::Scanner::new(Some(crate::term::SCRIPT_NONCE));
-        let ev = sc.feed(&demo_bytes(), std::time::Instant::now());
+        let ev = sc.feed(&demo_bytes(), web_time::Instant::now());
         let done = ev.iter().find_map(|e| if let scan::Event::Finished(f) = e { Some(f) } else { None }).expect("a finished command");
         assert_eq!((done.command.as_str(), done.exit, done.cwd.as_str()), ("cargo test", 101, "/Users/me/Projects/sphere"));
         assert!(done.output_tail.contains("test result: FAILED. 40 passed; 1 failed"), "{}", done.output_tail);
@@ -1366,7 +1366,7 @@ mod tests {
     fn the_look_tests_tab_offers_a_fix_for_a_command_that_ran_for_3_2_seconds() {
         let mut tab = demo_tab();
         for _ in 0..400 {
-            crate::term::pump_at(&mut tab, std::time::Instant::now());
+            crate::term::pump_at(&mut tab, web_time::Instant::now());
             if tab.fix.is_some() {
                 break;
             }

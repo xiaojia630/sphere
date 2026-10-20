@@ -132,13 +132,13 @@ fn merged_from(dir: &Path, fork: &str, base: &str) -> bool {
 /// Whether an agent's worktree has work of its own that is already merged (a quick check, no diff read).
 pub fn is_merged(workdir: &str, base: &str) -> bool {
     let dir = Path::new(workdir);
-    dir.is_dir() && git_t(dir, &["merge-base", "HEAD", base]).is_ok_and(|fork| merged_from(dir, &fork, base))
+    crate::gitdata::is_dir(dir) && git_t(dir, &["merge-base", "HEAD", base]).is_ok_and(|fork| merged_from(dir, &fork, base))
 }
 
 pub fn load(workdir: &str, base: &str) -> Review {
     let dir = Path::new(workdir);
     let mut r = Review { workdir: workdir.to_string(), base: base.to_string(), ..Default::default() };
-    if !dir.is_dir() {
+    if !crate::gitdata::is_dir(dir) {
         r.error = Some("The worktree is gone (discarded or removed)".into());
         return r;
     }
@@ -427,13 +427,24 @@ pub fn test_command(workdir: &str) -> Option<Vec<String>> {
     detect_tests(workdir).ok()
 }
 
+/// Whether `name` is an executable on PATH (a browser has none).
+#[cfg(target_arch = "wasm32")]
+pub fn on_path(_name: &str) -> bool {
+    false
+}
+
 /// Whether `name` is an executable on PATH.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn on_path(name: &str) -> bool {
     use std::os::unix::fs::PermissionsExt;
     std::env::var_os("PATH").is_some_and(|p| std::env::split_paths(&p).any(|d| d.join(name).metadata().is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)))
 }
 
 pub fn detect_tests(workdir: &str) -> Result<Vec<String>, String> {
+    // the playground's repos are all Cargo ones
+    #[cfg(target_arch = "wasm32")]
+    return Ok(["cargo", "test", "--color", "never", "--no-fail-fast"].map(String::from).to_vec());
+    #[allow(unreachable_code)]
     detect_tests_with(workdir, &on_path)
 }
 
@@ -606,6 +617,7 @@ pub fn test_line(run: &mut TestRun, line: &str) {
     run.last = Some(clip_line(l));
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn signal_group(pgid: i32, sig: i32) {
     // the child leads its own process group (see `process_group(0)`), so the whole tree gets it
     unsafe {
@@ -632,10 +644,22 @@ fn pump(r: impl std::io::Read, tx: std::sync::mpsc::Sender<String>) {
 
 /// Runs `argv` in `wd` on this thread and sends the run as it goes (about 4 times a second), the last one with
 /// `done`. `cancel` stops it: SIGTERM to the process group, SIGKILL after `grace`; `timeout` does the same.
+#[cfg(target_arch = "wasm32")]
+pub fn run_tests(argv: &[String], _wd: &str, tx: &std::sync::mpsc::Sender<TestRun>, _cancel: &std::sync::atomic::AtomicBool, _timeout: std::time::Duration, _grace: std::time::Duration) {
+    // the playground runs nothing: a believable pass for the pretend repo
+    let names = ["routes::orders::pages_by_cursor", "routes::orders::orders_page_renamed", "routes::health::ready_ok", "auth::token::expires_on_time", "auth::token::refresh_keeps_scope", "db::pool::reconnects", "login::waits_for_server", "orders_api::lists_first_page", "orders_api::rejects_bad_cursor"];
+    let tests: Vec<(String, TestState)> = names.iter().map(|n| (n.to_string(), TestState::Pass)).collect();
+    let last = format!("test result: ok. {} passed; 0 failed; 0 ignored; finished in 1.92s", tests.len());
+    let _ = tx.send(TestRun { command: argv.join(" "), passed: tests.len(), tests, done: true, last: Some(last), exit_ok: Some(true), ..Default::default() });
+}
+
+/// Runs `argv` in `wd` on this thread and sends the run as it goes (about 4 times a second), the last one with
+/// `done`. `cancel` stops it: SIGTERM to the process group, SIGKILL after `grace`; `timeout` does the same.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn run_tests(argv: &[String], wd: &str, tx: &std::sync::mpsc::Sender<TestRun>, cancel: &std::sync::atomic::AtomicBool, timeout: std::time::Duration, grace: std::time::Duration) {
     use std::os::unix::process::CommandExt;
     use std::sync::atomic::Ordering;
-    use std::time::Instant;
+    use web_time::Instant;
     let mut run = TestRun { command: argv.join(" "), ..Default::default() };
     let child = std::process::Command::new(&argv[0]).args(&argv[1..]).current_dir(wd).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).process_group(0).spawn();
     let mut child = match child {
@@ -1063,7 +1087,7 @@ Binary files a/img.png and b/img.png differ
             });
         }
         let (tx, rx) = std::sync::mpsc::channel();
-        let t0 = std::time::Instant::now();
+        let t0 = web_time::Instant::now();
         let argv: Vec<String> = ["sh", "-c", script].iter().map(|s| s.to_string()).collect();
         run_tests(&argv, dir.to_str().unwrap(), &tx, &cancel, std::time::Duration::from_millis(timeout_ms), std::time::Duration::from_millis(500));
         let took = t0.elapsed();

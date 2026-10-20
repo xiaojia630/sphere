@@ -217,7 +217,7 @@ pub fn keys(
                     } else {
                         let url = format!("http://localhost:{}", l.port);
                         toasts.push_quiet(format!("Opening {url}"));
-                        std::thread::spawn(move || {
+                        crate::util::spawn(move || {
                             let _ = std::process::Command::new("open").arg(url).status();
                         });
                         sound.play("open");
@@ -240,7 +240,7 @@ pub fn keys(
                         let tx = app.notes.0.clone();
                         let (port, pid, name) = (l.port, l.pid, l.command.clone());
                         toasts.push_quiet(format!("Stopping {name}…"));
-                        std::thread::spawn(move || {
+                        crate::util::spawn(move || {
                             let _ = tx.send(opsdata::terminate_listener(port, pid, &name));
                         });
                         sound.play("discard");
@@ -317,7 +317,7 @@ pub fn update(sim: Res<crate::core::Sim>, mut atlases: ResMut<AppAtlases>, mut a
             let (tx, rx) = mpsc::channel();
             app.conns_rx = Some(Mutex::new(rx));
             let port = l.port;
-            std::thread::spawn(move || {
+            crate::util::spawn(move || {
                 let _ = tx.send((port, opsdata::connections(port)));
             });
         }
@@ -327,7 +327,7 @@ pub fn update(sim: Res<crate::core::Sim>, mut atlases: ResMut<AppAtlases>, mut a
         app.loading = true;
         let (tx, rx) = mpsc::channel();
         app.rx = Some(Mutex::new(rx));
-        std::thread::spawn(move || {
+        crate::util::spawn(move || {
             // without Docker the ports still show, just without container names
             let cs = opsdata::containers_quick().unwrap_or_default();
             let _ = tx.send(opsdata::listeners(&cs));
@@ -367,7 +367,11 @@ fn host() -> &'static str {
         if let Ok(h) = std::env::var("SPHERE_HOSTNAME") {
             return h.to_uppercase();
         }
+        #[cfg(target_arch = "wasm32")]
+        let (buf, ok) = ([0u8; 1], false);
+        #[cfg(not(target_arch = "wasm32"))]
         let mut buf = [0u8; 256];
+        #[cfg(not(target_arch = "wasm32"))]
         let ok = unsafe { libc::gethostname(buf.as_mut_ptr() as *mut libc::c_char, buf.len() - 1) } == 0;
         let name = if ok { String::from_utf8_lossy(&buf[..buf.iter().position(|b| *b == 0).unwrap_or(0)]).to_string() } else { String::new() };
         name.split('.').next().unwrap_or("").to_uppercase()

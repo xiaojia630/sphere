@@ -500,18 +500,45 @@ fn run(text: &str, svc: &Service, toasts: &mut Toasts, terms: &mut crate::term::
     }
 }
 
+#[cfg(target_arch = "wasm32")]
+fn home() -> PathBuf {
+    PathBuf::from(crate::machine::HOME)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn home() -> PathBuf {
     std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/"))
 }
 
+#[cfg(target_arch = "wasm32")]
+fn is_repo(p: &Path) -> bool {
+    crate::machine::is_repo(p)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn is_repo(p: &Path) -> bool {
     p.join(".git").exists()
+}
+
+/// The web playground keeps the last repo in memory; it starts in shop-api.
+#[cfg(target_arch = "wasm32")]
+static LAST_REPO: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn remember(repo: &str) {
+    *LAST_REPO.lock().unwrap() = Some(repo.to_string());
+}
+
+#[cfg(target_arch = "wasm32")]
+fn last_repo() -> Option<PathBuf> {
+    Some(PathBuf::from(LAST_REPO.lock().unwrap().clone().unwrap_or_else(|| crate::machine::REPOS[0].to_string())))
 }
 
 fn last_repo_file() -> PathBuf {
     sphere_proto::paths::default_state_dir().join("app").join("last-repo")
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn remember(repo: &str) {
     let f = last_repo_file();
     if let Some(d) = f.parent() {
@@ -521,6 +548,7 @@ pub(crate) fn remember(repo: &str) {
 }
 
 /// The last repo an agent was started in (or Code opened), when it is still one.
+#[cfg(not(target_arch = "wasm32"))]
 fn last_repo() -> Option<PathBuf> {
     let p = PathBuf::from(std::fs::read_to_string(last_repo_file()).ok()?.trim());
     is_repo(&p).then_some(p)
@@ -549,7 +577,7 @@ pub fn resolve_code_path(arg: &str, last: Option<&Path>, home: &Path) -> Result<
         last.map(|l| l.join(arg)).into_iter().chain([home.join("Projects").join(arg)]).collect()
     };
     for p in &cands {
-        if p.is_dir() {
+        if crate::gitdata::is_dir(p) {
             return Ok(std::fs::canonicalize(p).unwrap_or_else(|_| p.clone()));
         }
     }

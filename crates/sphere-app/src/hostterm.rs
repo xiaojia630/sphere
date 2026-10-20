@@ -6,7 +6,8 @@
 //! nonce that its shell's marks carry. The host keeps the label and hands it back with the tab when the app starts
 //! again, so a re-attached tab is read with the nonce it was started with, and nothing else is kept anywhere.
 use serde_json::json;
-use sphere_host::{ChildInfo, FollowItem, HostClient, PtySize, SpawnParams, Stream};
+pub use sphere_host::ChildInfo;
+use sphere_host::{FollowItem, HostClient, PtySize, SpawnParams, Stream};
 use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::PathBuf;
@@ -181,7 +182,7 @@ mod tests {
     use super::*;
     use crate::scan::{Event, Finished, Scanner};
     use crate::shellint::Launch;
-    use std::time::Instant;
+    use web_time::Instant;
 
     const NONCE: &str = "d41d8cd98f00b204e9800998ecf8427e";
 
