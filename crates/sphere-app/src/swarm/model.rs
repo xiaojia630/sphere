@@ -61,6 +61,8 @@ pub struct Agent {
     pub queue_pos: Option<usize>,
     /// bumps each time a new step lands (the satellite pulses)
     pub step_seq: u64,
+    /// a protocol started the task: its label carries a PROTOCOL tag
+    pub protocol: bool,
 }
 
 /// A repo with agents on it: one orbit ring.
@@ -252,7 +254,7 @@ pub fn from_shared(s: &Shared, prev: &Model, now: i64) -> Model {
             State::Queued => 2,
             State::Done => 3,
         };
-        let agent = Agent { id: t.id.clone(), title: t.title.clone(), repo: 0, branch: t.branch.clone().unwrap_or_default(), state, p, step, cost: t.cost_usd, started_at: started, steps, files, editing, queue_pos: None, step_seq };
+        let agent = Agent { id: t.id.clone(), title: t.title.clone(), repo: 0, branch: t.branch.clone().unwrap_or_default(), state, p, step, cost: t.cost_usd, started_at: started, steps, files, editing, queue_pos: None, step_seq, protocol: t.protocol.is_some() };
         picks.push((rank, tie, agent, t.repo.clone()));
     }
     picks.sort_by(|x, y| (x.0, x.1, &x.2.id).cmp(&(y.0, y.1, &y.2.id)));
@@ -494,6 +496,7 @@ fn demo_agent(d: &Def) -> Agent {
         files: d.files.iter().map(|f| File { path: f.0.to_string(), added: f.1, removed: f.2 }).collect(),
         editing: if d.state == State::Working { d.first.1.map(str::to_string) } else { None },
         queue_pos: None,
+        protocol: false,
     }
 }
 

@@ -710,7 +710,7 @@ mod tests {
         assert_eq!(words(&app).0, "STARTING");
         // the link comes up and an agent starts while the boot still runs
         app.world_mut().resource_mut::<Live>().link = Some(Link::Connected);
-        let working = Agent { name: "a".into(), state: AState::Working, p: 0.5, step: "x".into(), rate: 0.0, figure: None, chip: None };
+        let working = Agent { name: "a".into(), state: AState::Working, p: 0.5, step: "x".into(), rate: 0.0, figure: None, chip: None, protocol: false };
         app.world_mut().resource_mut::<Agents>().set_roster(Roster::of(&[working]));
         app.update();
         assert_eq!(words(&app).0, "STARTING");

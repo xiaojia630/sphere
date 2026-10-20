@@ -265,7 +265,19 @@ fn build_label(c: &mut Commands, f: &UiFonts, root: Entity, owner: usize, a: &mo
     let dir = if left { FlexDirection::RowReverse } else { FlexDirection::Row };
     let title_col = if needs { acc } else if queued { line } else { hot };
     let title = text(c, owner, a.title.to_uppercase(), &f.ui700, 10.5, 1.6, title_col);
-    c.entity(title).insert(Node { max_width: px(LABEL_W - 26.0), overflow: Overflow::clip(), ..default() });
+    // an agent a protocol started carries a small PROTOCOL tag after its title
+    let head = if a.protocol {
+        c.entity(title).insert(Node { max_width: px(LABEL_W - 26.0 - 66.0), overflow: Overflow::clip(), ..default() });
+        let tag = boxed(c, owner, Node { padding: UiRect { left: px(4), right: px(4), top: px(1), bottom: px(0) }, border: UiRect::all(px(1)), flex_shrink: 0.0, ..default() }, None, Some(with_alpha(line, 0.4)));
+        let tt = text(c, owner, "PROTOCOL", &f.ui700, 8.0, 1.3, with_alpha(line, 0.85));
+        c.entity(tag).add_child(tt);
+        let row = c.spawn(Node { width: percent(100), flex_direction: dir, align_items: AlignItems::Center, column_gap: px(8), ..default() }).id();
+        c.entity(row).add_children(&[title, tag]);
+        row
+    } else {
+        c.entity(title).insert(Node { max_width: px(LABEL_W - 26.0), overflow: Overflow::clip(), ..default() });
+        title
+    };
     // repo, chip, percent
     let meta = c.spawn(Node { width: percent(100), flex_direction: dir, align_items: AlignItems::Center, column_gap: px(8), ..default() }).id();
     let rp = text(c, owner, repo.to_uppercase(), &f.ui600, 9.5, 1.6, mute());
@@ -303,7 +315,7 @@ fn build_label(c: &mut Commands, f: &UiFonts, root: Entity, owner: usize, a: &mo
     let fc = if needs { acc } else if done { ok } else { tc(Role::Fill) };
     let fl = boxed(c, owner, Node { width: percent(w), height: px(2), ..default() }, Some(fc), None);
     c.entity(bar).add_child(fl);
-    c.entity(root).add_children(&[title, meta, st, bar]);
+    c.entity(root).add_children(&[head, meta, st, bar]);
 }
 
 fn build_ring(c: &mut Commands, f: &UiFonts, root: Entity, owner: usize, name: &str, sub: &str) {

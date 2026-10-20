@@ -661,6 +661,15 @@ fn build_run(c: &mut Commands, root: Entity, f: &UiFonts, t: &TaskView, run: &Ru
     let repo = std::path::Path::new(&t.repo).file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
     let meta = format!("Agent · Claude Code · {} · {}", t.branch.clone().unwrap_or_else(|| "in place".into()), repo);
     let m = c.spawn((Text::new(meta), font(&f.ui500, 12.0, 0.96), TextColor(line), LineHeight::Px(15.0))).id();
+    // a task a protocol started says so, at the end of that line
+    let m = if t.protocol.is_some() {
+        let row = c.spawn(Node { flex_direction: FlexDirection::Row, align_items: AlignItems::Center, justify_content: JustifyContent::SpaceBetween, column_gap: px(10), ..default() }).id();
+        let tag = crate::panel::protocol_tag(c, f);
+        c.entity(row).add_children(&[m, tag]);
+        row
+    } else {
+        m
+    };
     // a session taken over from a terminal says where it came from
     let from = run.taken_from.as_ref().map(|w| c.spawn((Text::new(format!("Taken over from {}", crate::takeover::from_label(w))), font(&f.ui500, 12.0, 0.96), TextColor(role_color(Role::Fill)), LineHeight::Px(15.0))).id());
     // progress: the plan's completed share when there is a plan, else a curve on the step count

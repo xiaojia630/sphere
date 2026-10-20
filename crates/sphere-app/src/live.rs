@@ -132,7 +132,7 @@ fn row(t: &TaskView, merged: bool) -> Agent {
     if step.chars().count() > 44 {
         step = step.chars().take(43).collect::<String>() + "…";
     }
-    Agent { name, state, p: p.max(0.04), step, rate: 0.0, figure, chip }
+    Agent { name, state, p: p.max(0.04), step, rate: 0.0, figure, chip, protocol: t.protocol.is_some() }
 }
 
 /// How a task ranks on the panel: what needs you first, then working, then queued, then the finished.
