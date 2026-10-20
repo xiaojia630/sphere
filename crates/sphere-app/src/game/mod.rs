@@ -341,7 +341,7 @@ fn leave(game: &mut Game, swarm: &mut Swarm, ticker: &mut SwarmTicker) {
     }
 }
 
-/// The result on the clipboard (macOS; the web playground has its own).
+/// The result on the clipboard: macOS only for now; elsewhere C says copying isn't available.
 #[cfg(target_os = "macos")]
 fn copy(text: &str) -> bool {
     use std::io::Write;
