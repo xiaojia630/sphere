@@ -243,7 +243,7 @@ pub fn update(
                 while ms.wheel_acc.abs() >= 19.0 {
                     let up = ms.wheel_acc > 0.0;
                     ms.wheel_acc -= ms.wheel_acc.signum() * 19.0;
-                    working.out_scroll = if up { working.out_scroll + 1 } else { working.out_scroll.saturating_sub(1) };
+                    working.out_scroll = if up { working.out_scroll.saturating_add(1) } else { working.out_scroll.saturating_sub(1) };
                 }
             }
             Hit::Panel(e, _) if !ctrl => {
