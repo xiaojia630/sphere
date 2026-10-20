@@ -8,6 +8,14 @@
 # Copyright (c) Microsoft Corporation): shellIntegration-env.zsh, -profile.zsh, -rc.zsh and -login.zsh.
 #
 # SPHERE_USER_ZDOTDIR is your own ZDOTDIR (empty when you have none); SPHERE_SHELL_INTEGRATION=0 turns it all off.
+#
+# SPHERE_SHELL_NONCE is a secret that Sphere gives this one shell. Every mark the hooks print carries it, and Sphere
+# believes no mark without it, so nothing else that prints to the terminal can pose as this shell. It is copied to
+# a variable of the shell and unset first of all, before your files run, so nothing you start inherits it.
+# (VS Code does the same with VSCODE_NONCE.)
+
+builtin typeset -g +x __sphere_nonce=${SPHERE_SHELL_NONCE-}
+builtin unset SPHERE_SHELL_NONCE
 
 __sphere_dir=$ZDOTDIR
 ZDOTDIR=${SPHERE_USER_ZDOTDIR-}

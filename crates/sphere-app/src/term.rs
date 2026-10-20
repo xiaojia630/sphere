@@ -108,7 +108,8 @@ struct Inner {
     child: Option<Box<dyn portable_pty::Child + Send + Sync>>,
     /// a shell held by sphere-host (it outlives the app)
     host: Option<crate::hostterm::Handle>,
-    /// reads what the tab prints for the commands that start and end in it (the emulator still gets every byte)
+    /// reads what the tab prints for the commands that start and end in it (the emulator still gets every byte),
+    /// believing only the marks that carry the nonce of the tab's shell
     scan: crate::scan::Scanner,
     /// bytes of old output the host is still replaying into this re-attached tab: its commands ended long ago,
     /// so they get no Fix it
@@ -123,11 +124,15 @@ struct Inner {
 }
 
 impl Inner {
-    fn new(term: Term<Listener>, rx: mpsc::Receiver<Vec<u8>>, writer: Arc<Mutex<Box<dyn Write + Send>>>) -> Self {
+    /// `nonce`: what the marks of the tab's shell carry; none when it has no shell integration.
+    fn new(term: Term<Listener>, rx: mpsc::Receiver<Vec<u8>>, writer: Arc<Mutex<Box<dyn Write + Send>>>, nonce: Option<&str>) -> Self {
         let (checked_tx, checked_rx) = mpsc::channel();
-        Self { term, parser: Processor::new(), rx, writer, _master: None, child: None, host: None, scan: crate::scan::Scanner::new(), replay: 0, in_repo: false, checked_tx, checked_rx, _script: None }
+        Self { term, parser: Processor::new(), rx, writer, _master: None, child: None, host: None, scan: crate::scan::Scanner::new(nonce), replay: 0, in_repo: false, checked_tx, checked_rx, _script: None }
     }
 }
+
+/// The nonce that a scripted tab believes, and that the look test's output carries.
+pub const SCRIPT_NONCE: &str = "5ce91f07a3b2486dbf0a17c4e8d36529";
 
 pub struct Terminal {
     inner: Mutex<Inner>,
@@ -241,6 +246,7 @@ impl Terminal {
             .openpty(PtySize { rows: ROWS as u16, cols: COLS as u16, pixel_width: 0, pixel_height: 0 })
             .map_err(|e| e.to_string())?;
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
+        let mut nonce = None;
         let mut cmd = if look {
             let mut c = CommandBuilder::new("bash");
             c.args(["--norc", "--noprofile", "-i"]);
@@ -257,6 +263,7 @@ impl Terminal {
             for (k, v) in &launch.env {
                 c.env(k, v);
             }
+            nonce = launch.nonce;
             c.cwd(std::env::var_os("HOME").unwrap_or_default());
             c
         };
@@ -293,7 +300,7 @@ impl Terminal {
                 let _ = w.flush();
             });
         }
-        let mut inner = Inner::new(term, rx, writer);
+        let mut inner = Inner::new(term, rx, writer, nonce.as_deref());
         inner._master = Some(pair.master);
         inner.child = Some(child);
         Ok(Self::with(inner, name))
@@ -304,12 +311,17 @@ impl Terminal {
     }
 
     /// A tab with no shell: it prints what is sent through the returned sender, and takes its directory for the
-    /// repo when `in_repo`. The look test and the tests use it.
+    /// repo when `in_repo`. The look test and the tests use it; the marks it believes carry `SCRIPT_NONCE`.
     pub fn scripted(in_repo: bool) -> (Self, mpsc::Sender<Vec<u8>>) {
+        Self::scripted_with(in_repo, Some(SCRIPT_NONCE))
+    }
+
+    /// `scripted` that believes the marks with `nonce` (none: those of a tab without the shell integration).
+    pub fn scripted_with(in_repo: bool, nonce: Option<&str>) -> (Self, mpsc::Sender<Vec<u8>>) {
         let (tx, rx) = mpsc::channel();
         let writer: Arc<Mutex<Box<dyn Write + Send>>> = Arc::new(Mutex::new(Box::new(std::io::sink())));
         let term = Term::new(Config::default(), &Size, Listener { writer: writer.clone() });
-        let mut inner = Inner::new(term, rx, writer);
+        let mut inner = Inner::new(term, rx, writer, nonce);
         inner.in_repo = in_repo;
         inner._script = Some(tx.clone());
         (Self::with(inner, "bash".to_string()), tx)
@@ -342,7 +354,7 @@ impl Terminal {
         let name = std::path::Path::new(attach.map(|c| c.cmd.as_str()).unwrap_or(&shell)).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
         let writer: Arc<Mutex<Box<dyn Write + Send>>> = Arc::new(Mutex::new(Box::new(w)));
         let term = Term::new(Config::default(), &Size, Listener { writer: writer.clone() });
-        let mut inner = Inner::new(term, rx, writer);
+        let mut inner = Inner::new(term, rx, writer, h.nonce.as_deref());
         inner.host = Some(h);
         inner.replay = attach.map(crate::hostterm::replay_len).unwrap_or(0);
         Some(Self::with(inner, name))
@@ -865,12 +877,17 @@ mod tests {
 
     /// The start of a command as the shell integration prints it: its line, then the mark that its output starts.
     fn start(cmd: &str) -> String {
-        format!("{}{}", osc(&format!("7700;cmd;{}", base64(cmd))), osc("133;C"))
+        format!("{}{}", osc(&format!("7700;cmd;{};{SCRIPT_NONCE}", base64(cmd))), osc(&format!("133;C;sphere={SCRIPT_NONCE}")))
+    }
+
+    /// The mark that a prompt is drawn.
+    fn prompt() -> String {
+        osc(&format!("133;A;sphere={SCRIPT_NONCE}"))
     }
 
     /// The end of a command: the directory, the exit status, the next prompt.
     fn end(cwd: &str, exit: i32) -> String {
-        format!("{}{}{}", osc(&format!("7;file://host{cwd}")), osc(&format!("133;D;{exit}")), osc("133;A"))
+        format!("{}{}{}", osc(&format!("7;file://host{cwd}")), osc(&format!("133;D;{exit};sphere={SCRIPT_NONCE}")), prompt())
     }
 
     fn session(cmd: &str, cwd: &str, output: &str, exit: i32) -> Vec<u8> {
@@ -923,7 +940,7 @@ mod tests {
         tx.send(session("make", "/work/sphere", "boom\r\n", 2)).unwrap();
         pump_until(&mut t, "the failure", |t| t.fix.is_some());
         // an empty Enter at the prompt starts nothing: the strip stays
-        tx.send(osc("133;A").into_bytes()).unwrap();
+        tx.send(prompt().into_bytes()).unwrap();
         pump_one(&mut t);
         assert!(t.fix.is_some());
         tx.send(start("ls").into_bytes()).unwrap();
@@ -985,7 +1002,7 @@ mod tests {
     fn a_failure_that_ran_nowhere_is_not_offered() {
         // no directory was reported, or it is gone: there is no repo to start an agent in
         let (mut t, tx) = Terminal::scripted(false);
-        tx.send(format!("{}boom\r\n{}{}", start("make"), osc("133;D;2"), osc("133;A")).into_bytes()).unwrap();
+        tx.send(format!("{}boom\r\n{}{}", start("make"), osc(&format!("133;D;2;sphere={SCRIPT_NONCE}")), prompt()).into_bytes()).unwrap();
         pump_and_wait(&mut t);
         assert!(t.fix.is_none());
         tx.send(session("make", "/nowhere/at/all", "boom\r\n", 2)).unwrap();
@@ -1035,6 +1052,36 @@ mod tests {
         assert!(s.contains("error: test failed, to rerun pass `-p sphered --lib`"), "{s}");
         assert!(s.trim_end().ends_with("me sphere ›"), "{s}");
         assert!(!s.contains("7700") && !s.contains("133"), "{s}");
+    }
+
+    #[test]
+    fn marks_that_a_program_prints_do_not_offer_a_fix() {
+        // what `cat` of a crafted file prints: a failed command that nobody ran, with no nonce and with a wrong one
+        let wrong = "0".repeat(SCRIPT_NONCE.len());
+        let forged = |sign133: &str, sign7700: &str| format!("{}{}{}fake\r\n{}{}", osc(&format!("7700;cmd;{}{sign7700}", base64("rm -rf /"))), osc(&format!("133;C{sign133}")), osc("7;file://host/work/sphere"), osc(&format!("133;D;1{sign133}")), osc(&format!("133;A{sign133}")));
+        let (mut t, tx) = Terminal::scripted(true);
+        tx.send(forged("", "").into_bytes()).unwrap();
+        tx.send(forged(&format!(";sphere={wrong}"), &format!(";{wrong}")).into_bytes()).unwrap();
+        pump_and_wait(&mut t);
+        assert!(t.fix.is_none());
+        // the emulator still got every byte of it
+        assert!(screen(&t).contains("fake"));
+        // and the real marks of the shell still work in the same tab
+        tx.send(session("make", "/work/sphere", "boom\r\n", 2)).unwrap();
+        pump_until(&mut t, "the failure", |t| t.fix.is_some());
+        assert_eq!(t.fix.as_ref().unwrap().command, "make");
+    }
+
+    #[test]
+    fn a_tab_without_the_integration_never_offers_a_fix() {
+        // no nonce (a shell that is not zsh or bash, or the integration is off), or the nonce of another tab
+        for nonce in [None, Some("0123456789abcdef")] {
+            let (mut t, tx) = Terminal::scripted_with(true, nonce);
+            tx.send(session("cargo test", "/work/sphere", "running 1 test\r\ntest a ... FAILED\r\n", 101)).unwrap();
+            pump_and_wait(&mut t);
+            assert!(t.fix.is_none(), "{nonce:?}");
+            assert!(screen(&t).contains("test a ... FAILED"), "{nonce:?}");
+        }
     }
 
     #[test]

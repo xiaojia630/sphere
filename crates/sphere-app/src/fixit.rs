@@ -545,20 +545,21 @@ fn arrive(s: &mut Spring, within: f32) {
 // ------------------------------------------------------------------ look test
 
 /// The look test's tab: `cargo test` in the sphere repo, with one failing test, as a shell with the integration
-/// would print it. It runs through the same scanner, strip and keys as a real tab. The command starts in the
-/// first part and ends in the second.
+/// would print it, with the nonce that the look test's tab believes. It runs through the same scanner, strip and
+/// keys as a real tab. The command starts in the first part and ends in the second.
 pub fn demo_parts() -> (Vec<u8>, Vec<u8>) {
     fn osc(body: &str) -> String {
         format!("\x1b]{body}\x07")
     }
+    let nonce = crate::term::SCRIPT_NONCE;
     let (cyan, line, amber, off) = ("\x1b[38;2;111;216;240m", "\x1b[38;2;166;211;230m", "\x1b[38;2;255;179;71m", "\x1b[0m");
-    let prompt = format!("{}{}{cyan}me{off} {line}sphere{off} {amber}›{off} ", osc("7;file://mac.local/Users/me/Projects/sphere"), osc("133;A"));
+    let prompt = format!("{}{}{cyan}me{off} {line}sphere{off} {amber}›{off} ", osc("7;file://mac.local/Users/me/Projects/sphere"), osc(&format!("133;A;sphere={nonce}")));
     let (bold, green, red, bgreen, bred) = ("\x1b[1m", "\x1b[32m", "\x1b[31m", "\x1b[1;32m", "\x1b[1;31m");
     let mut s = String::new();
     s += &prompt;
     s += "cargo test\r\n";
-    s += &osc(&format!("7700;cmd;{}", base64("cargo test")));
-    s += &osc("133;C");
+    s += &osc(&format!("7700;cmd;{};{nonce}", base64("cargo test")));
+    s += &osc(&format!("133;C;sphere={nonce}"));
     s += &format!("{bgreen}   Compiling{off} sphered v0.1.3 (/Users/me/Projects/sphere/crates/sphered)\r\n");
     s += &format!("{bgreen}    Finished{off} `test` profile [unoptimized + debuginfo] target(s) in 3.04s\r\n");
     s += &format!("{bgreen}     Running{off} unittests src/lib.rs (target/debug/deps/sphered-8c1f0d3b9a7e2c54)\r\n\r\n");
@@ -577,7 +578,7 @@ pub fn demo_parts() -> (Vec<u8>, Vec<u8>) {
     s += "failures:\r\n    workspace::tests::slug_clips_long_titles\r\n\r\n";
     s += &format!("test result: {red}FAILED{off}. 40 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s\r\n\r\n");
     s += &format!("{bred}error{off}{bold}: test failed, to rerun pass `-p sphered --lib`{off}\r\n");
-    let end = osc("7;file://mac.local/Users/me/Projects/sphere") + &osc("133;D;101") + &prompt;
+    let end = osc("7;file://mac.local/Users/me/Projects/sphere") + &osc(&format!("133;D;101;sphere={nonce}")) + &prompt;
     (s.into_bytes(), end.into_bytes())
 }
 
@@ -1179,7 +1180,8 @@ mod tests {
         let (mut app, tx) = showing();
         // a failure on a nearly empty screen: the cursor is on the fourth line
         let mut bytes = b"\x1b[2J\x1b[H".to_vec();
-        bytes.extend(format!("{}one\r\n{}", "\x1b]7700;cmd;bWFrZQ==\x07\x1b]133;C\x07", "\x1b]7;file://host/work/sphere\x07\x1b]133;D;2\x07\x1b]133;A\x07").into_bytes());
+        let n = crate::term::SCRIPT_NONCE;
+        bytes.extend(format!("\x1b]7700;cmd;bWFrZQ==;{n}\x07\x1b]133;C;sphere={n}\x07one\r\n\x1b]7;file://host/work/sphere\x07\x1b]133;D;2;sphere={n}\x07\x1b]133;A;sphere={n}\x07").into_bytes());
         tx.send(bytes).unwrap();
         settle(&mut app);
         let (display, at, command, _, top) = strip_of(&app);
@@ -1242,7 +1244,7 @@ mod tests {
 
     #[test]
     fn the_look_tests_output_ends_in_a_failed_cargo_test() {
-        let mut sc = scan::Scanner::new();
+        let mut sc = scan::Scanner::new(Some(crate::term::SCRIPT_NONCE));
         let ev = sc.feed(&demo_bytes(), std::time::Instant::now());
         let done = ev.iter().find_map(|e| if let scan::Event::Finished(f) = e { Some(f) } else { None }).expect("a finished command");
         assert_eq!((done.command.as_str(), done.exit, done.cwd.as_str()), ("cargo test", 101, "/Users/me/Projects/sphere"));
