@@ -520,6 +520,7 @@ mod tests {
             allow_rewrites: false,
             resume_session: None,
             parent_task: parent.map(str::to_string),
+            protocol: None,
         }
     }
 
@@ -528,6 +529,7 @@ mod tests {
             child: "c".into(),
             pid: 1,
             resumed: false,
+            briefed: 0,
         }
     }
 

@@ -758,6 +758,8 @@ struct RowLook {
     pct_color: Color,
     step: String,
     step_color: Color,
+    /// a protocol started the task: the bar's line begins with a PROTOCOL tag (a change of it builds the panel again)
+    protocol: bool,
 }
 
 fn row_look(a: &Agent) -> RowLook {
@@ -801,6 +803,7 @@ fn row_look(a: &Agent) -> RowLook {
         pct_color: with_alpha(pct_c, op),
         step: a.step.clone(),
         step_color: with_alpha(line, op),
+        protocol: a.protocol,
     }
 }
 
@@ -1001,6 +1004,10 @@ pub fn build_agents_ui(commands: &mut Commands, root: Entity, f: &UiFonts, agent
             .id();
         let pt = commands.spawn((Text::new(look.pct.clone()), font(&f.mono, 11.5, 2.24), TextColor(look.pct_color), LineHeight::Px(11.5))).id();
         commands.entity(pct).add_child(pt);
+        if look.protocol {
+            let tag = protocol_tag(commands, f);
+            commands.entity(bar).add_child(tag);
+        }
         commands.entity(bar).add_children(&[track, pct]);
         let step = commands
             .spawn((Text::new(look.step.clone()), font(&f.ui500, 13.0, 1.04), TextColor(look.step_color), LineHeight::Px(16.9)))
@@ -1025,6 +1032,15 @@ pub fn build_agents_ui(commands: &mut Commands, root: Entity, f: &UiFonts, agent
         build_elsewhere(commands, list, f, outside, ew_rows, ew_more);
     }
     commands.entity(body).insert(AgentsShown { summary: t2, empty, rows: shown, more: more_line });
+}
+
+/// The small PROTOCOL tag at the start of the bar's line on an agent a protocol started.
+pub fn protocol_tag(commands: &mut Commands, f: &UiFonts) -> Entity {
+    let line = role_color(Role::Line);
+    let tag = commands.spawn((Node { padding: UiRect { left: px(4), right: px(4), top: px(1), bottom: px(0) }, border: UiRect::all(px(1)), flex_shrink: 0.0, ..default() }, BorderColor::all(with_alpha(line, 0.4)))).id();
+    let t = commands.spawn((Text::new("PROTOCOL"), font(&f.ui700, 8.5, 1.4), TextColor(with_alpha(line, 0.8)), LineHeight::Px(9.0))).id();
+    commands.entity(tag).add_child(t);
+    tag
 }
 
 /// The chip's blinking LED (`blink_system` sets its colour).
@@ -1164,7 +1180,8 @@ pub fn rebuild_agents_ui(
     let ((rows, more), _) = shape(&agents, &outside);
     let summary = agents.summary().to_uppercase();
     for (body, parent, mut shown) in &mut roots {
-        if elsewhere || shown.empty != agents.list.is_empty() || shown.rows.len() != rows || shown.more.is_some() != (more > 0) {
+        let tags = shown.rows.iter().zip(&agents.list).any(|(r, a)| r.look.protocol != a.protocol);
+        if elsewhere || tags || shown.empty != agents.list.is_empty() || shown.rows.len() != rows || shown.more.is_some() != (more > 0) {
             let root = parent.parent();
             commands.entity(body).despawn();
             build_agents_ui(&mut commands, root, &f, &agents, &outside, sim.t);
@@ -1321,7 +1338,7 @@ mod tests {
     use bevy::ecs::system::RunSystemOnce;
 
     fn agent(name: &str, state: AState, p: f32, step: &str) -> Agent {
-        Agent { name: name.into(), state, p, step: step.into(), rate: 0.0, figure: None, chip: None }
+        Agent { name: name.into(), state, p, step: step.into(), rate: 0.0, figure: None, chip: None, protocol: false }
     }
 
     fn look(a: &Agent) -> RowLook {
@@ -1653,6 +1670,23 @@ mod tests {
         assert_eq!(distinct.len(), dumps.len());
         assert!(dumps[3].contains("NEEDS A YES") && dumps[3].contains("NEEDS YOU") && dumps[3].contains("QUEUED") && dumps[3].contains("Blink"));
         assert!(dumps[6].contains("+6 MORE"));
+    }
+
+    #[test]
+    fn an_agent_a_protocol_started_carries_a_tag_that_comes_and_goes_with_it() {
+        let work = agent("Update deps", AState::Working, 0.5, "Running tests");
+        let tagged = Agent { protocol: true, ..work.clone() };
+        let tags = |app: &App, root| dump(app.world(), root).matches("PROTOCOL").count();
+        let (mut app, root) = new_panel(&[tagged.clone(), work.clone()]);
+        assert_eq!(tags(&app, root), 1, "one tag, on the tagged row only");
+        // the tag goes with the flag, and what is left is the panel the old builder makes
+        set(&mut app, &[work.clone(), work.clone()]);
+        assert_eq!(tags(&app, root), 0);
+        let (old, old_root) = old_panel(&[work.clone(), work.clone()]);
+        assert_eq!(dump(app.world(), root), dump(&old, old_root));
+        // and it comes back on another row
+        set(&mut app, &[work.clone(), tagged]);
+        assert_eq!(tags(&app, root), 1);
     }
 
     #[test]

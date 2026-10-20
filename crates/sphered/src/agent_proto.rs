@@ -322,6 +322,8 @@ pub struct AgentArgs<'a> {
     pub resume: Option<&'a str>,
     /// Serve Sphere's own tools to the agent as an in-process MCP server.
     pub sphere_tools: bool,
+    /// The user's notes for this repo (see `briefing`), added to the agent's system prompt.
+    pub briefing: Option<&'a str>,
 }
 
 /// Declares Sphere's tools as an SDK server: Claude Code sends its messages
@@ -352,6 +354,10 @@ pub fn build_args(a: &AgentArgs) -> Vec<String> {
     if a.sphere_tools {
         args.push("--mcp-config".into());
         args.push(SPHERE_MCP_CONFIG.into());
+    }
+    if let Some(b) = a.briefing {
+        args.push("--append-system-prompt".into());
+        args.push(b.to_string());
     }
     if let Some(m) = a.model {
         args.push("--model".into());
@@ -827,6 +833,7 @@ mod tests {
             model: None,
             resume: Some("sess"),
             sphere_tools: false,
+            briefing: None,
         });
         let joined = args.join(" ");
         assert!(joined.starts_with("-p --input-format stream-json --output-format stream-json --verbose --include-partial-messages --permission-prompt-tool stdio --permission-mode acceptEdits"));
@@ -840,11 +847,61 @@ mod tests {
             model: Some("m"),
             resume: None,
             sphere_tools: true,
+            briefing: None,
         });
         assert!(
             with_model.join(" ").contains("--model m")
                 && !with_model.join(" ").contains("--resume")
         );
+    }
+
+    fn args_with(briefing: Option<&str>, model: Option<&str>, resume: Option<&str>) -> Vec<String> {
+        build_args(&AgentArgs {
+            settings: "/s.json",
+            budget_usd: 1.0,
+            mode: "acceptEdits",
+            model,
+            resume,
+            briefing,
+            sphere_tools: false,
+        })
+    }
+
+    #[test]
+    fn no_notes_add_nothing_to_the_system_prompt() {
+        let args = args_with(None, Some("m"), Some("sess"));
+        assert!(!args.iter().any(|a| a.contains("system-prompt")));
+        assert_eq!(
+            args.join(" "),
+            args_with(Some("x"), Some("m"), Some("sess"))
+                .join(" ")
+                .replace(" --append-system-prompt x", "")
+        );
+    }
+
+    #[test]
+    fn the_briefing_is_one_argument_after_the_system_prompt_flag() {
+        let text = "Notes from the user for this repository. Follow them unless the task says otherwise:\n- use pnpm, never npm\n- keep \"quotes\" and --flags as they are";
+        let args = args_with(Some(text), None, None);
+        let at = args
+            .iter()
+            .position(|a| a == "--append-system-prompt")
+            .unwrap();
+        assert_eq!(args[at + 1], text);
+        assert_eq!(
+            args.iter()
+                .filter(|a| *a == "--append-system-prompt")
+                .count(),
+            1
+        );
+        // a resumed process is briefed again, and the flags that end the line stay at its end
+        let resumed = args_with(Some(text), Some("m"), Some("sess"));
+        let flags = resumed.iter().map(String::as_str).collect::<Vec<_>>();
+        assert!(
+            flags.ends_with(&["--model", "m", "--resume", "sess"]),
+            "{flags:?}"
+        );
+        assert!(flags.contains(&text));
     }
 
     #[test]
@@ -856,6 +913,7 @@ mod tests {
             model: None,
             resume: None,
             sphere_tools: true,
+            briefing: None,
         });
         let at = args.iter().position(|a| a == "--mcp-config").unwrap();
         let cfg: Value = serde_json::from_str(&args[at + 1]).unwrap();

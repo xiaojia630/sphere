@@ -72,6 +72,20 @@ developer reaches for all day, all on your real data: code review, git, containe
   </tr>
 </table>
 
+## Protocols
+
+Write a routine as one line in the command bar and Sphere runs it as a normal agent task on that schedule, even while
+the app is closed. What it finishes waits for your review like any other task.
+
+```
+every weekday 9:00 sphere: update the dependencies, run the tests and fix what breaks
+```
+
+Schedules are in your local time: `every day 9:00`, `every mon,wed,fri 18:30`, `every 2 hours`, `tomorrow 9:00`,
+`in 45 minutes`. The bar shows when a line will next run before you press Enter, `protocols` opens the list (switch
+one off, run it now, remove it), and the Next 24h panel on the home screen shows what is coming. A run is skipped while
+the last one is still going.
+
 ## Light on your Mac
 
 Sphere redraws at your display's refresh rate but only redoes what changed: layout, GPU buffers and the agents'
@@ -101,12 +115,13 @@ else works without it. Optional: Docker Desktop or [OrbStack](https://orbstack.d
 | Key | What it does |
 | --- | --- |
 | <kbd>Option</kbd> <kbd>Space</kbd> | Show or hide Sphere from anywhere. Closing the window hides it; <kbd>Cmd</kbd> <kbd>Q</kbd> quits. |
-| <kbd>/</kbd> or <kbd>Cmd</kbd> <kbd>K</kbd> | The command bar. `repo: what to do` starts an agent in its own worktree; `> message` talks to it. |
+| <kbd>/</kbd> or <kbd>Cmd</kbd> <kbd>K</kbd> | The command bar. `repo: what to do` starts an agent in its own worktree; `> message` talks to it; `every weekday 9:00 repo: what to do` saves a protocol; `protocols` lists them. |
 | <kbd>A</kbd> | Open the core: the app orbit. <kbd>←</kbd> <kbd>→</kbd> spin, <kbd>Enter</kbd> opens, <kbd>Esc</kbd> goes back. |
 | <kbd>W</kbd> / <kbd>N</kbd> | The Working view / what needs you. <kbd>Enter</kbd> says yes, <kbd>A</kbd> always (saves the rule), <kbd>Shift</kbd> <kbd>Enter</kbd> says yes to every agent asking the same, <kbd>E</kbd> changes, <kbd>L</kbd> is later. |
 | <kbd>S</kbd> | The Agent swarm: every agent at once, one orbit per repo. |
 | `motion` | In the command bar: transitions are Fast by default. `motion cinematic` slows them down, `motion fast` brings them back, `motion 1.5` makes Fast quicker still. |
 | <kbd>T</kbd> | The terminal. Its tabs survive quitting the app. |
+| <kbd>Cmd</kbd> <kbd>Enter</kbd> | **Fix it**, in the terminal, when a command just failed inside a git repo: an agent gets the command, the folder, the exit status and the end of its output, and fixes it in its own worktree, or in your working copy when the repo has changes you haven't committed. |
 | <kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd> · <kbd>C</kbd> · <kbd>M</kbd> | Flat, depth and orbit views · cycle the five themes · mute. |
 
 Every app lists its own keys in its corner. Every button and row can be clicked, and the wheel scrolls what's under
@@ -135,6 +150,8 @@ They are all MIT or Apache-2.0.
 Sphere is built on [Bevy](https://bevy.org), [Alacritty](https://github.com/alacritty/alacritty)'s terminal core,
 [WezTerm](https://github.com/wezterm/wezterm)'s `portable-pty` and [rodio](https://github.com/RustAudio/rodio).
 It is set in Michroma, Rajdhani and JetBrains Mono (SIL OFL).
+The scripts that let the terminal see where a command starts and ends (`crates/sphere-app/assets/shell`) adapt
+[VS Code](https://github.com/microsoft/vscode)'s shell integration (MIT, Copyright (c) Microsoft Corporation).
 
 Sphere's voice is [Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M) by hexgrad (Apache-2.0) with its `bm_george`
 voice, run through [ONNX Runtime](https://onnxruntime.ai) (MIT) via [`ort`](https://github.com/pykeio/ort) (MIT/Apache-2.0).
@@ -196,6 +213,12 @@ sphere model <task> <model>         change the model
 sphere sessions                     Claude Code sessions on this machine
 sphere bring-in <session>           continue a session as a Sphere task (refused while it runs elsewhere)
 sphere take-over <session>          stop a session running in a terminal (or the background) and continue it in Sphere
+sphere remember "<note>" [--all]    tell every agent started in this repo (--all: in any repo) something, like "use pnpm, never npm"
+sphere memory [rm <id>]             the notes by repo, with their ids; rm removes one
+sphere protocol add "<text>"        save a protocol: "every weekday 9:00 sphere: update the dependencies"
+    --repo R                        the repo for a line that names none (default: this folder)
+sphere protocol list                protocols, when they run next, how the last run went
+sphere protocol on|off|rm|run <id>  switch it on or off, delete it, or run it now
 sphere doctor                       check the installation
 ```
 
@@ -247,7 +270,7 @@ Set `SPHERE_LIVE_CLAUDE` to the command if `claude` is not on your PATH.
 
 More keys:
 
-- `/` or Cmd+K: the command bar. A task starts an agent (`repo: task` picks the repo, a folder in `~/Projects` or a path; otherwise the last repo used, otherwise the app's folder) and opens the Working view. `> message` talks to the agent you heard from last, `stop` stops it. The prototype's commands work too: `depth`, `orbit`, `collapse`, a theme name, `fit`, `reset`, `apps`, `open terminal`.
+- `/` or Cmd+K: the command bar. A task starts an agent (`repo: task` picks the repo, a folder in `~/Projects` or a path; otherwise the last repo used, otherwise the app's folder) and opens the Working view. `> message` talks to the agent you heard from last, `stop` stops it. A line that starts with a schedule (`every weekday 9:00 sphere: update the dependencies`) is saved as a protocol instead, with a preview of its next run as you type; `protocols` opens them. The prototype's commands work too: `depth`, `orbit`, `collapse`, a theme name, `fit`, `reset`, `apps`, `open terminal`.
 - Views: 1 Flat, 2/D Depth, 3/O Orbit, E Depth and Flat, X collapses the rings onto the sphere, F fits, R resets everything, C cycles the five themes, M mutes.
 - Mouse: drag the core to turn it, drag panels anywhere, scroll to zoom (on a panel: push it back; on Apps: spin the rolodex), double-click the sphere to collapse, a ring to fold it, empty space to fit.
 - A (or hold the sphere, or the dock's Apps): core open, the app orbit. ← → or scroll spins it, Enter or a click opens an app, Esc closes.
@@ -255,14 +278,16 @@ More keys:
 - W: the Working view on the latest agent (it also opens when you start one). P interrupts its turn, T brings its output forward, F follows it up in the same session (resumed if it finished), Esc goes home. A task that changed no files ends Answered, with nothing to merge.
 - Elsewhere: Claude sessions running outside Sphere (Terminal, iTerm2, tmux, herdr, SSH, the Claude background) show as dim rows on the Agents panel and as ghosts in the swarm. Click one, or type `take over` in the command bar, for its card. Take over (two presses) stops the session where it runs and continues the same conversation in Sphere, in its folder, with no branch.
 - N: the Agent moment for what needs you (it rises by itself when a request arrives). Enter answers yes, A always allows (yes, and the rule the agent suggested is saved to your policy), E changes (type, Enter), L is later, ← → steps through them, Esc puts them away. When other agents ask for the exact same command, the card says so and Shift+Enter allows them all. Sphere reads each one out. The home's Needs you row and the swarm say how long agents have waited on you today.
+- Memory: a correction you give once can reach every agent after it. `remember: use pnpm, never npm` in the command bar keeps a note for the last repo used (`remember <repo>: …` for another, `remember all: …` for every repo), and after you send a Change on the Agent moment, a chip offers R to keep it as a note. Each agent sphered starts in that repo is told the notes (repo's own first, newest first), and the Working view tags the task `BRIEFED · 3`. `memory` in the command bar opens the notes by repo with their age and where they came from: ↑ ↓ or J K choose, D twice removes, Esc closes.
 - Terminal: T focuses it, Esc releases it, Cmd+T new tab, Cmd+W close, Cmd+1..9 switch, Cmd+V paste. Tabs run your login shell inside sphere-host, so they survive the app closing: the next launch re-attaches them (replaying their output). If the host can't be reached they live in the app.
+- Fix it: zsh and bash tabs start with a small shell integration (written to `~/.sphere/shell`; `SPHERE_SHELL_INTEGRATION=0` turns it off, any other shell runs as before) that tells the terminal where each command starts and ends, with its exit status and folder. Each tab's shell gets a secret that every one of those marks carries (it is removed from the environment before your startup files run, and a tab found again after the app restarts keeps it), so a program that only prints escape codes can't pass for a command. When a command fails inside a git repo (not when you stop it with Ctrl+C or Ctrl+Z, nor when a grep or a diff just says no), a slim amber strip rises at the bottom of the terminal, such as `cargo test · exit 101 · 3.2 s`. Cmd+Enter or FIX IT starts an agent in that repo (the command bar's path, titled `Fix: <command>`) and opens the Working view; its prompt has the command, the folder inside the repo, the exit status, how long it took and the end of the output. DISMISS puts the strip away, and the next command does too. The agent works in a worktree of its own, made from the last commit. When the repo has changes you haven't committed (new files count, ignored ones don't), it works in your working copy instead, so a failure that comes from them is in front of it, and its prompt tells it to keep them.
 - Motion: transitions play Fast by default (apps, the Working view, the Agent moment and the app orbit settle in about a fifth of a second). `motion cinematic` in the command bar brings back the slower original timing, `motion fast` returns, and `motion` alone switches. `motion 1.5` plays Fast 1.5 times quicker still (0.25 to 4). The choice is remembered.
-- Next 24h: the home's rail lists this Mac's Calendar events for the next day, read every five minutes. Sphere.app asks for Calendar access once; without it the rail says "Nothing scheduled".
+- Next 24h: the home's rail lists this Mac's Calendar events for the next day, read every five minutes, with the protocols due to run among them. Sphere.app asks for Calendar access once; without it the rail shows only the protocols, or "Nothing scheduled".
 - Option+Space (macOS) brings Sphere up over anything and hides it again. When something needs you while Sphere isn't in front, you get a notification. In Sphere.app it answers too: Allow, Always allow, Deny and Reply for a command that shows in full, a button per option for a short question, otherwise Open. Several agents asking the same share one notification.
 
 Sounds are synthesised and rendered to WAV (`crates/sphere-app/assets/sounds`). Speech is Kokoro's British George voice, loaded a moment after the window is up; until it is ready, or if it can't load, Sphere speaks through macOS `say` with the Daniel voice. `SPHERE_VOICE=system` keeps `say`.
 
-Flags: `--demo` (sample agents, no service), `--code`, `--git`, `--app containers|ports|system|files`, `--moment` (the Agent moment with sample requests), `--elsewhere` (sample sessions running outside Sphere), `--calendar` (sample events in the Next 24h rail), `--takeover card|armed|ambiguous|list|after` (the take-over card), `--apps` (core open), `--work` (the Working view), `--swarm` (the Agent swarm), `--orbit`, `--collapsed`, `--theme <name>`, `--motion fast|cinematic`, `--live` (screenshots and benches against the real service), `--cmd "<command>"` (what the first terminal tab runs), `--bench <seconds>`, `--shot <png> [--frames N] [--depth] [--term]`, `--record <dir> [--record-frames N]` (every frame, for GIFs), `--size WxH`, `--no-msaa`. `SPHERE_STATS=1` prints startup timings and memory. `SPHERE_SOCKET` points the app at another sphered. `SPHERE_CODE_DIR=<folder>` opens Code on that folder at start (look tests; `SPHERE_CODE_KEYS` plays keys in it).
+Flags: `--demo` (sample agents, no service), `--code`, `--git`, `--app containers|ports|system|files`, `--moment` (the Agent moment with sample requests), `--elsewhere` (sample sessions running outside Sphere), `--calendar` (sample events in the Next 24h rail), `--takeover card|armed|ambiguous|list|after` (the take-over card), `--memory card|armed|chip` (the notes card, with Remove armed, or the Agent moment just after a Change), `--protocols card|armed|empty|rail|tags|bar|mistake` (sample protocols: the card, with Remove armed, or empty; the Next 24h rail; the PROTOCOL tags; a line typed in the command bar, or a mistyped one), `--apps` (core open), `--work` (the Working view), `--swarm` (the Agent swarm), `--orbit`, `--collapsed`, `--theme <name>`, `--motion fast|cinematic`, `--fixit strip|after` (the terminal shows a failed `cargo test` with Fix it's strip, or plays pressing FIX IT), `--live` (screenshots and benches against the real service), `--cmd "<command>"` (what the first terminal tab runs), `--bench <seconds>`, `--shot <png> [--frames N] [--depth] [--term]`, `--record <dir> [--record-frames N]` (every frame, for GIFs), `--size WxH`, `--no-msaa`. `SPHERE_STATS=1` prints startup timings and memory. `SPHERE_SOCKET` points the app at another sphered. `SPHERE_CODE_DIR=<folder>` opens Code on that folder at start (look tests; `SPHERE_CODE_KEYS` plays keys in it).
 
 `--shot` and `--record` render offscreen and need no window. `--bench`, `--shot` and `--record` use the demo data unless `--live` is given.
 

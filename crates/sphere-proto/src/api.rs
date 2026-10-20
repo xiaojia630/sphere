@@ -1,6 +1,8 @@
 //! The sphered API: JSON-RPC 2.0 over newline-delimited JSON on a Unix socket.
 
 use crate::event::{Event, FileStat, TaskState};
+use crate::memory::{Note, NoteSource};
+use crate::protocol::Protocol;
 use crate::request::{AnswerKind, RequestStatus};
 use crate::views::{RequestView, TaskView};
 use serde::{Deserialize, Serialize};
@@ -28,6 +30,14 @@ pub mod method {
     pub const SESSION_OUTSIDE: &str = "session.outside";
     pub const SESSION_TAKE_OVER: &str = "session.take_over";
     pub const REQUEST_ANSWER: &str = "request.answer";
+    pub const MEMORY_LIST: &str = "memory.list";
+    pub const MEMORY_ADD: &str = "memory.add";
+    pub const MEMORY_REMOVE: &str = "memory.remove";
+    pub const PROTOCOL_ADD: &str = "protocol.add";
+    pub const PROTOCOL_LIST: &str = "protocol.list";
+    pub const PROTOCOL_SET_ENABLED: &str = "protocol.set_enabled";
+    pub const PROTOCOL_REMOVE: &str = "protocol.remove";
+    pub const PROTOCOL_RUN_NOW: &str = "protocol.run_now";
 }
 
 /// Notification methods the server pushes on a subscribed connection.
@@ -60,6 +70,9 @@ pub mod kind {
     pub const DAILY_CAP: &str = "daily_cap";
     pub const BAD_REPO: &str = "bad_repo";
     pub const AGENT_ERROR: &str = "agent_error";
+    pub const MEMORY_FULL: &str = "memory_full";
+    /// A protocol line that does not read as a schedule; the message says what to type instead.
+    pub const BAD_SCHEDULE: &str = "bad_schedule";
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -151,6 +164,12 @@ pub struct Snapshot {
     /// waiting aren't included: clients add `now - opened_at` for those. 0 from an older sphered.
     #[serde(default)]
     pub waited_today_secs: u64,
+    /// The user's notes for agents, newest first. Empty from an older sphered.
+    #[serde(default)]
+    pub memory: Vec<Note>,
+    /// The saved protocols, oldest first. Empty from an older sphered.
+    #[serde(default)]
+    pub protocols: Vec<Protocol>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -235,6 +254,33 @@ pub struct StartResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProtocolAddParams {
+    /// The line as typed: `every weekday 9:00 sphere: update the dependencies`.
+    pub text: String,
+    /// The repo for a line that names none (a folder; the last one used).
+    #[serde(default)]
+    pub repo: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProtocolList {
+    /// Oldest first.
+    pub protocols: Vec<Protocol>,
+}
+
+/// Which protocol, for `protocol.remove` and `protocol.run_now`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProtocolParams {
+    pub id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProtocolEnabledParams {
+    pub id: String,
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SendParams {
     pub task: String,
     pub text: String,
@@ -276,6 +322,47 @@ pub struct AnswerParams {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Ack {
     pub ok: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MemoryListParams {
+    /// Only the notes an agent in this repo is told: its own and the ones for every repo.
+    #[serde(default)]
+    pub repo: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryList {
+    /// Newest first.
+    pub notes: Vec<Note>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MemoryAddParams {
+    /// The repo the note is for; a folder inside it will do. Leave it out with `all`.
+    #[serde(default)]
+    pub repo: Option<String>,
+    /// The note is for every repo.
+    #[serde(default)]
+    pub all: bool,
+    pub text: String,
+    #[serde(default)]
+    pub source: NoteSource,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryAdded {
+    /// The note as kept (cleaned up, maybe cut), or the one that was already there.
+    pub note: Note,
+    /// False when an identical note was there already; nothing changed.
+    pub added: bool,
+    /// How many notes the same scope holds now: the repo's own, or the ones for every repo.
+    pub count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryRemoveParams {
+    pub id: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -426,6 +513,34 @@ mod tests {
             r#"{"seq":7,"tasks":[],"requests":[],"cost_today_usd":1.5,"waited_today_secs":95}"#;
         let s: Snapshot = serde_json::from_str(new).unwrap();
         assert_eq!(s.waited_today_secs, 95);
+    }
+
+    #[test]
+    fn a_snapshot_from_an_older_sphered_has_no_notes() {
+        let old = r#"{"seq":7,"tasks":[],"requests":[],"cost_today_usd":1.5}"#;
+        let s: Snapshot = serde_json::from_str(old).unwrap();
+        assert!(s.memory.is_empty());
+        let new = r#"{"seq":7,"tasks":[],"requests":[],"cost_today_usd":1.5,"memory":[
+            {"id":3,"repo":"/code/sphere","text":"use pnpm, never npm","created_at":"2026-01-01T00:00:00.000Z","source":"change"}]}"#;
+        let s: Snapshot = serde_json::from_str(new).unwrap();
+        assert_eq!(s.memory[0].repo.as_deref(), Some("/code/sphere"));
+        assert_eq!(s.memory[0].source, NoteSource::Change);
+    }
+
+    #[test]
+    fn a_note_is_added_for_a_repo_or_for_all_and_is_typed_unless_said() {
+        let p: MemoryAddParams = serde_json::from_str(r#"{"all":true,"text":"x"}"#).unwrap();
+        assert!(p.all && p.repo.is_none() && p.source == NoteSource::Typed);
+        let p: MemoryAddParams =
+            serde_json::from_str(r#"{"repo":"/r","text":"x","source":"cli"}"#).unwrap();
+        assert!(!p.all && p.repo.as_deref() == Some("/r") && p.source == NoteSource::Cli);
+    }
+
+    #[test]
+    fn a_snapshot_from_an_older_sphered_has_no_protocols() {
+        let old = r#"{"seq":7,"tasks":[],"requests":[],"cost_today_usd":1.5}"#;
+        let s: Snapshot = serde_json::from_str(old).unwrap();
+        assert!(s.protocols.is_empty());
     }
 
     #[test]
