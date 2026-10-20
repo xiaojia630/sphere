@@ -385,7 +385,10 @@ fn copy_into(src: &Path, dir: &Path) -> Result<PathBuf, String> {
     let fail = |e: std::io::Error| format!("{}: {}", name.to_string_lossy(), io_words(&e));
     if lmd.file_type().is_symlink() {
         let t = std::fs::read_link(src).map_err(fail)?;
+        #[cfg(not(target_arch = "wasm32"))]
         std::os::unix::fs::symlink(t, &dst).map_err(fail)?;
+        #[cfg(target_arch = "wasm32")]
+        return Err(fail(std::io::Error::other(format!("{} can't be copied here", t.display()))));
     } else if is_dir {
         std::fs::create_dir(&dst).map_err(fail)?;
         for e in std::fs::read_dir(src).map_err(fail)?.flatten() {
@@ -525,7 +528,9 @@ impl Default for FilesApp {
         let (jobs, jrx) = channel();
         let (otx, orx) = channel();
         let done_tx = otx.clone();
-        std::thread::spawn(move || work(jrx, otx));
+        // the web playground has no threads and no disk: no worker,
+        #[cfg(not(target_arch = "wasm32"))]
+        crate::util::spawn(move || work(jrx, otx));
         FilesApp {
             open: false,
             amt: Spring::new(0.0, 26.0, 9.0),
@@ -965,7 +970,7 @@ pub fn keys(
                     app.busy += 1;
                     app.version += 1;
                     toasts.push_quiet(format!("Pasting {} item{}...", items.len(), plural(items.len())));
-                    std::thread::spawn(move || {
+                    crate::util::spawn(move || {
                         let mut made = 0;
                         let mut errs: Vec<String> = Vec::new();
                         for y in &items {
@@ -1541,7 +1546,7 @@ mod tests {
         for i in 0..3000 {
             std::fs::write(d.join(format!("f{i:05}")), "").unwrap();
         }
-        let t = std::time::Instant::now();
+        let t = web_time::Instant::now();
         let l = list_dir(&d, false);
         assert_eq!(l.entries.len(), 3000);
         assert_eq!(l.entries[0].name, "f00000");

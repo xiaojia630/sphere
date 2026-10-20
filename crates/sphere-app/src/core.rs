@@ -540,10 +540,17 @@ fn attr_mesh(topology: PrimitiveTopology, pos: Vec<[f32; 3]>, attr: Vec<[f32; 4]
 }
 
 pub fn unix_now() -> i64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
+    web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
+}
+
+/// Seconds the local time zone is ahead of UTC at `epoch` (the browser's zone).
+#[cfg(target_arch = "wasm32")]
+pub fn local_offset(epoch: i64) -> i64 {
+    sphere_proto::protocol::Zone::offset(&sphere_proto::protocol::LocalZone, epoch)
 }
 
 /// Seconds the local time zone is ahead of UTC at `epoch`.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn local_offset(epoch: i64) -> i64 {
     // SAFETY: localtime_r only reads `t` and writes the zeroed `tm` we give it.
     unsafe {

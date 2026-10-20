@@ -318,7 +318,7 @@ mod tests {
     #[test]
     fn a_settled_theme_stops_counting_as_a_change() {
         let mut w = World::new();
-        let start = std::time::Instant::now();
+        let start = web_time::Instant::now();
         let mut time = Time::<Real>::new(start);
         time.update_with_instant(start + std::time::Duration::from_micros(8333));
         w.insert_resource(time);

@@ -1,4 +1,6 @@
 //! Sphere OS look test (M0): proves the approved HUD look can be matched natively in Rust.
+// The web playground builds only the demo, so the computer-side code it leaves out reads as unused there.
+#![cfg_attr(target_arch = "wasm32", allow(dead_code, unused_imports, unused_variables, unused_mut, unreachable_code))]
 mod appframe;
 mod apps;
 mod calendar;
@@ -15,6 +17,7 @@ mod fonts;
 mod fx;
 mod goto;
 mod home;
+#[cfg_attr(target_arch = "wasm32", path = "web/hostterm.rs")]
 mod hostterm;
 mod homepanels;
 mod geo;
@@ -37,7 +40,9 @@ mod protocols;
 mod prs;
 mod panel;
 mod service;
+#[cfg(not(target_arch = "wasm32"))]
 mod shellint;
+#[cfg_attr(target_arch = "wasm32", path = "web/sound.rs")]
 mod sound;
 mod summon;
 mod swarm;
@@ -45,6 +50,7 @@ mod sysapp;
 mod sysstats;
 mod takeover;
 mod theme;
+#[cfg(not(target_arch = "wasm32"))]
 mod restart;
 mod review;
 mod scan;
@@ -55,6 +61,12 @@ mod uilayout;
 mod util;
 mod visor;
 mod working;
+/// The web playground's pretend machine: what docker, lsof, ps, git and gh print there (`web/machine`).
+#[cfg(any(test, target_arch = "wasm32"))]
+#[path = "web/machine/mod.rs"]
+mod machine;
+#[cfg(target_arch = "wasm32")]
+mod web;
 
 use bevy::{
     camera::{visibility::RenderLayers, CameraOutputMode, ClearColorConfig},
@@ -154,7 +166,17 @@ impl Args {
 
 fn parse_args() -> Args {
     let mut a = Args { cmd: None, bench: None, shot: None, record: None, record_frames: 180, frames: 120, depth: false, orbit: false, apps: false, work: false, swarm: false, code: false, git: false, open_app: None, icon: false, aa: std::env::var("SPHERE_AA").unwrap_or_else(|_| "smaa".into()), offscreen: false, collapsed: false, focus_term: false, msaa: true, size: (1600, 1000), dt: 1.0 / 20.0, demo: false, live: false, moment: false, elsewhere: false, calendar: false, takeover: None, memory: None, protocols: None, fixit: None, theme: None, motion: None, goto: None, tasks: false, output: None };
+    #[cfg(not(target_arch = "wasm32"))]
     let mut it = std::env::args().skip(1).peekable();
+    // the web playground: the page's query (`?swarm&theme=red`) for the flags. It runs like the app against its
+    // pretend sphered and machine (`web::sim`, `machine`), with sample Calendar events and a git log in the terminal.
+    #[cfg(target_arch = "wasm32")]
+    let mut it = web::args().into_iter().peekable();
+    #[cfg(target_arch = "wasm32")]
+    {
+        a.calendar = true;
+        a.cmd = Some("git log --oneline -12".into());
+    }
     while let Some(s) = it.next() {
         match s.as_str() {
             "--cmd" => a.cmd = it.next(),
@@ -261,9 +283,10 @@ fn main() {
         .init_resource::<protocols::Protocols>()
         .init_resource::<fixit::FixIt>()
         .insert_resource(service::start(args.offline()))
-        .insert_resource(sysstats::start(args.offline()))
+        // the playground's load figures are the look test's
+        .insert_resource(sysstats::start(args.offline() || cfg!(target_arch = "wasm32")))
         // this Mac's Calendar only in the windowed app: screenshots, benches and demos never ask for access
-        .insert_resource(calendar::start(!(args.demo || args.headless() || args.bench.is_some() || args.icon), args.calendar))
+        .insert_resource(calendar::start(!(args.demo || args.headless() || args.bench.is_some() || args.icon || cfg!(target_arch = "wasm32")), args.calendar))
         .insert_resource(theme::Theme::new(args.theme.unwrap_or_else(|| if args.offline() { theme::ThemeId::Balanced } else { theme::saved() })))
         .init_resource::<live::Live>()
         .init_resource::<live::Toasts>()
@@ -307,7 +330,9 @@ fn main() {
         )
         .add_systems(Last, (panel::app_atlas_residency, panel::gate_panel_cameras).chain())
         .add_systems(PostUpdate, (panel::theme_panels, theme_bloom, sound::flush));
-    if !args.offline() {
+    #[cfg(target_arch = "wasm32")]
+    app.add_plugins(web::sim::SimPlugin);
+    if !args.offline() && !cfg!(target_arch = "wasm32") {
         summon::install(&mut app);
     }
     if args.headless() {
@@ -349,17 +374,21 @@ fn default_plugins(args: &Args) -> impl PluginGroup {
                 present_mode: if args.bench.is_some() { PresentMode::AutoNoVsync } else { PresentMode::AutoVsync },
                 desired_maximum_frame_latency: std::env::var("SPHERE_LAT").ok().and_then(|v| v.parse().ok()).and_then(std::num::NonZeroU32::new),
                 mode: if std::env::var("SPHERE_FS").is_ok() { bevy::window::WindowMode::BorderlessFullscreen(bevy::window::MonitorSelection::Primary) } else { bevy::window::WindowMode::Windowed },
+                // the web playground draws into the page's canvas and keeps the browser's own keys (Tab, /, Space) for Sphere
+                canvas: cfg!(target_arch = "wasm32").then(|| "#sphere".into()),
+                fit_canvas_to_parent: cfg!(target_arch = "wasm32"),
+                prevent_default_event_handling: true,
                 ..default()
             }),
             close_when_requested: false,
             ..default()
         })
     });
+    #[cfg(not(target_arch = "wasm32"))]
     if std::env::var("SPHERE_PIPELINED").is_ok_and(|v| v == "0") {
-        g.disable::<bevy::render::pipelined_rendering::PipelinedRenderingPlugin>()
-    } else {
-        g
+        return g.disable::<bevy::render::pipelined_rendering::PipelinedRenderingPlugin>();
     }
+    g
 }
 
 /// Worker threads run at user-interactive QoS, so macOS keeps them on performance cores and doesn't park them

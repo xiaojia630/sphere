@@ -2,7 +2,7 @@
 //! measuring the app. Off by default; costs nothing then.
 use bevy::prelude::*;
 use std::sync::OnceLock;
-use std::time::Instant;
+use web_time::Instant;
 
 static START: OnceLock<Instant> = OnceLock::new();
 
@@ -142,7 +142,14 @@ fn counts(world: &mut World) {
     );
 }
 
+/// CPU time all of the process's threads have used, in ns (none in a browser).
+#[cfg(target_arch = "wasm32")]
+pub fn process_cpu_ns() -> u64 {
+    0
+}
+
 /// CPU time all of the process's threads have used, in ns.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn process_cpu_ns() -> u64 {
     // SAFETY: getrusage only writes the zeroed struct we give it.
     let u = unsafe {

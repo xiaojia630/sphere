@@ -163,7 +163,7 @@ impl ContainersApp {
         let id = self.next_op;
         self.working.push((id, label, target.to_string(), now));
         let tx = self.notes.0.clone();
-        std::thread::spawn(move || {
+        crate::util::spawn(move || {
             let _ = tx.send((id, opsdata::docker(op)));
         });
         self.version += 1;
@@ -413,7 +413,7 @@ pub fn update(sim: Res<crate::core::Sim>, mut atlases: ResMut<AppAtlases>, mut a
         let first = app.list.as_ref().is_none_or(|l| l.is_err());
         let (tx, rx) = mpsc::channel();
         app.rx = Some(Mutex::new(rx));
-        std::thread::spawn(move || {
+        crate::util::spawn(move || {
             // the names first, then the figures (docker stats takes a second or two)
             if first {
                 if let Ok(v) = opsdata::containers_quick() {
@@ -431,7 +431,7 @@ pub fn update(sim: Res<crate::core::Sim>, mut atlases: ResMut<AppAtlases>, mut a
             app.logs_busy = true;
             let (tx, rx) = mpsc::channel();
             app.logs_rx = Some(Mutex::new(rx));
-            std::thread::spawn(move || {
+            crate::util::spawn(move || {
                 let _ = tx.send((id.clone(), opsdata::logs(&id, LOG_KEEP)));
             });
         }

@@ -189,7 +189,7 @@ pub fn forget(svc: &Service, id: u64) {
 }
 
 /// What sphered's `memory.add` does, for an app with no sphered: same cleaning, no duplicates in a scope, the same cap.
-fn keep_here(s: &mut Shared, repo: Option<&str>, text: &str, source: NoteSource) -> Result<MemoryAdded, String> {
+pub(crate) fn keep_here(s: &mut Shared, repo: Option<&str>, text: &str, source: NoteSource) -> Result<MemoryAdded, String> {
     let text = clean_note(text).ok_or("Nothing to remember")?;
     let same_scope = |n: &Note| n.repo.as_deref() == repo;
     if let Some(n) = s.memory.iter().find(|n| same_scope(n) && n.text == text) {

@@ -310,12 +310,16 @@ pub(crate) fn tree_rows(files: &[String], expanded: &HashSet<String>) -> Vec<Tre
 
 /// Whether `dir` is itself the top of a git repo (a folder inside one is listed plainly: its changes are relative to the top).
 fn is_repo_top(dir: &Path) -> bool {
+    #[cfg(target_arch = "wasm32")]
+    return crate::machine::is_repo_top(dir);
     let Ok(top) = crate::gitdata::git_t(dir, &["rev-parse", "--show-toplevel"]) else { return false };
     matches!((std::fs::canonicalize(top), std::fs::canonicalize(dir)), (Ok(a), Ok(b)) if a == b)
 }
 
 /// A git repo's files: tracked, plus untracked ones that aren't ignored (those that are gone are left out).
 pub(crate) fn git_files(root: &Path) -> Vec<String> {
+    #[cfg(target_arch = "wasm32")]
+    return crate::machine::files(root);
     let out = crate::gitdata::git(root, &["ls-files", "-z", "--cached", "--others", "--exclude-standard"]).unwrap_or_default();
     let mut v: Vec<String> = out.split('\0').filter(|p| !p.is_empty()).filter(|p| root.join(p).symlink_metadata().is_ok_and(|m| !m.is_dir())).map(str::to_string).collect();
     v.sort();
@@ -360,6 +364,8 @@ fn branch_of(root: &Path) -> String {
 
 /// A file's lines for the centre pane, or why it can't be shown.
 fn read_text(p: &Path) -> Result<Vec<String>, String> {
+    #[cfg(target_arch = "wasm32")]
+    return crate::machine::file(p).map(|t| t.lines().take(MAX_VIEW_LINES).map(|l| l.replace('\t', "    ")).collect()).ok_or_else(|| "can't read it".to_string());
     let m = std::fs::metadata(p).map_err(|e| e.to_string())?;
     if m.len() > MAX_VIEW_BYTES {
         return Err(format!("{} KB, too big to show", m.len() / 1000));
@@ -999,7 +1005,7 @@ pub fn keys(
                     toasts.push("Answered · nothing to merge: the agent changed no files");
                     continue;
                 }
-                if t.workdir.as_deref().is_none_or(|w| !std::path::Path::new(w).is_dir()) {
+                if t.workdir.as_deref().is_none_or(|w| !crate::gitdata::is_dir(std::path::Path::new(w))) {
                     toasts.push("The worktree is gone: nothing to act on");
                     continue;
                 }
@@ -1092,7 +1098,7 @@ fn act_now(act: Act, t: &TaskView, app: &CodeApp, svc: &Service) {
     if act == Act::Discard && matches!(t.state, TaskState::Working | TaskState::NeedsYou | TaskState::Queued) {
         svc.send(Cmd::Stop { task: t.id.clone() });
     }
-    std::thread::spawn(move || {
+    crate::util::spawn(move || {
         let note = match act {
             Act::Merge => merge(&repo, &wd, branch.as_deref(), &base, &title, in_place),
             Act::Pr => open_pr(&wd, branch.as_deref(), &title),
@@ -1164,6 +1170,9 @@ fn open_pr(wd: &str, branch: Option<&str>, title: &str) -> Result<String, String
     }
     commit_rest(wd, title)?;
     git(wd, &["push", "-q", "-u", "origin", branch]).map_err(|e| format!("Push failed: {e}"))?;
+    // the playground's pretend repos have no GitHub to open it on
+    #[cfg(target_arch = "wasm32")]
+    return Ok(format!("Opened a PR · https://github.com/you/{}/pull/32", wd.split('/').rev().nth(1).unwrap_or("shop-api")));
     let out = std::process::Command::new("gh").current_dir(wd).env("GH_PROMPT_DISABLED", "1").args(["pr", "create", "--fill", "--head", branch]).stdin(std::process::Stdio::null()).output().map_err(|_| format!("Pushed {branch}. Install the GitHub CLI (gh) to open the PR from here"))?;
     let text = |b: &[u8]| String::from_utf8_lossy(b).to_string();
     if out.status.success() {
@@ -1202,7 +1211,7 @@ fn run_tests(app: &mut CodeApp, wd: String, toasts: &mut crate::live::Toasts) {
     app.tests_cancel = Some(cancel.clone());
     app.tests = Some(TestRun { command: cmd.join(" "), ..Default::default() });
     app.version += 1;
-    std::thread::spawn(move || review::run_tests(&cmd, &wd, &tx, &cancel, review::TEST_TIMEOUT, review::KILL_GRACE));
+    crate::util::spawn(move || review::run_tests(&cmd, &wd, &tx, &cancel, review::TEST_TIMEOUT, review::KILL_GRACE));
 }
 
 /// Springs, the core's corner, reading the review in the background, test progress and action results.
@@ -1280,7 +1289,7 @@ pub fn update(sim: Res<crate::core::Sim>, mut atlases: ResMut<AppAtlases>, mut a
             app.loading = true;
             let (tx, rx) = mpsc::channel();
             app.folder_rx = Some(Mutex::new(rx));
-            std::thread::spawn(move || {
+            crate::util::spawn(move || {
                 let _ = tx.send(load_folder(&root));
             });
         }
@@ -1370,7 +1379,7 @@ pub fn update(sim: Res<crate::core::Sim>, mut atlases: ResMut<AppAtlases>, mut a
     let (tx, rx) = mpsc::channel();
     app.load_rx = Some(Mutex::new(rx));
     let id = t.id.clone();
-    std::thread::spawn(move || {
+    crate::util::spawn(move || {
         let _ = tx.send((id, review::load(&wd, &base)));
     });
 }
@@ -1389,7 +1398,7 @@ pub fn place(app: Res<CodeApp>, mut q: Query<&mut Panel, Or<(With<CodePane>, Wit
 // ------------------------------------------------------------------ drawing
 
 fn ago(t: &TaskView) -> String {
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
+    let now = web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
     match crate::working::parse_rfc3339(&t.started_at) {
         Some(s) => {
             let m = (now - s).max(0) / 60;

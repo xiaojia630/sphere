@@ -57,3 +57,12 @@ lto = "thin"
 codegen-units = 1
 incremental = false
 strip = true
+
+# The web playground (scripts/build-web.sh): small, since every visitor downloads it.
+[profile.web]
+inherits = "release"
+opt-level = "s"
+lto = "thin"
+codegen-units = 1
+incremental = false
+strip = true

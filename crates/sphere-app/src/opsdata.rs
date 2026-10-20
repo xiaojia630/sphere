@@ -4,10 +4,13 @@
 use std::io::Read;
 use std::process::{Command, Stdio};
 use std::sync::OnceLock;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use web_time::Instant;
 
 /// Runs a short local tool (ps, sysctl, vm_stat…): stdout on success, the first stderr line on failure.
 fn run(cmd: &str, args: &[&str]) -> Result<String, String> {
+    #[cfg(target_arch = "wasm32")]
+    return crate::machine::run(cmd, args);
     let out = Command::new(cmd).args(args).output().map_err(|e| format!("{cmd}: {e}"))?;
     if out.status.success() {
         Ok(String::from_utf8_lossy(&out.stdout).into_owned())
@@ -32,6 +35,8 @@ fn docker_bin() -> &'static str {
 /// Runs a tool that can hang (docker, lsof) with a deadline: (stdout, stderr), or the first stderr line when it
 /// fails. A tool that overruns is killed.
 fn exec(cmd: &str, args: &[&str], secs: u64) -> Result<(String, String), String> {
+    #[cfg(target_arch = "wasm32")]
+    return crate::machine::run(cmd, args).map(|o| (o, String::new()));
     let program = if cmd == "docker" { docker_bin() } else { cmd };
     let mut child = Command::new(program).args(args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(|e| format!("{cmd}: {e}"))?;
     let mut so = child.stdout.take().ok_or("no stdout")?;
@@ -150,7 +155,16 @@ pub fn epoch_from_iso(ts: &str) -> Option<(i64, u32)> {
     Some((days * 86400 + h * 3600 + mi * 60 + s, ms))
 }
 
+/// "07:10:00.123" in the browser's time zone for a docker log timestamp (UTC).
+#[cfg(target_arch = "wasm32")]
+pub fn local_hms(ts: &str) -> String {
+    let Some((secs, ms)) = epoch_from_iso(ts) else { return String::new() };
+    let t = (secs + crate::core::local_offset(secs)).rem_euclid(86400);
+    format!("{:02}:{:02}:{:02}.{:03}", t / 3600, t / 60 % 60, t % 60, ms)
+}
+
 /// "07:10:00.123" in this machine's time zone for a docker log timestamp (UTC).
+#[cfg(not(target_arch = "wasm32"))]
 pub fn local_hms(ts: &str) -> String {
     let Some((secs, ms)) = epoch_from_iso(ts) else { return String::new() };
     let t = secs as libc::time_t;
@@ -413,7 +427,14 @@ pub fn connections(port: u16) -> usize {
     run_t("lsof", &["-nP", &format!("-iTCP:{port}"), "-sTCP:ESTABLISHED", "-F", "n"], 6).map(|s| parse_connections(&s, port)).unwrap_or(0)
 }
 
+/// The web playground has no processes to stop.
+#[cfg(target_arch = "wasm32")]
+pub fn terminate(_pid: u32) -> Result<String, String> {
+    Err("The playground can't stop processes; the app can".into())
+}
+
 /// Asks a process to end (SIGTERM).
+#[cfg(not(target_arch = "wasm32"))]
 pub fn terminate(pid: u32) -> Result<String, String> {
     if pid <= 1 || pid == std::process::id() {
         return Err("Won't stop that process".into());
@@ -514,6 +535,9 @@ pub fn core_ticks() -> Vec<(u64, u64)> {
 
 #[cfg(not(target_os = "macos"))]
 pub fn core_ticks() -> Vec<(u64, u64)> {
+    #[cfg(target_arch = "wasm32")]
+    return crate::machine::core_ticks();
+    #[allow(unreachable_code)]
     Vec::new()
 }
 

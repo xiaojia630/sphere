@@ -30,6 +30,9 @@ use bevy::render::{Extract, ExtractSchedule, Render, RenderApp, RenderSystems};
 use bevy::ui_render::{TransparentUi, UiCameraView};
 
 pub fn on() -> bool {
+    // the web playground: `?lean=0`
+    #[cfg(target_arch = "wasm32")]
+    return !crate::web::args().windows(2).any(|w| w[0] == "--lean" && w[1] == "0");
     !std::env::var("SPHERE_LEAN").is_ok_and(|v| v == "0")
 }
 

@@ -6,6 +6,8 @@ use std::process::Command;
 /// Runs git in `dir` (argv only). Never asks for a password or a pager, and read-only commands don't take the
 /// index lock, so polling doesn't make the user's own `git commit` fail.
 pub(crate) fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
+    #[cfg(target_arch = "wasm32")]
+    return crate::machine::git(dir, args);
     let mut cmd = Command::new("git");
     cmd.arg("-C").arg(dir).args(["-c", "core.quotepath=off", "-c", "http.lowSpeedLimit=1000", "-c", "http.lowSpeedTime=30"]).args(args);
     cmd.env("GIT_TERMINAL_PROMPT", "0").env("GIT_OPTIONAL_LOCKS", "0").env("GIT_PAGER", "cat").env("LC_ALL", "C");
@@ -176,6 +178,8 @@ pub struct Repo {
 }
 
 fn lang(dir: &Path) -> &'static str {
+    #[cfg(target_arch = "wasm32")]
+    return crate::machine::lang(dir);
     if dir.join("Cargo.toml").exists() {
         "RUST"
     } else if dir.join("tsconfig.json").exists() {
@@ -251,6 +255,8 @@ pub fn bare_card(dir: &Path) -> RepoCard {
 /// The repos to show: the ones agents work in first, then git repos under ~/Projects, most recently committed
 /// first.
 pub fn discover(agent_repos: &[String], max: usize) -> Vec<PathBuf> {
+    #[cfg(target_arch = "wasm32")]
+    return crate::machine::repos(agent_repos, max);
     let projects = sphere_proto::paths::default_state_dir().parent().map(|h| h.join("Projects"));
     discover_in(agent_repos, projects.as_deref(), max)
 }
@@ -289,9 +295,16 @@ fn in_progress(dir: &Path) -> Option<&'static str> {
     [("MERGE_HEAD", "merging"), ("rebase-merge", "rebasing"), ("rebase-apply", "rebasing"), ("CHERRY_PICK_HEAD", "cherry-picking"), ("REVERT_HEAD", "reverting")].into_iter().find(|(f, _)| g.join(f).exists()).map(|x| x.1)
 }
 
+/// Whether `dir` is a folder (the web playground's repos and worktrees are pretend ones).
+pub(crate) fn is_dir(dir: &Path) -> bool {
+    #[cfg(target_arch = "wasm32")]
+    return crate::machine::is_dir(dir);
+    dir.is_dir()
+}
+
 pub fn load(dir: &Path) -> Repo {
     let mut r = Repo::default();
-    if !dir.exists() {
+    if !is_dir(dir) {
         r.card = bare_card(dir);
         r.error = Some("The folder is gone".into());
         return r;
