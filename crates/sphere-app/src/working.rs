@@ -183,8 +183,12 @@ pub fn setup(
     mut atlas: ResMut<crate::panel::PanelAtlas>,
     mut pmats: ResMut<Assets<PanelMaterial>>,
     args: Res<crate::Args>,
+    svc: Res<Service>,
 ) {
     let c = &mut commands;
+    if let Some(kind) = args.output.as_deref().filter(|_| args.offline()) {
+        demo_output(&svc, kind == "live");
+    }
     if args.work {
         let mut w = Working::default();
         w.open_latest();
@@ -226,6 +230,50 @@ pub fn setup(
         *ch = ui.root;
     }
     c.insert_resource(WorkRoots { run, out, edit, chips });
+}
+
+/// The look test's agent for `--output`: a question answered after reading code and running the tests (one run failed
+/// on the way), as sphered would have it; `live` stops it mid-run, before its last reply.
+fn demo_output(svc: &Service, live: bool) {
+    use sphere_proto::{Event, EventBody, Excerpt, StepKind, TaskView};
+    let t: TaskView = serde_json::from_value(serde_json::json!({
+        "id": "t-output", "title": "Why is the login test flaky?", "prompt": "", "state": if live { "working" } else { "done" },
+        "status": if live { "Running the login tests" } else { "" }, "repo": "/demo/web-app", "in_place": false, "budget_usd": 5.0,
+        "cost_usd": 0.42, "started_at": "2026-10-20T08:02:00Z", "updated_at": "2026-10-20T08:09:00Z", "steps": 7,
+    }))
+    .expect("demo task");
+    let ev = |body| Event { seq: 0, task: "t-output".into(), at: "2026-10-20T08:09:00Z".into(), body };
+    let mut run = Run::default();
+    let steps: [(&str, StepKind, &str, &str, Option<bool>, &str); 7] = [
+        ("a", StepKind::Read, "Read", "tests/login.spec.ts", Some(true), "import { test, expect } from '@playwright/test';\nimport { login } from './helpers';\n\ntest('logs in', async ({ page }) => {\n  await login(page, 'ada@example.com');\n  expect(await page.context().cookies()).toContainEqual(expect.objectContaining({ name: 'sid' }));\n});"),
+        ("b", StepKind::Search, "Grep", "waitForSession in src/", Some(true), "src/auth/session.ts:88:  setTimeout(() => writeCookie(res, sid), 0);\nsrc/auth/session.ts:91:export async function waitForSession() {\ntests/helpers.ts:14:  await waitForSession();"),
+        ("c", StepKind::Read, "Read", "src/auth/session.ts", Some(true), "export async function waitForSession() {\n  return pending.size === 0 ? undefined : once(events, 'session');\n}"),
+        ("d", StepKind::Run, "Bash", "npm test -- --grep login --repeat-each 20", Some(false), "Running 20 tests using 4 workers\n  ✘ 7 [chromium] › login.spec.ts:4:5 › logs in (1.2s)\n    Error: expect(received).toContainEqual(expected)\n    Expected value: ObjectContaining {\"name\": \"sid\"}\n  19 passed, 1 failed (14.8s)"),
+        ("e", StepKind::Edit, "Edit", "Editing tests/helpers.ts", Some(true), ""),
+        ("f", StepKind::Run, "Bash", "npm test -- --grep login --repeat-each 40", Some(true), "Running 40 tests using 4 workers\n  40 passed (27.1s)"),
+        ("g", StepKind::Plan, "TodoWrite", "Update the plan", Some(true), ""),
+    ];
+    let n = if live { 6 } else { steps.len() };
+    for (k, (id, kind, tool, title, ok, out)) in steps.iter().take(n).enumerate() {
+        if k == 3 {
+            run.apply(&ev(EventBody::Say { text: "The cookie check reads the session before it is written. Let me run the test many times to confirm.".into() }));
+        }
+        run.apply(&ev(EventBody::Step { id: (*id).into(), step_kind: *kind, tool: (*tool).into(), title: (*title).into(), detail: String::new(), parent: None }));
+        if live && k + 1 == n {
+            break;
+        }
+        let output = (!out.is_empty()).then(|| Excerpt { head: (*out).into(), tail: None, bytes: out.len() as u64, source: None });
+        run.apply(&ev(EventBody::StepDone { id: (*id).into(), ok: ok.unwrap_or(true), output }));
+    }
+    if !live {
+        run.apply(&ev(EventBody::Say {
+            text: "## Why it's flaky\n\nThe test races the session cookie. **`waitForSession()`** returns as soon as nothing is pending, but the cookie is written in a `setTimeout(…, 0)` after that, so about 1 run in 20 reads no `sid` cookie.\n\n- `tests/login.spec.ts:6` checks the cookie right after login\n- `src/auth/session.ts:88` writes it on the next tick\n\n### Fix\n\n1. `tests/helpers.ts` now waits for the `sid` cookie itself, not for `waitForSession()`\n2. The app code is unchanged\n\n```\nawait expect.poll(() => cookie(page, 'sid')).toBeTruthy();\n```\n\nI ran it 40 times with the fix and it passed every time. Want me to make `writeCookie` synchronous too?".into(),
+        }));
+    }
+    let mut s = svc.shared.lock().unwrap();
+    s.runs.insert(t.id.clone(), run);
+    s.tasks = vec![t];
+    s.version += 1;
 }
 
 /// Which task the view follows: the one asked for, else the most recently updated.
