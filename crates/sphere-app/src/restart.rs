@@ -93,7 +93,7 @@ pub fn stop_sphered(p: &dyn Procs, socket: &Path, wait: Duration) -> Result<(), 
     if !p.terminate(pid) {
         return Err(format!("could not stop sphered (pid {pid})"));
     }
-    let t0 = std::time::Instant::now();
+    let t0 = web_time::Instant::now();
     while p.alive(pid) {
         if t0.elapsed() >= wait {
             return Err(format!("sphered (pid {pid}) did not stop"));

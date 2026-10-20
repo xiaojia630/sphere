@@ -111,3 +111,11 @@ pub fn role_lin(r: Role) -> Vec4 {
     let c = role_color(r).to_linear();
     Vec4::new(c.red, c.green, c.blue, 1.0)
 }
+
+/// Runs `f` off the frame on a thread of its own; in the web playground, which has no threads, right away.
+pub fn spawn(f: impl FnOnce() + Send + 'static) {
+    #[cfg(not(target_arch = "wasm32"))]
+    std::thread::spawn(f);
+    #[cfg(target_arch = "wasm32")]
+    f();
+}

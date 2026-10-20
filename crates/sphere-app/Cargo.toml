@@ -21,18 +21,31 @@ bevy = { version = "=0.20.0", default-features = false, features = [
   "bevy_camera", "bevy_color", "bevy_image", "bevy_mesh", "bevy_shader", "bevy_material", "bevy_window",
   "bevy_text", "bevy_ui", "bevy_ui_render", "bevy_input_focus",
 ] }
-portable-pty = "=0.9.0"
+# the terminal emulator; the web build patches out its PTY half (scripts/build-web.sh)
 alacritty_terminal = "=0.26.0"
 fontdue = "=0.9.4"
+sphere-proto.workspace = true
+serde_json.workspace = true
+# Instant and SystemTime that also work in a browser (the std ones there panic); on a computer these are std's own
+web-time = "=1.1.0"
+
+# Everything that needs the computer: terminals, the service, voice and sounds. The web playground
+# (`scripts/build-web.sh`) runs the app's demo with none of it.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+portable-pty = "=0.9.0"
 rodio = { version = "=0.22.2", default-features = false, features = ["playback"] }
 hound = "=3.5.1"
-sphere-proto.workspace = true
 sphere-client.workspace = true
 sphere-host.workspace = true
 sphere-voice.workspace = true
 tokio.workspace = true
-serde_json.workspace = true
 libc.workspace = true
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+bevy = { version = "=0.20.0", default-features = false, features = ["web", "webgpu"] }
+js-sys = "=0.3.106"
+wasm-bindgen = "=0.2.129"
+web-sys = { version = "=0.3.106", features = ["Window", "Location", "Document", "Element", "HtmlElement"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 bevy = { version = "=0.20.0", default-features = false, features = ["x11"] }

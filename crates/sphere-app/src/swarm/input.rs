@@ -358,7 +358,7 @@ fn start_merge(e: &mut Env, st: &mut Input, id: &str) {
         return;
     };
     let (tx, shared, id) = (st.tx.clone(), e.svc.shared.clone(), id.to_string());
-    std::thread::spawn(move || {
+    crate::util::spawn(move || {
         let r = crate::codeapp::merge(&t.repo, t.workdir.as_deref().unwrap_or(""), t.branch.as_deref(), t.base.as_deref().unwrap_or("main"), &t.title, t.in_place);
         let note = match r {
             Ok(note) => {
@@ -549,7 +549,7 @@ fn demo_request(a: &Agent) -> sphere_proto::RequestView {
 
 /// The current time as RFC 3339 UTC (for a demo request's "waiting" age).
 fn rfc3339_now() -> String {
-    let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
+    let secs = web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
     let (days, rem) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
     // civil from days (Howard Hinnant)
     let z = days + 719_468;

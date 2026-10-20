@@ -224,10 +224,10 @@ pub fn from_notifications(
     svc: Res<crate::service::Service>,
     mut m: ResMut<crate::moment::Moment>,
     mut sound: ResMut<crate::sound::Sound>,
-    mut waiting_open: Local<Vec<(Reply, std::time::Instant)>>,
+    mut waiting_open: Local<Vec<(Reply, web_time::Instant)>>,
 ) {
-    let mut todo: Vec<(Reply, std::time::Instant)> = std::mem::take(&mut *waiting_open);
-    let now = std::time::Instant::now();
+    let mut todo: Vec<(Reply, web_time::Instant)> = std::mem::take(&mut *waiting_open);
+    let now = web_time::Instant::now();
     todo.extend(take_replies().into_iter().map(|r| (r, now)));
     for (r, at) in todo {
         if notifyact::opens(&r.action) {

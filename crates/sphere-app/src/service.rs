@@ -4,6 +4,7 @@
 //! always current and the link asks for another snapshot only after it missed an event. Commands (start a task,
 //! answer a request) go the other way on a channel.
 use bevy::prelude::*;
+#[cfg(not(target_arch = "wasm32"))]
 use sphere_client::{Client, ClientKind, StartParams, Update};
 use sphere_proto::api::Snapshot;
 use sphere_proto::{AnswerKind, Event, EventBody, Note, NoteSource, Protocol, RequestView, TaskState, TaskView, Views};
@@ -11,7 +12,10 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+#[cfg(not(target_arch = "wasm32"))]
 use tokio::sync::mpsc;
+#[cfg(target_arch = "wasm32")]
+use crate::web::mpsc;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Link {
@@ -235,6 +239,10 @@ impl Service {
 pub fn start(offline: bool) -> Service {
     let shared = Arc::new(Mutex::new(Shared { link: Some(Link::Connecting), ..default() }));
     let (tx, rx) = mpsc::unbounded_channel();
+    // the web playground's pretend sphered takes the commands (`web::sim`)
+    #[cfg(target_arch = "wasm32")]
+    crate::web::sim::take_commands(rx);
+    #[cfg(not(target_arch = "wasm32"))]
     if !offline {
         let sh = shared.clone();
         std::thread::Builder::new()
@@ -271,6 +279,7 @@ fn set_memory(s: &mut Shared, list: Vec<Note>) {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 /// Reads the notes again, after sphered said they changed.
 async fn read_notes(c: &Client, sh: &Mutex<Shared>) {
     if let Ok(list) = c.memory_list(None).await {
@@ -299,14 +308,14 @@ fn today() -> String {
 /// what the app shows is exact and no snapshot is fetched after the first. It holds only the open requests (a closed
 /// one is never looked at again, and `apply` scans the ones it holds on each step). `at` says where each task sits in
 /// `Shared::tasks`, which keeps the snapshot's order (creation) and which every other system reads.
-struct Mirror {
+pub(crate) struct Mirror {
     views: Views,
     at: HashMap<String, usize>,
 }
 
 impl Mirror {
     /// The mirror of a snapshot. The shared slot takes its tasks, open requests and cost, and every counter moves.
-    fn connect(snap: Snapshot, s: &mut Shared) -> Mirror {
+    pub(crate) fn connect(snap: Snapshot, s: &mut Shared) -> Mirror {
         s.tasks = snap.tasks.clone();
         s.requests = snap.requests.clone();
         s.max_concurrent = snap.max_concurrent;
@@ -329,7 +338,7 @@ impl Mirror {
 
     /// Folds one event into the mirror and the shared slot, in the order sphered saw it. An event already folded (the
     /// replay overlaps the snapshot) is skipped. A gap means events were lost: the caller starts over from a snapshot.
-    fn fold(&mut self, ev: &Event, s: &mut Shared) -> Result<(), String> {
+    pub(crate) fn fold(&mut self, ev: &Event, s: &mut Shared) -> Result<(), String> {
         let seen = self.views.seq;
         if ev.seq <= seen {
             return Ok(());
@@ -396,6 +405,7 @@ fn put(at: &mut HashMap<String, usize>, t: &TaskView, s: &mut Shared) {
     s.tasks[i] = t.clone();
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 /// `sphered` next to this executable, else on `PATH`.
 fn sphered_exe() -> PathBuf {
     if let Ok(me) = std::env::current_exe() {
@@ -409,6 +419,7 @@ fn sphered_exe() -> PathBuf {
     PathBuf::from("sphered")
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 /// Starts sphered detached from the app (its own session), logging to `~/.sphere/sphered.log`.
 fn spawn_sphered() -> Result<(), String> {
     use std::os::unix::process::CommandExt;
@@ -428,6 +439,7 @@ fn spawn_sphered() -> Result<(), String> {
     cmd.spawn().map(|_| ()).map_err(|e| format!("could not start sphered ({}): {e}", sphered_exe().display()))
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 /// The sphered socket, and whether it is the app's own. SPHERE_SOCKET points the app at another sphered (tests, a
 /// second state dir); the app then never starts or restarts one itself.
 fn socket() -> (PathBuf, bool) {
@@ -437,6 +449,7 @@ fn socket() -> (PathBuf, bool) {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 async fn connect(sh: &Mutex<Shared>) -> Client {
     let (socket, own) = socket();
     let mut started = !own;
@@ -461,6 +474,7 @@ async fn connect(sh: &Mutex<Shared>) -> Client {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 async fn run(sh: Arc<Mutex<Shared>>, mut rx: mpsc::UnboundedReceiver<Cmd>) {
     // what was done about an out-of-date sphered, kept across reconnects so it happens once
     let mut up = crate::restart::Upgrade::default();
@@ -474,9 +488,11 @@ async fn run(sh: Arc<Mutex<Shared>>, mut rx: mpsc::UnboundedReceiver<Cmd>) {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 /// How often the System panel's response time is measured while Sphere is on screen.
 const PING: Duration = Duration::from_secs(2);
 
+#[cfg(not(target_arch = "wasm32"))]
 /// One connection: take a snapshot, subscribe from its seq, then fold every event into the shared slot as it arrives
 /// and serve commands. A snapshot is taken again only if an event was missed (or one is not understood): the mirror
 /// starts over from it and goes on. Sphered dropping us ends the session and the next one starts afresh. The two
@@ -521,7 +537,7 @@ async fn session(sh: &Arc<Mutex<Shared>>, c: &Client, rx: &mut mpsc::UnboundedRe
     let outside = tokio::time::sleep(Duration::ZERO);
     tokio::pin!(outside);
     let mut outside_on = true;
-    let mut outside_at: Option<std::time::Instant> = None;
+    let mut outside_at: Option<web_time::Instant> = None;
     let outside_busy = Arc::new(std::sync::atomic::AtomicBool::new(false));
     loop {
         tokio::select! {
@@ -556,7 +572,7 @@ async fn session(sh: &Arc<Mutex<Shared>>, c: &Client, rx: &mut mpsc::UnboundedRe
                 let busy = outside_busy.load(std::sync::atomic::Ordering::Relaxed);
                 let hidden = sh.lock().unwrap().hidden || !crate::summon::on_screen();
                 if outside_due(hidden, busy, outside_at.map(|t| t.elapsed())) {
-                    outside_at = Some(std::time::Instant::now());
+                    outside_at = Some(web_time::Instant::now());
                     outside_busy.store(true, std::sync::atomic::Ordering::Relaxed);
                     let (c, sh, busy) = (c.clone(), sh.clone(), outside_busy.clone());
                     tokio::spawn(async move {
@@ -578,7 +594,7 @@ async fn session(sh: &Arc<Mutex<Shared>>, c: &Client, rx: &mut mpsc::UnboundedRe
             _ = &mut ping, if armed => {
                 if crate::summon::on_screen() {
                     // the System panel's response time
-                    let t0 = std::time::Instant::now();
+                    let t0 = web_time::Instant::now();
                     if c.status().await.is_ok() {
                         sh.lock().unwrap().rtt_ms = Some(t0.elapsed().as_secs_f32() * 1000.0);
                     }
@@ -619,6 +635,7 @@ fn running(tasks: &[TaskView]) -> usize {
     tasks.iter().filter(|t| matches!(t.state, sphere_proto::TaskState::Queued | sphere_proto::TaskState::Working | sphere_proto::TaskState::NeedsYou)).count()
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 /// Acts on a sphered whose version differs from the app's (see `restart`). True when sphered was stopped, so the
 /// session ends and the reconnect starts the bundled one. Only the app's own sphered is touched; sphere-host never.
 async fn upgrade(sh: &Mutex<Shared>, up: &mut crate::restart::Upgrade, daemon: &str, running: usize) -> bool {
@@ -666,11 +683,13 @@ fn set_outside(sh: &Mutex<Shared>, list: Vec<sphere_proto::api::OutsideSession>)
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 /// What sphered is asked for by a `Cmd::Start`: the budget, mode and model are its own defaults.
 fn start_params(repo: String, prompt: String, title: Option<String>, in_place: bool) -> StartParams {
     StartParams { repo, prompt, title, in_place, budget_usd: None, mode: None, model: None, allow_rewrites: false }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 async fn command(c: &Client, cmd: Cmd, sh: &Mutex<Shared>) -> Result<(), String> {
     use sphere_proto::api::kind;
     match cmd {

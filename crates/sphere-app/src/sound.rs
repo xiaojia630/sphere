@@ -13,7 +13,8 @@ use std::collections::VecDeque;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{mpsc, Arc};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use web_time::Instant;
 
 macro_rules! sounds {
     ($($n:ident),*) => {

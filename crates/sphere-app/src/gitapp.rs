@@ -294,7 +294,7 @@ impl GitApp {
         self.busy = true;
         self.version += 1;
         let tx = self.notes.0.clone();
-        std::thread::spawn(move || {
+        crate::util::spawn(move || {
             let _ = tx.send(f(&dir));
         });
     }
@@ -316,7 +316,7 @@ impl GitApp {
         self.busy = true;
         self.version += 1;
         let tx = self.notes.0.clone();
-        std::thread::spawn(move || {
+        crate::util::spawn(move || {
             let _ = tx.send(gitdata::run(&dir, op));
         });
     }
@@ -795,7 +795,7 @@ pub fn update(sim: Res<crate::core::Sim>, mut atlases: ResMut<AppAtlases>, mut a
             (Some((p, staged, untracked)), Some(d)) => {
                 let (tx, rx) = mpsc::channel();
                 app.preview_rx = Some(Mutex::new(rx));
-                std::thread::spawn(move || {
+                crate::util::spawn(move || {
                     let _ = tx.send(gitdata::preview(&d, &p, staged, untracked));
                 });
             }
@@ -827,7 +827,7 @@ pub fn update(sim: Res<crate::core::Sim>, mut atlases: ResMut<AppAtlases>, mut a
     let sel_path = known.get(sel).cloned();
     let (tx, rx) = mpsc::channel();
     app.load_rx = Some(Mutex::new(rx));
-    std::thread::spawn(move || {
+    crate::util::spawn(move || {
         // finding the repos runs git in each, so it happens here, off the frame
         let repos = if known.is_empty() || rediscover { gitdata::discover(&agent_repos, REPOS_MAX) } else { known };
         let sel = sel_path.and_then(|p| repos.iter().position(|r| *r == p)).unwrap_or(if rediscover { 0 } else { sel }).min(repos.len().saturating_sub(1));
@@ -891,7 +891,7 @@ fn pr_update(app: &mut GitApp, now: f32) {
         app.prs_t = now;
         let (tx, rx) = mpsc::channel();
         app.prs_rx = Some(Mutex::new(rx));
-        std::thread::spawn(move || {
+        crate::util::spawn(move || {
             let list = prs::list(&d, &prs::run_gh);
             let _ = tx.send((d, list));
         });
@@ -913,7 +913,7 @@ fn pr_update(app: &mut GitApp, now: f32) {
                 app.detail_for = key;
                 let (tx, rx) = mpsc::channel();
                 app.detail_rx = Some(Mutex::new(rx));
-                std::thread::spawn(move || {
+                crate::util::spawn(move || {
                     let _ = tx.send(prs::detail(&dir, n, &prs::run_gh));
                 });
             }
@@ -1339,7 +1339,7 @@ fn draw_prs(c: &mut Commands, ui: &Ui, root: Entity, app: &GitApp) {
 
 /// "3d ago" from an ISO timestamp, against the clock.
 fn age(iso: &str) -> String {
-    let secs = prs::iso_secs(iso).map(|t| std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0) - t);
+    let secs = prs::iso_secs(iso).map(|t| web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0) - t);
     match secs {
         Some(s) if s < 90 => "just now".into(),
         Some(s) if s < 5400 => format!("{}m ago", s / 60),

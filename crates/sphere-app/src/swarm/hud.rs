@@ -40,7 +40,7 @@ pub fn now_secs(args: &crate::Args, sim: &crate::core::Sim) -> i64 {
     if args.offline() {
         model::DEMO_NOW + sim.t as i64
     } else {
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
+        web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
     }
 }
 

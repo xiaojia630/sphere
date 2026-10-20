@@ -581,7 +581,7 @@ fn state_chip(c: &mut Commands, f: &UiFonts, t: &TaskView) -> Entity {
 
 fn elapsed(t: &TaskView) -> String {
     let start = parse_rfc3339(&t.started_at);
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
+    let now = web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
     let end = if matches!(t.state, TaskState::Working | TaskState::NeedsYou | TaskState::Queued) { now } else { parse_rfc3339(&t.updated_at).unwrap_or(now) };
     match start {
         Some(s) => {

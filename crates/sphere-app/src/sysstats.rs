@@ -9,7 +9,8 @@ use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver};
 use std::sync::{Arc, Mutex, Once};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use web_time::Instant;
 
 mod native;
 use native::{Meter, Reading};
@@ -217,6 +218,7 @@ extern "C" fn kill_events_at_exit() {
     let pid = EVENTS_PID.load(Ordering::SeqCst);
     if pid > 0 {
         // SAFETY: kill(2) takes no pointers; at worst the process is gone already.
+        #[cfg(not(target_arch = "wasm32"))]
         unsafe { libc::kill(pid, libc::SIGKILL) };
     }
 }
@@ -233,6 +235,7 @@ impl Events {
         let mut child = Command::new(bin).args(EVENT_ARGS).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().ok()?;
         EVENTS_PID.store(child.id() as i32, Ordering::SeqCst);
         // SAFETY: registers a plain function that only calls kill(2).
+        #[cfg(not(target_arch = "wasm32"))]
         EXIT_HOOK.call_once(|| unsafe {
             libc::atexit(kill_events_at_exit);
         });

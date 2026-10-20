@@ -5,7 +5,8 @@ use crate::review::{parse_diff, FileDiff};
 use std::io::Read;
 use std::path::Path;
 use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use web_time::Instant;
 
 /// `gh pr list` fields asked for.
 pub const LIST_FIELDS: &str = "number,title,headRefName,baseRefName,author,isDraft,reviewDecision,statusCheckRollup,updatedAt,url,additions,deletions";
@@ -46,6 +47,8 @@ pub fn iso_secs(s: &str) -> Option<i64> {
 
 /// The real runner: `gh` with no prompts, killed after `TIMEOUT`.
 pub fn run_gh(dir: &Path, args: &[&str]) -> Result<Out, GhError> {
+    #[cfg(target_arch = "wasm32")]
+    return crate::machine::gh(dir, args);
     let mut cmd = Command::new("gh");
     cmd.args(args).current_dir(dir).env("GH_PROMPT_DISABLED", "1").env("GH_NO_UPDATE_NOTIFIER", "1").env("NO_COLOR", "1").env("GH_PAGER", "cat").stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = cmd.spawn().map_err(|e| if e.kind() == std::io::ErrorKind::NotFound { GhError::Missing } else { GhError::Run(format!("gh: {e}")) })?;

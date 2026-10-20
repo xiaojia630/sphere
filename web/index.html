@@ -1,0 +1,204 @@
+<title>Sphere Playground</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<meta name="description" content="Try Sphere, the 3D command center for coding agents, in your browser.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Michroma&family=Rajdhani:wght@500;600&display=swap">
+<style>
+  /* One screen: the app's canvas edge to edge, a boot card over it until the app draws, and a quiet key strip. */
+  :root {
+    --void: #000;
+    --glass: rgba(8, 18, 24, 0.72);
+    --line: rgba(111, 216, 240, 0.28);
+    --cyan: #6fd8f0;
+    --ice: #a6d3e6;
+    --amber: #ffb347;
+    --display: "Michroma", "Eurostile", "Bank Gothic", sans-serif;
+    --ui: "Rajdhani", "DIN Alternate", "Arial Narrow", sans-serif;
+    color-scheme: dark;
+  }
+  html, body { height: 100%; }
+  body { background: var(--void); color: var(--ice); font-family: var(--ui); overflow: hidden; }
+  #sphere { position: fixed; inset: 0; width: 100%; height: 100%; display: block; outline: none; }
+  .boot {
+    position: fixed; inset: 0; display: grid; place-items: center; text-align: center;
+    padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px));
+    background: radial-gradient(60vmin 60vmin at 50% 46%, rgba(111, 216, 240, 0.10), transparent 70%), var(--void);
+    transition: opacity 0.5s ease;
+  }
+  .boot.gone { opacity: 0; pointer-events: none; }
+  .boot-inner { display: grid; gap: 22px; justify-items: center; max-width: 34rem; }
+  .ring { width: 92px; height: 92px; border-radius: 50%; border: 1px solid var(--line); position: relative; }
+  .ring::before, .ring::after { content: ""; position: absolute; inset: 10px; border-radius: 50%; border: 1px solid var(--cyan); border-color: var(--cyan) transparent; animation: spin 2.4s linear infinite; }
+  .ring::after { inset: 24px; border-color: transparent var(--amber); animation-duration: 1.6s; animation-direction: reverse; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .word { font-family: var(--display); font-size: clamp(22px, 4vw, 34px); letter-spacing: 0.42em; color: #e9f8fc; margin-right: -0.42em; }
+  .sub { font-size: 17px; font-weight: 500; letter-spacing: 0.04em; color: var(--ice); line-height: 1.45; text-wrap: balance; }
+  .bar { width: min(260px, 70vw); height: 2px; background: rgba(166, 211, 230, 0.15); overflow: hidden; }
+  .bar i { display: block; height: 100%; width: 0; background: var(--cyan); box-shadow: 0 0 10px var(--cyan); transition: width 0.2s; }
+  .state { font-size: 13px; letter-spacing: 0.18em; text-transform: uppercase; color: rgba(166, 211, 230, 0.7); font-variant-numeric: tabular-nums; }
+  .note { font-size: 15px; color: var(--ice); max-width: 30rem; line-height: 1.5; }
+  .note b { color: var(--amber); font-weight: 600; }
+  button.go {
+    font: 600 14px var(--ui); letter-spacing: 0.2em; text-transform: uppercase; color: var(--cyan);
+    background: transparent; border: 1px solid var(--cyan); padding: 10px 22px; cursor: pointer;
+  }
+  button.go:hover, button.go:focus-visible { background: rgba(111, 216, 240, 0.12); outline: none; }
+  .keys {
+    position: fixed; left: 50%; transform: translateX(-50%); bottom: calc(14px + env(safe-area-inset-bottom, 0px));
+    display: flex; flex-wrap: wrap; justify-content: center; gap: 6px 16px; max-width: calc(100% - 32px);
+    padding: 8px 16px; background: var(--glass); border: 1px solid var(--line);
+    font-size: 13px; font-weight: 600; letter-spacing: 0.12em; text-transform: uppercase; color: rgba(166, 211, 230, 0.85);
+    transition: opacity 0.6s ease; pointer-events: none;
+  }
+  .keys.dim { opacity: 0; }
+  .keys kbd { font: inherit; color: var(--amber); margin-right: 5px; }
+  .get {
+    position: fixed; top: calc(12px + env(safe-area-inset-top, 0px)); right: max(16px, env(safe-area-inset-right, 0px));
+    font: 600 12px var(--ui); letter-spacing: 0.2em; text-transform: uppercase; color: var(--ice); text-decoration: none;
+    padding: 6px 12px; border: 1px solid var(--line); background: var(--glass);
+  }
+  .get:hover, .get:focus-visible { color: var(--cyan); border-color: var(--cyan); outline: none; }
+  @media (prefers-reduced-motion: reduce) { .ring::before, .ring::after { animation: none; } }
+</style>
+
+<canvas id="sphere" tabindex="0" aria-label="Sphere"></canvas>
+
+<div class="boot" id="boot">
+  <div class="boot-inner">
+    <div class="ring" aria-hidden="true"></div>
+    <div class="word">SPHERE</div>
+    <div class="sub" id="sub">A command center for your coding agents. This is the real app, running in your browser on sample data.</div>
+    <div class="bar" aria-hidden="true"><i id="fill"></i></div>
+    <div class="state" id="state">Loading</div>
+  </div>
+</div>
+
+<div class="keys dim" id="keys" aria-label="Keys">
+  <span><kbd>/</kbd>Command bar</span>
+  <span><kbd>A</kbd>Apps</span>
+  <span><kbd>W</kbd>Working</span>
+  <span><kbd>S</kbd>Swarm</span>
+  <span><kbd>N</kbd>Agent asks</span>
+  <span><kbd>M</kbd>Mute</span>
+</div>
+<a class="get" href="https://github.com/xiaojia630/sphere" target="_blank" rel="noopener">Get Sphere</a>
+
+<script>
+  // The app's sounds come through here (crates/sphere-app/src/web/sound.rs): the WAVs it embeds, played with Web
+  // Audio once the visitor has clicked or typed (browsers keep pages quiet until then), and speech in a British voice.
+  window.sphereAudio = (() => {
+    let ctx = null, muted = false;
+    const raw = [], buf = [];
+    try { muted = localStorage.getItem("sphere.muted") === "1"; } catch (e) {}
+    const wake = () => {
+      if (!ctx) {
+        try { ctx = new AudioContext(); } catch (e) { return; }
+        raw.forEach((n, i) => fetch(`sounds/${n}.mp3`).then(r => r.arrayBuffer()).then(b => ctx.decodeAudioData(b)).then(a => { buf[i] = a; }, () => {}));
+      }
+      if (ctx.state === "suspended") ctx.resume();
+    };
+    addEventListener("pointerdown", wake, true);
+    addEventListener("keydown", wake, true);
+    let voice = null;
+    const pick = () => {
+      const vs = speechSynthesis.getVoices();
+      voice = ["Daniel", "Google UK English Male", "Arthur", "Microsoft Ryan", "Oliver"].map(n => vs.find(v => v.name.startsWith(n))).find(Boolean)
+        || vs.find(v => v.lang === "en-GB") || null;
+    };
+    if ("speechSynthesis" in window) { pick(); speechSynthesis.onvoiceschanged = pick; }
+    return {
+      load(i, name) { raw[i] = name; },
+      play(i, gain, rate) {
+        if (!ctx || !buf[i] || muted) return;
+        const s = ctx.createBufferSource(), g = ctx.createGain();
+        s.buffer = buf[i]; s.playbackRate.value = rate; g.gain.value = gain * 0.6;
+        s.connect(g).connect(ctx.destination); s.start();
+      },
+      say(text) {
+        if (muted || !("speechSynthesis" in window)) return;
+        const u = new SpeechSynthesisUtterance(text);
+        if (voice) u.voice = voice; u.lang = "en-GB"; u.rate = 1.05;
+        speechSynthesis.cancel(); speechSynthesis.speak(u);
+      },
+      hush() { if ("speechSynthesis" in window) speechSynthesis.cancel(); },
+      speaking() { return "speechSynthesis" in window && speechSynthesis.speaking; },
+      muted() { return muted; },
+      setMuted(m) { muted = m; try { localStorage.setItem("sphere.muted", m ? "1" : "0"); } catch (e) {} },
+    };
+  })();
+</script>
+<script type="module">
+  import init from "./sphere.js";
+  const $ = id => document.getElementById(id);
+  const state = t => { $("state").textContent = t; };
+
+  function stop(html) {
+    $("fill").parentElement.hidden = true;
+    state("");
+    $("sub").innerHTML = html;
+  }
+
+  async function wasm() {
+    const res = await fetch("./sphere_bg.wasm.gz");
+    if (!res.ok) throw new Error(`the app didn't download (${res.status})`);
+    // the gzip's own size, for the bar (when the host says it)
+    const total = +res.headers.get("content-length") || 0;
+    const reader = res.body.getReader(), parts = [];
+    let got = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      parts.push(value); got += value.length;
+      $("fill").style.width = total ? `${Math.min(100, (got / total) * 100)}%` : `${Math.min(92, got / 120000)}%`;
+      state(`Loading ${(got / 1048576).toFixed(1)} MB`);
+    }
+    let bytes = new Blob(parts);
+    const head = new Uint8Array(await bytes.slice(0, 2).arrayBuffer());
+    // a host that already sent it with Content-Encoding: gzip hands over the wasm itself
+    if (head[0] === 0x1f && head[1] === 0x8b) bytes = await new Response(bytes.stream().pipeThrough(new DecompressionStream("gzip"))).blob();
+    return bytes.arrayBuffer();
+  }
+
+  async function start() {
+    // the app draws with WebGPU (its shaders read storage buffers, which WebGL lacks)
+    if (!navigator.gpu) {
+      stop("Sphere draws with <b>WebGPU</b>, which this browser doesn't offer. Open this page in Chrome or Edge, or Safari 26 and later.");
+      return;
+    }
+    try {
+      const bytes = await wasm();
+      state("Starting");
+      $("fill").style.width = "100%";
+      // Bevy hands the frame loop to the browser by throwing; that one is expected
+      await init({ module_or_path: bytes }).catch(e => {
+        if (!String(e).includes("Using exceptions for control flow")) throw e;
+      });
+    } catch (e) {
+      console.error(e);
+      stop(`Sphere couldn't start here: ${String(e.message || e).replace(/</g, "&lt;")}. A desktop Chrome or Edge works best.`);
+      return;
+    }
+    // the app is drawing: let it through, then show the keys for a while
+    setTimeout(() => {
+      $("boot").classList.add("gone");
+      $("sphere").focus();
+      $("keys").classList.remove("dim");
+      setTimeout(() => $("keys").classList.add("dim"), 9000);
+    }, 600);
+  }
+
+  const small = matchMedia("(max-width: 820px), (pointer: coarse)").matches;
+  if (small) {
+    $("fill").parentElement.hidden = true;
+    state("");
+    const b = document.createElement("button");
+    b.className = "go"; b.textContent = "Open anyway";
+    $("sub").innerHTML = "Sphere is a desktop app, made for a keyboard and a big screen. The playground runs best on a computer.";
+    $("sub").after(b);
+    b.onclick = () => { b.remove(); $("fill").parentElement.hidden = false; start(); };
+  } else {
+    start();
+  }
+  // the app takes the keys once it has been clicked; keep the canvas focused
+  $("sphere").addEventListener("pointerdown", () => $("sphere").focus());
+</script>

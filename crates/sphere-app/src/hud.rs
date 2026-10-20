@@ -144,6 +144,7 @@ fn build_clock_ui(commands: &mut Commands, root: Entity, f: &UiFonts) {
 
 /// Local time as "13:34" and "FRIDAY, OCTOBER 16, 2026", from the system clock and zone (read once a minute, in-process: it used to
 /// start `date` on the main thread, which could hitch a frame).
+#[cfg(not(target_arch = "wasm32"))]
 fn clock_strings() -> (String, String) {
     extern "C" {
         fn tzset();
@@ -159,6 +160,7 @@ fn clock_strings() -> (String, String) {
 }
 
 /// The two strings for a broken-down time, as `date "+%H:%M|%A, %B %-d, %Y"` printed them (the names are English: the app never sets a locale).
+#[cfg(not(target_arch = "wasm32"))]
 fn format_clock(tm: &libc::tm) -> (String, String) {
     let fmt = |f: &std::ffi::CStr| {
         let mut buf = [0u8; 96];
@@ -169,13 +171,16 @@ fn format_clock(tm: &libc::tm) -> (String, String) {
     (fmt(c"%H:%M"), fmt(c"%A, %B %-d, %Y").to_uppercase())
 }
 
+#[cfg(target_arch = "wasm32")]
+use crate::web::clock_strings;
+
 #[allow(clippy::type_complexity)]
 /// Updates the clock when the minute changes (the panel camera then redraws once).
 pub fn update_clock(mut last: Local<i64>, mut q: ParamSet<(Query<&mut Text, With<ClockText>>, Query<&mut Text, With<DateText>>)>, args: Res<Args>) {
     if args.shot.is_some() {
         return;
     }
-    let min = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64 / 60).unwrap_or(0);
+    let min = web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).map(|d| d.as_secs() as i64 / 60).unwrap_or(0);
     if *last == min {
         return;
     }

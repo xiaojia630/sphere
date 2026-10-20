@@ -627,7 +627,7 @@ pub fn draw_reticle(
         let (t1, t2) = match i {
             // the track's head (not a ring)
             usize::MAX => {
-                let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
+                let now = web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
                 let sh = svc.shared.lock().unwrap();
                 match crate::working::pick(&work, &sh.tasks) {
                     Some(t) => crate::working::head_tip(t, &sh.runs.get(&t.id).cloned().unwrap_or_default(), now),

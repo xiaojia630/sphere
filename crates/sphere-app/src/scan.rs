@@ -17,7 +17,8 @@
 //! OSC 133 (powerlevel10k, iTerm2, VS Code) doesn't drive Fix it. A tab with no integration has no nonce, and its
 //! scanner reports nothing.
 use std::collections::VecDeque;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use web_time::Instant;
 
 /// A command's output keeps at most this many lines and bytes (the end of it).
 pub const KEEP_LINES: usize = 400;
