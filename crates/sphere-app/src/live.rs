@@ -367,6 +367,9 @@ pub fn sync(svc: Res<Service>, mut live: ResMut<Live>, mut agents: ResMut<Agents
     for n in s.notes.drain(..) {
         toasts.push(n);
     }
+    for n in s.good.drain(..) {
+        toasts.push_ok(n);
+    }
     if live.link != s.link {
         if let Some(Link::Down(e)) = &s.link {
             toasts.push(e.clone());
