@@ -544,6 +544,12 @@ mod tests {
         assert_eq!(t.list.last().map(|x| x.2), Some(ToastKind::Ok));
     }
 
+    /// `secs` before now, in RFC 3339, for a test that runs the app's systems on the real clock.
+    fn ago(secs: u64) -> String {
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+        sphere_proto::rfc3339_from_unix_ms(now - secs * 1000)
+    }
+
     fn task(id: &str, state: TaskState, at: &str) -> TaskView {
         serde_json::from_value(serde_json::json!({
             "id": id, "title": format!("Task {id}"), "prompt": "", "state": state, "status": "Done: finished",
@@ -773,7 +779,8 @@ mod tests {
     fn a_resource_is_marked_changed_only_when_its_content_changed() {
         let mut app = app();
         put(&app, |s| {
-            s.tasks = vec![task("t1", TaskState::Working, "2026-10-19T00:01:00Z"), task("t2", TaskState::Done, "2026-10-19T00:02:00Z")];
+            // minutes ago: the app reads the real clock, and a finished agent leaves the panel after a day
+            s.tasks = vec![task("t1", TaskState::Working, &ago(120)), task("t2", TaskState::Done, &ago(60))];
             (s.roster, s.states, s.spans) = (1, 1, 1);
             s.link = Some(Link::Connected);
         });
