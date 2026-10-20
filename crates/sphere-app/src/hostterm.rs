@@ -153,6 +153,7 @@ fn spawn_on(c: HostClient, cols: u16, rows: u16, shell: &str, launch: crate::she
     let mut env = BTreeMap::new();
     env.insert("TERM".to_string(), "xterm-256color".to_string());
     env.insert("COLORTERM".to_string(), "truecolor".to_string());
+    env.extend(crate::shellint::locale_env());
     env.extend(launch.env);
     let p = SpawnParams { cmd: shell.to_string(), args: launch.args, cwd, env, pty: Some(PtySize { cols, rows }), label: Some(label_of(launch.nonce.as_deref())) };
     let r = rt().block_on(c.spawn(p)).ok()?;

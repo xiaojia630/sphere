@@ -14,7 +14,11 @@
 //! so nothing that merely prints to the terminal (a crafted file, another tool's own OSC 133) can pose as a
 //! command that you ran. The tab keeps the nonce for the scanner (hostterm.rs also keeps it in the host's label of
 //! a tab, so a tab that the app finds again after a restart still knows it).
+//!
+//! A shell also needs a UTF-8 locale to take what you type, and an app that Finder started has none, so a tab gets
+//! one then (`locale_env`).
 use std::{
+    ffi::OsString,
     fs, io,
     os::unix::fs::{DirBuilderExt, OpenOptionsExt},
     path::{Path, PathBuf},
@@ -96,6 +100,23 @@ fn new_nonce() -> Option<String> {
         return None;
     }
     Some(bytes.iter().map(|b| format!("{b:02x}")).collect())
+}
+
+/// The locale to give a tab's shell when the app has none: `LC_CTYPE=UTF-8` on macOS and `LC_CTYPE=C.UTF-8`
+/// elsewhere, and nothing when `LC_ALL`, `LC_CTYPE` or `LANG` is set, as your own locale stands then. An app that
+/// Finder started has none, and without a UTF-8 locale the readline of the bash 3.2 that macOS ships takes the bytes
+/// of an `é` you type for Meta keys and drops them.
+pub fn locale_env() -> Vec<(String, String)> {
+    locale_env_in(|k| std::env::var_os(k), cfg!(target_os = "macos"))
+}
+
+/// `locale_env` with the app's environment (`var`) and the platform given.
+fn locale_env_in(var: impl Fn(&str) -> Option<OsString>, macos: bool) -> Vec<(String, String)> {
+    // set to nothing counts as unset, as it does for the C library
+    if ["LC_ALL", "LC_CTYPE", "LANG"].iter().any(|k| var(k).is_some_and(|v| !v.is_empty())) {
+        return Vec::new();
+    }
+    vec![("LC_CTYPE".to_string(), if macos { "UTF-8" } else { "C.UTF-8" }.to_string())]
 }
 
 /// `/bin/zsh` is `zsh`.
@@ -246,6 +267,29 @@ mod tests {
     }
 
     #[test]
+    fn a_shell_gets_a_utf8_locale_when_the_app_has_none() {
+        let ctype = |v: &str| vec![("LC_CTYPE".to_string(), v.to_string())];
+        let none = |_: &str| None::<OsString>;
+        // macOS has a locale called UTF-8, Linux one called C.UTF-8
+        assert_eq!(locale_env_in(none, true), ctype("UTF-8"));
+        assert_eq!(locale_env_in(none, false), ctype("C.UTF-8"));
+        // any one of the three is a locale that you chose, whatever it is: nothing is added to it
+        for set in ["LC_ALL", "LC_CTYPE", "LANG"] {
+            let var = |k: &str| (k == set).then(|| OsString::from("de_DE.ISO-8859-1"));
+            for macos in [true, false] {
+                assert!(locale_env_in(var, macos).is_empty(), "{set}, macOS {macos}");
+            }
+        }
+        // set to nothing is not set, and the other LC_ variables are no locale for characters
+        let var = |k: &str| match k {
+            "LANG" | "LC_ALL" => Some(OsString::new()),
+            "LC_MESSAGES" => Some(OsString::from("en_US.UTF-8")),
+            _ => None,
+        };
+        assert_eq!(locale_env_in(var, true), ctype("UTF-8"));
+    }
+
+    #[test]
     fn install_writes_the_scripts_privately() {
         let s = Scratch::new("install");
         let dir = s.0.join("shell");
@@ -343,6 +387,15 @@ mod tests {
             cmd.env("PATH", std::env::var("PATH").unwrap_or_default());
             cmd.env("HOME", home);
             cmd.env("TERM", "xterm-256color");
+            // the locale of the app, or what a tab is given when it has none: this shell starts as a tab's does
+            for k in ["LC_ALL", "LC_CTYPE", "LANG"] {
+                if let Some(v) = std::env::var_os(k) {
+                    cmd.env(k, v);
+                }
+            }
+            for (k, v) in locale_env() {
+                cmd.env(k, v);
+            }
             // a zsh that was unpacked and not installed finds its modules and functions where these point
             for k in ["MODULE_PATH", "FPATH"] {
                 if let Some(v) = std::env::var_os(k) {

@@ -270,6 +270,9 @@ impl Terminal {
         let name = if look { "bash".to_string() } else { std::path::Path::new(&shell).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default() };
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
+        for (k, v) in crate::shellint::locale_env() {
+            cmd.env(k, v);
+        }
         let child = pair.slave.spawn_command(cmd).map_err(|e| e.to_string())?;
         drop(pair.slave);
         let mut reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;
