@@ -24,6 +24,8 @@ pub struct Open {
     pub takeover: Option<crate::takeover::Words>,
     /// a click on the Agents panel (panel px): an "elsewhere" row opens its card, anywhere else opens the Working view
     pub agents_click: Option<bevy::math::Vec2>,
+    /// typed "protocols": `protocols::commands` opens the card of what runs on a schedule
+    pub protocols: bool,
 }
 
 /// The Code app's tile.

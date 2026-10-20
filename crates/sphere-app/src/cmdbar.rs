@@ -301,6 +301,11 @@ pub(crate) fn home_command(t: &str, acts: &mut crate::home::Acts, open: &mut cra
         open.takeover = Some(w);
         return true;
     }
+    // `protocols` opens the card of what runs on a schedule; a longer line is a task (or a protocol to save)
+    if matches!(l.trim(), "protocols" | "protocol" | "routines" | "routine" | "schedules") {
+        open.protocols = true;
+        return true;
+    }
     // `code` opens the Code app; `code <path>` opens a folder in it (`code .` is the last repo used). Words that
     // aren't a folder ("code review this") are a task, as before
     if starts(&["code"]) {
@@ -910,5 +915,20 @@ mod protocol_tests {
         assert_eq!(repo_dir("sphere", home), PathBuf::from("/home/me/Projects/sphere"));
         assert_eq!(repo_dir("~/work/x", home), PathBuf::from("/home/me/work/x"));
         assert_eq!(repo_dir("/srv/x", home), PathBuf::from("/srv/x"));
+    }
+
+    #[test]
+    fn the_word_protocols_opens_the_card_and_longer_lines_do_not() {
+        let mut open = crate::apps::Open::default();
+        let (mut acts, mut toasts, mut sw, mut sound) = (crate::home::Acts::default(), Toasts::default(), crate::swarm::Swarm::default(), crate::sound::Sound::default());
+        for word in ["protocols", "Protocols", "routines", " protocols "] {
+            open.protocols = false;
+            assert!(home_command(word, &mut acts, &mut open, &mut toasts, &mut sw, &mut sound) && open.protocols, "{word}");
+        }
+        open.protocols = false;
+        // a task that starts with the word is a task, and a protocol line is not a command
+        assert!(!home_command("protocols are slow, speed them up", &mut acts, &mut open, &mut toasts, &mut sw, &mut sound));
+        assert!(!home_command("every day 9:00 sphere: tidy", &mut acts, &mut open, &mut toasts, &mut sw, &mut sound));
+        assert!(!open.protocols);
     }
 }

@@ -943,7 +943,14 @@ fn sync(svc: Res<crate::service::Service>, args: Res<crate::Args>, sim: Res<crat
             return;
         }
         st.demo_t = Some(sim.t);
-        demo_at(sim.t)
+        let mut m = demo_at(sim.t);
+        // the look test (`--protocols tags`): two of the agents were started by a protocol
+        if args.protocols.as_deref() == Some("tags") {
+            for a in m.agents.iter_mut().filter(|a| matches!(a.id.as_str(), "checkout" | "react")) {
+                a.protocol = true;
+            }
+        }
+        m
     } else {
         let s = svc.shared.lock().unwrap();
         if !fresh && st.ver == Some(s.version) && real - st.at < 1.0 {
