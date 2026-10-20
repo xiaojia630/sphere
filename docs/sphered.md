@@ -94,6 +94,8 @@ All of this was checked against the installed Claude Code (2.1.301).
 
 **Bringing a session into Sphere.** Claude sessions started before Sphere existed, or outside it, are listed from `claude agents --json` and the transcripts on disk. Bringing one in resumes the session under Sphere. If the outside copy is still running, Sphere asks you to stop it first.
 
+**Notes.** What you tell Sphere to remember ("use pnpm, never npm", from the command bar, from a Change you just sent, or from `sphere remember`) is kept by sphered per repo (the root of the checkout) or for every repo, and every agent it starts is told. A new task and every resume pass the notes for that repo, then the ones for every repo, newest first, to Claude Code with `--append-system-prompt` (4 KB at most; what doesn't fit is left out), and the task view says how many it was told (`briefed`). The notes live in their own SQLite table, not in the event log, so a removed note is really gone: the log holds only `memory_changed` with the new count, and a client reads the notes again with `memory.list`. Notes are instructions every later agent follows, so only the app and the CLI add or remove them; the assistant and anything an agent started are refused.
+
 **Idle agents.** After finishing, an agent stays warm for 10 minutes so a follow-up starts instantly, then exits. The next message resumes it. Idle agents don't count toward the concurrency limit.
 
 **Signing in.** On start, Sphere checks `claude auth status`. If you're signed out, it runs `claude auth login` in a Sphere terminal tab.
@@ -195,6 +197,7 @@ A Unix socket, user-only, speaking JSON-RPC 2.0 over newline-delimited JSON. The
 - **Sync:** `snapshot`, `subscribe`, `history`, `blob.read`.
 - **Agents:** `task.start`, `task.send`, `task.interrupt`, `task.set_mode`, `task.set_model`, `task.rewind`, `task.stop`, `task.open_in_terminal`, `session.list`, `session.bring_in`.
 - **Requests:** `request.answer`.
+- **Notes:** `memory.list`, `memory.add`, `memory.remove`. The snapshot carries them too.
 - **Terminals:** `term.open`, `term.attach`, `term.input`, `term.resize`, `term.close`.
 - **Projects:** `project.add`, `project.list`.
 - **Later:** `task.diff`, `task.merge`, `task.pr`, `task.discard` and `editor.open` (M3); provider actions (M4 and on); `assistant.ask` (M5).

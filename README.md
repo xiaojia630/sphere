@@ -177,6 +177,8 @@ sphere mode <task> <mode>           change the permission mode
 sphere model <task> <model>         change the model
 sphere sessions                     Claude Code sessions on this machine
 sphere bring-in <session>           continue a session as a Sphere task (refused while it runs elsewhere)
+sphere remember "<note>" [--all]    tell every agent started in this repo (--all: in any repo) something, like "use pnpm, never npm"
+sphere memory [rm <id>]             the notes by repo, with their ids; rm removes one
 sphere doctor                       check the installation
 ```
 
@@ -231,13 +233,14 @@ More keys:
 - S: the Agent swarm, every agent at once on one orbit per repo. Hover an agent for its recent steps, click it (or 1-9, Tab) to bring it forward, N for the next one that needs you, T shows every track, Esc goes back.
 - W: the Working view on the latest agent (it also opens when you start one). P interrupts its turn, T brings its output forward, Esc goes home.
 - N: the Agent moment for what needs you (it rises by itself when a request arrives). Enter answers yes, E changes (type, Enter), L is later, ← → steps through them, Esc puts them away. A permission that comes with a rule to remember has an Always button (A): yes, and the rule it names is saved to your policy. When other agents wait on exactly the same ask (the same tool and input), the card says so and Shift+Enter (Allow all) answers yes to all of them at once. Sphere reads each one out. The home's Needs you row and the swarm's status line say how long agents have waited on you today.
+- Memory: a correction you give once can reach every agent after it. `remember: use pnpm, never npm` in the command bar keeps a note for the last repo used (`remember <repo>: …` for another, `remember all: …` for every repo), and after you send a Change on the Agent moment, a chip offers R to keep it as a note. Each agent sphered starts in that repo is told the notes (repo's own first, newest first), and the Working view tags the task `BRIEFED · 3`. `memory` in the command bar opens the notes by repo with their age and where they came from: ↑ ↓ or J K choose, D twice removes, Esc closes.
 - Terminal: T focuses it, Esc releases it, Cmd+T new tab, Cmd+W close, Cmd+1..9 switch, Cmd+V paste. Tabs run your login shell inside sphere-host, so they survive the app closing: the next launch re-attaches them (replaying their output). If the host can't be reached they live in the app.
 - Motion: transitions play Fast by default (apps, the Working view, the Agent moment and the app orbit settle in about a fifth of a second). `motion cinematic` in the command bar brings back the slower original timing, `motion fast` returns, and `motion` alone switches. `motion 1.5` plays Fast 1.5 times quicker still (0.25 to 4). The choice is remembered.
 - Option+Space (macOS) brings Sphere up over anything and hides it again. When something needs you while Sphere isn't in front, you get a notification.
 
 Sounds are synthesised and rendered to WAV (`crates/sphere-app/assets/sounds`). Speech uses macOS `say` with the Daniel voice.
 
-Flags: `--demo` (sample agents, no service), `--code`, `--git`, `--app containers|ports|system|files`, `--moment` (the Agent moment with sample requests), `--apps` (core open), `--work` (the Working view), `--swarm` (the Agent swarm), `--orbit`, `--collapsed`, `--theme <name>`, `--motion fast|cinematic`, `--live` (screenshots and benches against the real service), `--cmd "<command>"` (what the first terminal tab runs), `--bench <seconds>`, `--shot <png> [--frames N] [--depth] [--term]`, `--record <dir> [--record-frames N]` (every frame, for GIFs), `--size WxH`, `--no-msaa`. `SPHERE_STATS=1` prints startup timings and memory. `SPHERE_SOCKET` points the app at another sphered. `SPHERE_CODE_DIR=<folder>` opens Code on that folder at start (look tests; `SPHERE_CODE_KEYS` plays keys in it).
+Flags: `--demo` (sample agents, no service), `--code`, `--git`, `--app containers|ports|system|files`, `--moment` (the Agent moment with sample requests), `--memory card|armed|chip` (the notes card, with Remove armed, or the Agent moment just after a Change), `--apps` (core open), `--work` (the Working view), `--swarm` (the Agent swarm), `--orbit`, `--collapsed`, `--theme <name>`, `--motion fast|cinematic`, `--live` (screenshots and benches against the real service), `--cmd "<command>"` (what the first terminal tab runs), `--bench <seconds>`, `--shot <png> [--frames N] [--depth] [--term]`, `--record <dir> [--record-frames N]` (every frame, for GIFs), `--size WxH`, `--no-msaa`. `SPHERE_STATS=1` prints startup timings and memory. `SPHERE_SOCKET` points the app at another sphered. `SPHERE_CODE_DIR=<folder>` opens Code on that folder at start (look tests; `SPHERE_CODE_KEYS` plays keys in it).
 
 `--shot` and `--record` render offscreen and need no window. `--bench`, `--shot` and `--record` use the demo data unless `--live` is given.
 
