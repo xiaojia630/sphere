@@ -4,6 +4,7 @@
 pub mod api;
 pub mod event;
 pub mod paths;
+pub mod protocol;
 pub mod request;
 pub mod version;
 pub mod views;
@@ -12,5 +13,6 @@ pub use event::{
     now_rfc3339, rfc3339_from_unix_ms, Event, EventBody, Excerpt, FileStat, OutputRef, PlanItem,
     StepKind, TaskState,
 };
+pub use protocol::Protocol;
 pub use request::{AnswerKind, RequestInfo, RequestKind, RequestStatus};
 pub use views::{RequestView, TaskView, Views};
