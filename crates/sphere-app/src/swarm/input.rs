@@ -615,7 +615,7 @@ fn drive(mut ev: MessageReader<KeyboardInput>, keys: Res<ButtonInput<KeyCode>>, 
             st.pending.push((id, now));
         }
     }
-    let typing = e.focus.cmd || e.focus.terminal || e.moment.editing;
+    let typing = e.focus.cmd || e.focus.terminal || e.moment.editing || e.moment.offer.is_some();
     if !typing && !mods {
         for code in pressed {
             if let Some(k) = key_of(code, shift) {
@@ -937,7 +937,7 @@ mod tests {
     // ---- the systems, on a bare App
 
     fn args() -> crate::Args {
-        crate::Args { cmd: None, bench: None, shot: None, record: None, record_frames: 180, frames: 120, depth: false, orbit: false, apps: false, work: false, swarm: false, code: false, git: false, open_app: None, icon: false, aa: "smaa".into(), offscreen: false, collapsed: false, focus_term: false, msaa: true, size: (1600, 1000), dt: 0.05, demo: true, live: false, moment: false, elsewhere: false, calendar: false, takeover: None, theme: None, motion: None }
+        crate::Args { cmd: None, bench: None, shot: None, record: None, record_frames: 180, frames: 120, depth: false, orbit: false, apps: false, work: false, swarm: false, code: false, git: false, open_app: None, icon: false, aa: "smaa".into(), offscreen: false, collapsed: false, focus_term: false, msaa: true, size: (1600, 1000), dt: 0.05, demo: true, live: false, moment: false, elsewhere: false, calendar: false, takeover: None, memory: None, theme: None, motion: None }
     }
 
     fn request(task: &str) -> sphere_proto::RequestView {

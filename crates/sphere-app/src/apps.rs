@@ -22,6 +22,8 @@ pub struct Open {
     pub swarm_cmds: Vec<crate::swarm::input::SwarmCmd>,
     /// typed "take over" / "elsewhere": `takeover::commands` opens the card
     pub takeover: Option<crate::takeover::Words>,
+    /// typed "memory": `memory::commands` opens the card of notes
+    pub memory: bool,
     /// a click on the Agents panel (panel px): an "elsewhere" row opens its card, anywhere else opens the Working view
     pub agents_click: Option<bevy::math::Vec2>,
 }

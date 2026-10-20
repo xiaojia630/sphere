@@ -23,6 +23,7 @@ mod glow;
 mod hud;
 mod lean;
 mod live;
+mod memory;
 mod moment;
 mod momentfx;
 mod mouse;
@@ -114,6 +115,8 @@ pub struct Args {
     pub calendar: bool,
     /// `--takeover card|armed|ambiguous|list|after`: the demo opens the take-over card, or plays a take-over
     pub takeover: Option<String>,
+    /// `--memory card|armed|chip`: the demo opens the card of notes, or sends a Change and leaves the remember chip up
+    pub memory: Option<String>,
     /// `--theme <name>`: balanced, full, cyan, black, red
     pub theme: Option<theme::ThemeId>,
     pub motion: Option<motion::Motion>,
@@ -131,7 +134,7 @@ impl Args {
 }
 
 fn parse_args() -> Args {
-    let mut a = Args { cmd: None, bench: None, shot: None, record: None, record_frames: 180, frames: 120, depth: false, orbit: false, apps: false, work: false, swarm: false, code: false, git: false, open_app: None, icon: false, aa: std::env::var("SPHERE_AA").unwrap_or_else(|_| "smaa".into()), offscreen: false, collapsed: false, focus_term: false, msaa: true, size: (1600, 1000), dt: 1.0 / 20.0, demo: false, live: false, moment: false, elsewhere: false, calendar: false, takeover: None, theme: None, motion: None };
+    let mut a = Args { cmd: None, bench: None, shot: None, record: None, record_frames: 180, frames: 120, depth: false, orbit: false, apps: false, work: false, swarm: false, code: false, git: false, open_app: None, icon: false, aa: std::env::var("SPHERE_AA").unwrap_or_else(|_| "smaa".into()), offscreen: false, collapsed: false, focus_term: false, msaa: true, size: (1600, 1000), dt: 1.0 / 20.0, demo: false, live: false, moment: false, elsewhere: false, calendar: false, takeover: None, memory: None, theme: None, motion: None };
     let mut it = std::env::args().skip(1);
     while let Some(s) = it.next() {
         match s.as_str() {
@@ -167,6 +170,11 @@ fn parse_args() -> Args {
                 a.takeover = it.next();
                 a.elsewhere = true;
             }
+            "--memory" => {
+                a.memory = it.next();
+                // the chip is on the Agent moment card, which the demo shows with a sample request
+                a.moment |= a.memory.as_deref() == Some("chip");
+            }
             "--theme" => a.theme = it.next().and_then(|v| theme::ThemeId::from_key(&v)),
             "--motion" => a.motion = it.next().and_then(|v| motion::Motion::from_key(&v)),
             "--dt" => a.dt = it.next().and_then(|v| v.parse().ok()).unwrap_or(0.05),
@@ -179,7 +187,7 @@ fn parse_args() -> Args {
                 }
             }
             "-h" | "--help" => {
-                println!("sphere-app [--demo] [--live] [--moment] [--elsewhere] [--calendar] [--takeover card|armed|ambiguous|list|after] [--theme name] [--motion fast|cinematic] [--cmd \"<command>\"] [--bench <seconds>] [--shot <png> [--frames N] [--depth] [--term]] [--size WxH] [--no-msaa]");
+                println!("sphere-app [--demo] [--live] [--moment] [--elsewhere] [--calendar] [--takeover card|armed|ambiguous|list|after] [--memory card|armed|chip] [--theme name] [--motion fast|cinematic] [--cmd \"<command>\"] [--bench <seconds>] [--shot <png> [--frames N] [--depth] [--term]] [--size WxH] [--no-msaa]");
                 std::process::exit(0);
             }
             other => eprintln!("ignoring unknown argument {other}"),
@@ -241,6 +249,7 @@ fn main() {
         .init_resource::<momentfx::MomentFx>()
         .init_resource::<hud::FrameStats>()
         .add_plugins(swarm::SwarmPlugin)
+        .add_plugins(memory::MemoryPlugin)
         .add_systems(Startup, (sound::setup, setup_core, setup_cameras, hud::setup_panels, hud::setup_backdrop, hud::setup_overlay, cmdbar::setup, takeover::setup, visor::setup, fx::setup, homepanels::setup, orbit::setup, working::setup, (codeapp::setup, gitapp::setup, containers::setup, ports::setup, sysapp::setup, filesapp::setup).chain(), momentfx::setup, callouts::setup, mouse::setup, mouse::setup_reticle).chain())
         .add_systems(First, (tick_sim, theme::animate))
         .add_systems(PreUpdate, hud::script)

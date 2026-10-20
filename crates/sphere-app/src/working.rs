@@ -643,6 +643,11 @@ pub fn parse_rfc3339(s: &str) -> Option<i64> {
     Some(secs)
 }
 
+/// The tag for a task whose agent was told some of your notes when it started: "BRIEFED · 3".
+fn briefed_tag(notes: u32) -> Option<String> {
+    (notes > 0).then(|| format!("BRIEFED · {notes}"))
+}
+
 fn build_run(c: &mut Commands, root: Entity, f: &UiFonts, t: &TaskView, run: &Run) {
     let line = role_color(Role::Line);
     let hot = role_color(Role::Hot);
@@ -661,8 +666,16 @@ fn build_run(c: &mut Commands, root: Entity, f: &UiFonts, t: &TaskView, run: &Ru
     let repo = std::path::Path::new(&t.repo).file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
     let meta = format!("Agent · Claude Code · {} · {}", t.branch.clone().unwrap_or_else(|| "in place".into()), repo);
     let m = c.spawn((Text::new(meta), font(&f.ui500, 12.0, 0.96), TextColor(line), LineHeight::Px(15.0))).id();
-    // a session taken over from a terminal says where it came from
+    // a session taken over from a terminal says where it came from, and how many of your notes it was told at the start
+    // (see `memory`) shows beside it
     let from = run.taken_from.as_ref().map(|w| c.spawn((Text::new(format!("Taken over from {}", crate::takeover::from_label(w))), font(&f.ui500, 12.0, 0.96), TextColor(role_color(Role::Fill)), LineHeight::Px(15.0))).id());
+    let briefed = briefed_tag(t.briefed).map(|tag| {
+        let ch = c.spawn((Node { padding: UiRect { left: px(6), right: px(6), top: px(4), bottom: px(3) }, border: UiRect::all(px(1)), flex_shrink: 0.0, ..default() }, BorderColor::all(with_alpha(line, 0.34)))).id();
+        let tx = c.spawn((Text::new(tag), font(&f.ui700, 10.0, 2.0), TextColor(line), LineHeight::Px(10.0))).id();
+        c.entity(ch).add_child(tx);
+        ch
+    });
+    let tags: Vec<Entity> = from.into_iter().chain(briefed).collect();
     // progress: the plan's completed share when there is a plan, else a curve on the step count
     let done_plan = t.plan.iter().filter(|p| p.status == "completed").count();
     let p = if !t.plan.is_empty() {
@@ -682,14 +695,16 @@ fn build_run(c: &mut Commands, root: Entity, f: &UiFonts, t: &TaskView, run: &Ru
     let pct = c.spawn((Text::new(label), font(&f.mono, 11.5, 0.46), TextColor(hot), LineHeight::Px(12.0))).id();
     c.entity(pr).add_children(&[track, pct]);
     c.entity(b).add_children(&[hdr, m]);
-    if let Some(from) = from {
-        c.entity(b).add_child(from);
+    if !tags.is_empty() {
+        let row = c.spawn(Node { flex_direction: FlexDirection::Row, align_items: AlignItems::Center, column_gap: px(10), ..default() }).id();
+        c.entity(row).add_children(&tags);
+        c.entity(b).add_child(row);
     }
     c.entity(b).add_child(pr);
-    // steps: the last eight
+    // steps: the last eight (seven when a row of tags takes the room of one)
     let list = c.spawn(Node { flex_direction: FlexDirection::Column, margin: UiRect { top: px(4), ..default() }, ..default() }).id();
     let n = run.steps.len();
-    let first = n.saturating_sub(8);
+    let first = n.saturating_sub(if tags.is_empty() { 8 } else { 7 });
     for (k, s) in run.steps.iter().enumerate().skip(first) {
         let now = k + 1 == n && s.ok.is_none();
         let row = c.spawn(Node { height: px(27), flex_direction: FlexDirection::Row, align_items: AlignItems::Center, column_gap: px(10), ..default() }).id();
@@ -871,6 +886,43 @@ mod tests {
         assert_eq!(head_tip(&tv("failed", "Failed: boom\nmore", 0), &run, now).1, "Failed · boom");
         assert_eq!(head_tip(&tv("stopped", "", 0), &run, now).1, "Stopped");
         assert_eq!(head_tip(&tv("queued", "", 0), &run, now).1, "Queued");
+    }
+
+    /// Every text of the detail view of `t` with `run`'s steps.
+    fn detail_texts(t: TaskView, run: Run) -> Vec<String> {
+        use bevy::ecs::system::RunSystemOnce;
+        let mut app = App::new();
+        app.insert_resource(UiFonts { ui500: default(), ui600: default(), ui700: default(), display: default(), mono: default(), mono_bold: default() });
+        let root = app.world_mut().spawn(Node::default()).id();
+        app.world_mut().run_system_once(move |mut c: Commands, f: Res<UiFonts>| build_run(&mut c, root, &f, &t, &run)).unwrap();
+        let world = app.world_mut();
+        world.query::<&Text>().iter(world).map(|t| t.0.clone()).collect()
+    }
+
+    #[test]
+    fn a_task_whose_agent_was_briefed_says_with_how_many_notes() {
+        assert_eq!(briefed_tag(0), None);
+        assert_eq!(briefed_tag(1).as_deref(), Some("BRIEFED · 1"));
+        assert_eq!(briefed_tag(12).as_deref(), Some("BRIEFED · 12"));
+        // the detail view shows it, and shows nothing for a task that was told no notes
+        let mut t = tv("working", "", 0);
+        assert!(!detail_texts(t.clone(), Run::default()).iter().any(|s| s.starts_with("BRIEFED")));
+        t.briefed = 3;
+        assert!(detail_texts(t, Run::default()).iter().any(|s| s == "BRIEFED · 3"));
+    }
+
+    #[test]
+    fn a_row_of_tags_leaves_room_for_seven_steps_where_there_were_eight() {
+        let mut run = Run::default();
+        for i in 0..10 {
+            let body = sphere_proto::EventBody::Step { id: format!("s{i}"), step_kind: sphere_proto::StepKind::Run, tool: "Bash".into(), title: format!("Step number {i}"), detail: String::new(), parent: None };
+            run.apply(&sphere_proto::Event { seq: i + 1, task: "t1".into(), at: "2026-10-19T00:00:00.000Z".into(), body });
+        }
+        let steps = |t: TaskView| detail_texts(t, run.clone()).iter().filter(|s| s.starts_with("Step number")).count();
+        let mut t = tv("working", "", 0);
+        assert_eq!(steps(t.clone()), 8);
+        t.briefed = 2;
+        assert_eq!(steps(t), 7);
     }
 
     #[test]

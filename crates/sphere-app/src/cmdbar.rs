@@ -188,7 +188,7 @@ pub fn keys(
                         other if !t.is_empty() || matches!(other, BarTarget::Commit(_, _, true)) => bar.out = Some((other, t.to_string())),
                         _ => {}
                     }
-                } else if !home_command(t, &mut acts, &mut open, &mut toasts, &mut swarm, &mut sound) {
+                } else if !crate::memory::command(t, &svc, &mut toasts, &mut open) && !home_command(t, &mut acts, &mut open, &mut toasts, &mut swarm, &mut sound) {
                     run(t, &svc, &mut toasts, &mut terms, &mut focus, &mut say, &mut sound, &mut working);
                 }
             }
@@ -474,36 +474,44 @@ pub fn code_arg(arg: &str, last: Option<&Path>, home: &Path) -> Option<Result<Pa
     }
 }
 
+/// The repo a name stands for, as `repo: task` names one: `~/x` and `/x` are paths, anything else is a folder in
+/// `~/Projects`. It has to be a git repo.
+pub(crate) fn named_repo(name: &str) -> Result<String, String> {
+    let p = if let Some(r) = name.strip_prefix("~/") {
+        home().join(r)
+    } else if name.starts_with('/') {
+        PathBuf::from(name)
+    } else {
+        home().join("Projects").join(name)
+    };
+    if is_repo(&p) {
+        Ok(p.to_string_lossy().to_string())
+    } else {
+        Err(format!("No git repo at {}", p.display()))
+    }
+}
+
+/// The repo when none is named: the last one used, otherwise the app's folder (when it is one).
+pub(crate) fn usual_repo() -> Option<String> {
+    if let Some(p) = last_repo() {
+        return Some(p.to_string_lossy().to_string());
+    }
+    let cwd = std::env::current_dir().ok()?;
+    is_repo(&cwd).then(|| cwd.to_string_lossy().to_string())
+}
+
 /// `repo: task` names the repo; otherwise the last one used, otherwise the app's folder.
 pub fn resolve(text: &str) -> Result<(String, String), String> {
     if let Some((head, rest)) = text.split_once(':') {
         let head = head.trim();
         if !head.is_empty() && !head.contains(' ') && !rest.trim().is_empty() {
-            let p = if let Some(r) = head.strip_prefix("~/") {
-                home().join(r)
-            } else if head.starts_with('/') {
-                PathBuf::from(head)
-            } else {
-                home().join("Projects").join(head)
-            };
-            if is_repo(&p) {
-                return Ok((p.to_string_lossy().to_string(), rest.trim().to_string()));
-            }
-            return Err(format!("No git repo at {}", p.display()));
+            return named_repo(head).map(|repo| (repo, rest.trim().to_string()));
         }
     }
-    if let Ok(s) = std::fs::read_to_string(last_repo_file()) {
-        let p = PathBuf::from(s.trim());
-        if is_repo(&p) {
-            return Ok((p.to_string_lossy().to_string(), text.to_string()));
-        }
+    match usual_repo() {
+        Some(repo) => Ok((repo, text.to_string())),
+        None => Err("Which repo? Type  repo: task".into()),
     }
-    if let Ok(cwd) = std::env::current_dir() {
-        if is_repo(&cwd) {
-            return Ok((cwd.to_string_lossy().to_string(), text.to_string()));
-        }
-    }
-    Err("Which repo? Type  repo: task".into())
 }
 
 /// Redraws the bar when its text or focus changed, blinks the caret, and shows toasts.
