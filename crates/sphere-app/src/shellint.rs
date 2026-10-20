@@ -277,6 +277,12 @@ mod tests {
             cmd.env("PATH", std::env::var("PATH").unwrap_or_default());
             cmd.env("HOME", home);
             cmd.env("TERM", "xterm-256color");
+            // a zsh that was unpacked and not installed finds its modules and functions where these point
+            for k in ["MODULE_PATH", "FPATH"] {
+                if let Some(v) = std::env::var_os(k) {
+                    cmd.env(k, v);
+                }
+            }
             for (k, v) in &launch.env {
                 cmd.env(k, v);
             }
@@ -357,11 +363,11 @@ mod tests {
         }
         let mut sh = Session::start(shell, &s.0.join("shell"), &home, user_zdotdir_setup.then_some(zdot.as_path()));
         let cd = format!("cd \"{}\" && false", sub.display());
-        for line in ["true", "false", "ls /nope-fixit", &cd, "fixit_fn; echo $FIXIT_ENV", "sh -c 'exit 3'", "echo 'two words' | cat"] {
+        for line in ["true", "false", "ls /nope-fixit", &cd, "fixit_fn; echo $FIXIT_ENV", "sh -c 'exit 3'", "echo 'two words' | cat", "if true; then false; fi"] {
             sh.run(line);
         }
         let done = sh.finish();
-        assert_eq!(done.len(), 7, "{done:#?}");
+        assert_eq!(done.len(), 8, "{done:#?}");
         // the shell starts in your home
         assert_eq!((done[0].command.as_str(), done[0].exit), ("true", 0));
         assert_eq!(fs::canonicalize(&done[0].cwd).unwrap(), home);
@@ -377,6 +383,8 @@ mod tests {
         assert_eq!(Path::new(&done[4].cwd), sub);
         assert_eq!((done[5].command.as_str(), done[5].exit), ("sh -c 'exit 3'", 3));
         assert_eq!((done[6].command.as_str(), done[6].exit, done[6].output_tail.as_str()), ("echo 'two words' | cat", 0, "two words"));
+        // the whole line, not the first command in it
+        assert_eq!((done[7].command.as_str(), done[7].exit), ("if true; then false; fi", 1));
     }
 
     #[test]
@@ -384,6 +392,27 @@ mod tests {
         match on_path("bash") {
             Some(bash) => check_commands(&bash, "bash", false),
             None => eprintln!("skipped: no bash on PATH"),
+        }
+    }
+
+    #[test]
+    fn bash_keeps_your_debug_trap_and_your_prompt_command() {
+        let Some(bash) = on_path("bash") else { return eprintln!("skipped: no bash on PATH") };
+        let s = Scratch::new("bash-traps");
+        let home = s.0.join("home");
+        fs::create_dir_all(&home).unwrap();
+        // both are set in your own files, so the integration has to add to them and not replace them
+        let profile = "PS1='$ '\nPROMPT_COMMAND='echo prompt >> \"$HOME/prompt.log\"'\ntrap 'echo trap >> \"$HOME/trap.log\"' DEBUG\n";
+        fs::write(home.join(".bash_profile"), profile).unwrap();
+        let mut sh = Session::start(&bash, &s.0.join("shell"), &home, None);
+        for line in ["false", "echo hi"] {
+            sh.run(line);
+        }
+        let done = sh.finish();
+        assert_eq!(done.iter().map(|f| (f.command.as_str(), f.exit)).collect::<Vec<_>>(), [("false", 1), ("echo hi", 0)], "{done:#?}");
+        for log in ["prompt.log", "trap.log"] {
+            let text = fs::read_to_string(home.join(log)).unwrap_or_default();
+            assert!(text.lines().count() >= 2, "{log}: {text:?}");
         }
     }
 

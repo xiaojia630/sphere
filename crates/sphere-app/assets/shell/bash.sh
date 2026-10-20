@@ -69,12 +69,24 @@ if [ -z "${__sphere_loaded-}" ]; then
 		builtin return "$__sphere_status"
 	}
 
+	# The last entry of the history: its number in __sphere_hn and its line in __sphere_hl.
+	__sphere_hist() {
+		__sphere_hl=$(HISTTIMEFORMAT= builtin history 1 2>/dev/null)
+		__sphere_hn=${__sphere_hl#"${__sphere_hl%%[![:space:]]*}"}
+		__sphere_hn=${__sphere_hn%%[!0-9]*}
+		__sphere_hl=${__sphere_hl#*[[:digit:]][* ] }
+	}
+
 	# Last in the PROMPT_COMMAND: from here the next command to start is one you typed. The flag is set by the
 	# arithmetic in the very last statement, because with extdebug or functrace the trap also runs inside
 	# functions, and a statement after the flag would look like your command. The arithmetic gives back the
 	# status you had, so your next command sees it.
 	__sphere_pc_end() {
-		__sphere_histcmd=${HISTCMD-}
+		# the first prompt: the history entry the next line has to be newer than, if history keeps it
+		if [ -z "${__sphere_histn+x}" ]; then
+			__sphere_hist
+			__sphere_histn=$__sphere_hn
+		fi
 		builtin return $((__sphere_ready = 1, ${__sphere_status-0}))
 	}
 
@@ -107,23 +119,23 @@ if [ -z "${__sphere_loaded-}" ]; then
 		esac
 		{
 			[ -n "${__sphere_ready-}" ] && [ -z "${READLINE_POINT-}" ] && [ -z "${COMP_POINT-}" ] || builtin return 0
-			builtin local cmd= n
+			builtin local cmd=
 			__sphere_ready=
 			# The line as you typed it. BASH_COMMAND has aliases expanded and is only the first command of a list,
 			# so history is better. A line that history left out (HISTCONTROL=ignorespace or ignoredups,
-			# HISTIGNORE...) shows as a HISTCMD one less than it was at the prompt, and the last entry is an older
-			# line; it is still this one when it begins with this command, as a repeated line does.
-			if [[ -o history ]]; then
-				cmd=$(HISTTIMEFORMAT= builtin history 1)
-				n=${cmd#"${cmd%%[![:space:]]*}"}
-				n=${n%%[!0-9]*}
-				cmd=${cmd#*[[:digit:]][* ] }
-				if [ "$n" != "${HISTCMD-}" ] || [ "$n" != "${__sphere_histcmd-}" ]; then
+			# HISTIGNORE...) leaves the last entry the same as it was for the line before, and that is an older
+			# line: it is still this one when it begins with this command, as a repeated line does. (Bash 3.2 says
+			# history is off inside its own traps, so there it is trusted to be on.)
+			if ((BASH_VERSINFO[0] < 4)) || [[ -o history ]]; then
+				__sphere_hist
+				cmd=$__sphere_hl
+				if [ "$__sphere_hn" = "${__sphere_histn-}" ]; then
 					case $cmd in
 						"$BASH_COMMAND"*) ;;
 						*) cmd= ;;
 					esac
 				fi
+				__sphere_histn=$__sphere_hn
 			fi
 			if [ -z "$cmd" ]; then
 				cmd=$BASH_COMMAND
@@ -133,30 +145,24 @@ if [ -z "${__sphere_loaded-}" ]; then
 		builtin return 0
 	}
 
-	# The DEBUG trap that was already there, as a string ('' when there is none).
-	__sphere_old_debug_trap() {
-		builtin local -a terms
-		builtin eval "terms=( $(builtin trap -p DEBUG) )"
-		builtin printf '%s' "${terms[2]-}"
-	}
-
+	# Everything but the DEBUG trap itself, which is set below, outside any function. $1 is the DEBUG trap that is
+	# there already ('' when there is none); the trap to set is left in __sphere_trap ('' when bash-preexec has
+	# the DEBUG trap).
 	__sphere_install() {
-		builtin local old
 		__sphere_ran=0
 		__sphere_ready=
 		__sphere_pwd=
 		__sphere_url=
-		__sphere_histcmd=
+		__sphere_trap=
 		if [ -n "${bash_preexec_imported-}${__bp_imported-}" ]; then
 			precmd_functions=(__sphere_pc_begin ${precmd_functions[@]+"${precmd_functions[@]}"})
 			preexec_functions=(${preexec_functions[@]+"${preexec_functions[@]}"} __sphere_preexec)
 		else
-			old=$(__sphere_old_debug_trap)
-			if [ -z "$old" ]; then
-				builtin trap '__sphere_debug "$_"' DEBUG
+			if [ -z "${1-}" ]; then
+				__sphere_trap='__sphere_debug "$_"'
 			else
 				# keep a trap that is there already: ours runs first, then it
-				builtin trap '__sphere_debug "$_"'$'\n'"$old" DEBUG
+				__sphere_trap='__sphere_debug "$_"'$'\n'"$1"
 			fi
 			if ((BASH_VERSINFO[0] > 5 || (BASH_VERSINFO[0] == 5 && BASH_VERSINFO[1] >= 1))); then
 				# bash 5.1 runs every element of a PROMPT_COMMAND array
@@ -175,11 +181,19 @@ if [ -z "${__sphere_loaded-}" ]; then
 			case $- in
 				*i*)
 					if [ -t 1 ] && [ -z "${__sphere_hooked-}" ]; then
-						__sphere_install 2>/dev/null || :
+						# The DEBUG trap is read and set here and not in a function: bash 3.2 hides it from a
+						# function and puts the old one back when the function returns.
+						__sphere_old=()
+						builtin eval "__sphere_old=( $(builtin trap -p DEBUG) )" 2>/dev/null || :
+						__sphere_install "${__sphere_old[2]-}" 2>/dev/null || :
+						if [ -n "${__sphere_trap-}" ]; then
+							builtin trap -- "$__sphere_trap" DEBUG 2>/dev/null || :
+						fi
 					fi
 					;;
 			esac
 			;;
 	esac
-	builtin unset -f __sphere_install __sphere_old_debug_trap 2>/dev/null || :
+	builtin unset -f __sphere_install 2>/dev/null || :
+	builtin unset __sphere_old __sphere_trap 2>/dev/null || :
 fi
