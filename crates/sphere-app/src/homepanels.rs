@@ -565,8 +565,9 @@ pub fn draw_say(time: Res<Time<Real>>, mut say: ResMut<Say>, swarm: Res<crate::s
             changed = true;
         }
     }
-    // the idle hint: the home's, or the swarm's for its mode
-    let idle = if swarm.open { crate::swarm::feedback::idle_hint(&swarm.mode) } else { IDLE };
+    // the idle hint: the home's, the game's keys (none while its title, pause or results panel lists them), or the
+    // swarm's for its mode
+    let idle = if swarm.open && swarm.game { if swarm.game_panel { "" } else { crate::game::HINT } } else if swarm.open { crate::swarm::feedback::idle_hint(&swarm.mode) } else { IDLE };
     if *idle_seen != idle {
         *idle_seen = idle;
         changed = true;

@@ -59,6 +59,8 @@ pub struct CoreCtl {
     pub swarm: f32,
     /// a swarm focus panel is open: the core slides right, 0..1
     pub swarm_focus: f32,
+    /// Hold the Swarm is on: the core rises and shrinks, 0..1
+    pub swarm_game: f32,
     /// how open an app is (Code, ...): the core shrinks into the top-left corner
     pub app: f32,
     /// the core spins faster while an agent works
@@ -93,6 +95,7 @@ impl CoreCtl {
             work: 0.0,
             swarm: 0.0,
             swarm_focus: 0.0,
+            swarm_game: 0.0,
             app: 0.0,
             work_spin: 1.0,
             moment: 0.0,
@@ -1005,13 +1008,15 @@ pub fn update_core(
         let w = ctl.work;
         tr.translation = Vec3::new(-260.0 * w, CORE_Y - 26.0 * ctl.orb - 192.0 * w, -140.0 * ctl.moment);
         tr.scale = Vec3::splat(lerp(1.0, 0.52, w) * lerp(1.0, 0.82, ctl.moment));
-        // the Agent swarm: stage (800, 486) at .58, sliding 210 right and 10% smaller with a focus panel
+        // the Agent swarm: stage (800, 486) at .58, sliding 210 right and 10% smaller with a focus panel, and up and
+        // smaller while Hold the Swarm's card is under it
         let s = ctl.swarm;
         if s > 0.0 {
-            let mut at = crate::panel::stage_to_world(800.0 + 210.0 * ctl.swarm_focus, 486.0);
+            let g = ctl.swarm_game;
+            let mut at = crate::panel::stage_to_world(800.0 + 210.0 * ctl.swarm_focus, 486.0 - crate::swarm::GAME_LIFT * g);
             at.z = -70.0 * ctl.moment;
             tr.translation = tr.translation.lerp(at, s);
-            tr.scale = tr.scale.lerp(Vec3::splat(0.58 * (1.0 - 0.1 * ctl.swarm_focus)), s);
+            tr.scale = tr.scale.lerp(Vec3::splat(0.58 * (1.0 - 0.1 * ctl.swarm_focus) * (1.0 - crate::swarm::GAME_SHRINK * g)), s);
         }
         // an app: a small live core in the top-left corner (stage 76, 70)
         let a = ctl.app;

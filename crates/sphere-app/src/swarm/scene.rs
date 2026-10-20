@@ -502,7 +502,8 @@ pub fn update(
     let tilt = tfs.get(decks.tilt).map(|t| t.rotation).unwrap_or(Quat::IDENTITY);
     let compact = sv.w < 820.0 || sv.w / sv.h.max(1.0) < 1.05;
     let focus_amt = clamp(swarm.focus_amt.x, 0.0, 1.0);
-    let sw = Sw { pos: core, rot: tilt * (Quat::from_rotation_y((t * 0.13).sin() * 0.05) * Quat::from_rotation_x(-swarm.orbit_tilt.x * DEG)), s: if compact { 0.3 } else { 1.0 } * (1.0 - 0.08 * focus_amt) };
+    let game_amt = clamp(swarm.game_amt.x, 0.0, 1.0);
+    let sw = Sw { pos: core, rot: tilt * (Quat::from_rotation_y((t * 0.13).sin() * 0.05) * Quat::from_rotation_x(-swarm.orbit_tilt.x * DEG)), s: if compact { 0.3 } else { 1.0 } * (1.0 - 0.08 * focus_amt) * (1.0 - super::GAME_SHRINK * game_amt) };
     out.sw = Some((sw.pos, sw.rot, sw.s));
     put(&mut tfs, sc.root, |tr| {
         tr.translation = sw.pos;

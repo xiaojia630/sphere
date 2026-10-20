@@ -474,12 +474,14 @@ pub fn keys(
     keys: Res<ButtonInput<KeyCode>>,
     focus: Res<Focus>,
     moment: Res<crate::moment::Moment>,
+    swarm: Res<crate::swarm::Swarm>,
     mut orb: ResMut<Orb>,
     mut sound: ResMut<crate::sound::Sound>,
 ) {
     let mods = keys.any_pressed([KeyCode::SuperLeft, KeyCode::SuperRight, KeyCode::ControlLeft, KeyCode::ControlRight, KeyCode::AltLeft, KeyCode::AltRight]);
     for e in ev.read() {
-        if e.state != bevy::input::ButtonState::Pressed || mods || focus.cmd || focus.terminal || moment.shown {
+        // the game's A is Always
+        if e.state != bevy::input::ButtonState::Pressed || mods || focus.cmd || focus.terminal || moment.shown || swarm.game {
             continue;
         }
         match e.key_code {

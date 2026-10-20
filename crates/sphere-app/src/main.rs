@@ -15,6 +15,7 @@ mod filesapp;
 mod fixit;
 mod fonts;
 mod fx;
+mod game;
 mod goto;
 mod home;
 #[cfg_attr(target_arch = "wasm32", path = "web/hostterm.rs")]
@@ -151,6 +152,8 @@ pub struct Args {
     /// `--output answer|live`: the Working view opens on a sample agent whose output panel holds a finished answer, or
     /// a run still going
     pub output: Option<String>,
+    /// `--game [play[:secs]|bot[:secs]|pause|over]`: Hold the Swarm opens at start (offline, a bot plays the look tests)
+    pub game: Option<String>,
 }
 
 impl Args {
@@ -165,7 +168,7 @@ impl Args {
 }
 
 fn parse_args() -> Args {
-    let mut a = Args { cmd: None, bench: None, shot: None, record: None, record_frames: 180, frames: 120, depth: false, orbit: false, apps: false, work: false, swarm: false, code: false, git: false, open_app: None, icon: false, aa: std::env::var("SPHERE_AA").unwrap_or_else(|_| "smaa".into()), offscreen: false, collapsed: false, focus_term: false, msaa: true, size: (1600, 1000), dt: 1.0 / 20.0, demo: false, live: false, moment: false, elsewhere: false, calendar: false, takeover: None, memory: None, protocols: None, fixit: None, theme: None, motion: None, goto: None, tasks: false, output: None };
+    let mut a = Args { cmd: None, bench: None, shot: None, record: None, record_frames: 180, frames: 120, depth: false, orbit: false, apps: false, work: false, swarm: false, code: false, git: false, open_app: None, icon: false, aa: std::env::var("SPHERE_AA").unwrap_or_else(|_| "smaa".into()), offscreen: false, collapsed: false, focus_term: false, msaa: true, size: (1600, 1000), dt: 1.0 / 20.0, demo: false, live: false, moment: false, elsewhere: false, calendar: false, takeover: None, memory: None, protocols: None, fixit: None, theme: None, motion: None, goto: None, tasks: false, output: None, game: None };
     #[cfg(not(target_arch = "wasm32"))]
     let mut it = std::env::args().skip(1).peekable();
     // the web playground: the page's query (`?swarm&theme=red`) for the flags. It runs like the app against its
@@ -207,6 +210,7 @@ fn parse_args() -> Args {
             "--moment" => a.moment = true,
             "--elsewhere" => a.elsewhere = true,
             "--calendar" => a.calendar = true,
+            "--game" => a.game = Some(it.next_if(|v| !v.starts_with('-')).unwrap_or_else(|| "title".into())),
             "--output" => {
                 a.output = Some(it.next_if(|v| !v.starts_with('-')).unwrap_or_else(|| "answer".into()));
                 a.work = true;
@@ -245,7 +249,7 @@ fn parse_args() -> Args {
                 }
             }
             "-h" | "--help" => {
-                println!("sphere-app [--demo] [--live] [--moment] [--elsewhere] [--calendar] [--output answer|live] [--takeover card|armed|ambiguous|list|after] [--memory card|armed|chip] [--protocols card|armed|empty|rail|tags|bar|mistake] [--fixit strip|after] [--goto [filter]] [--tasks] [--theme name] [--motion fast|cinematic] [--cmd \"<command>\"] [--bench <seconds>] [--shot <png> [--frames N] [--depth] [--term]] [--size WxH] [--no-msaa]");
+                println!("sphere-app [--demo] [--live] [--moment] [--elsewhere] [--calendar] [--game [play[:secs]|bot[:secs]|pause|over]] [--output answer|live] [--takeover card|armed|ambiguous|list|after] [--memory card|armed|chip] [--protocols card|armed|empty|rail|tags|bar|mistake] [--fixit strip|after] [--goto [filter]] [--tasks] [--theme name] [--motion fast|cinematic] [--cmd \"<command>\"] [--bench <seconds>] [--shot <png> [--frames N] [--depth] [--term]] [--size WxH] [--no-msaa]");
                 std::process::exit(0);
             }
             other => eprintln!("ignoring unknown argument {other}"),
@@ -312,6 +316,7 @@ fn main() {
         .init_resource::<hud::FrameStats>()
         .add_plugins(swarm::SwarmPlugin)
         .add_plugins(memory::MemoryPlugin)
+        .add_plugins(game::GamePlugin)
         .add_systems(Startup, (protocols::demo_setup, sound::setup, setup_core, setup_cameras, hud::setup_panels, hud::setup_backdrop, hud::setup_overlay, cmdbar::setup, takeover::setup, protocols::setup, (goto::setup, visor::setup, fx::setup).chain(), homepanels::setup, orbit::setup, working::setup, (codeapp::setup, gitapp::setup, containers::setup, ports::setup, sysapp::setup, filesapp::setup).chain(), momentfx::setup, callouts::setup, mouse::setup, mouse::setup_reticle).chain())
         .add_systems(First, (tick_sim, theme::animate))
         .add_systems(PreUpdate, hud::script)

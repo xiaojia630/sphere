@@ -35,6 +35,14 @@ pub struct HudOut {
 #[derive(Resource, Default)]
 pub struct HudKeys(pub Vec<KeyCode>);
 
+/// On another view's panel over the swarm (the game's): the satellite labels slide clear of it (`Clear`, as of Orbits
+/// and Run slots) or fade under it (`Hide`, as under the focus panel).
+#[derive(Component, Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Keepout {
+    Clear,
+    Hide,
+}
+
 /// "Now" in unix seconds: the demo's fixed clock offline, the real one otherwise.
 pub fn now_secs(args: &crate::Args, sim: &crate::core::Sim) -> i64 {
     if args.offline() {
@@ -452,7 +460,7 @@ fn overlay(
     mut out: ResMut<HudOut>,
     mut ov: ResMut<Ov>,
     cams: Query<(&Camera, &Transform), With<CamCore>>,
-    quads: Query<(&Panel, &Transform, Option<&panels::HudPanel>)>,
+    quads: Query<(&Panel, &Transform, Option<&panels::HudPanel>, Option<&Keepout>)>,
     mut nodes: Query<(&mut Node, &mut UiTransform, &mut Visibility, &ComputedNode)>,
     mut commands: Commands,
 ) {
@@ -492,8 +500,8 @@ fn overlay(
 
     // the focus panel and the request card on screen
     out.panels.clear();
-    for (p, tr, hp) in &quads {
-        let focus = hp.is_some_and(|h| h.kind == panels::Kind::Focus);
+    for (p, tr, hp, keep) in &quads {
+        let focus = hp.is_some_and(|h| h.kind == panels::Kind::Focus) || keep == Some(&Keepout::Hide);
         if (focus || p.id == crate::panel::PanelId::Moment) && p.op.x > 0.3 {
             if let Some(r) = panel_rect(cam, &gt, p, tr) {
                 out.panels.push(r);
@@ -501,7 +509,7 @@ fn overlay(
         }
     }
     let pan = out.panels.clone();
-    let fixed: Vec<Rect> = quads.iter().filter(|(p, _, hp)| p.op.x > 0.3 && hp.is_some_and(|h| matches!(h.kind, panels::Kind::Orbits | panels::Kind::Slots))).filter_map(|(p, tr, _)| panel_rect(cam, &gt, p, tr)).collect();
+    let fixed: Vec<Rect> = quads.iter().filter(|(p, _, hp, keep)| p.op.x > 0.3 && (hp.is_some_and(|h| matches!(h.kind, panels::Kind::Orbits | panels::Kind::Slots)) || *keep == Some(&Keepout::Clear))).filter_map(|(p, tr, _, _)| panel_rect(cam, &gt, p, tr)).collect();
 
     // ---- satellite labels
     let hover = swarm.hover.clone().or_else(|| if sim.t > 2.5 { std::env::var("SPHERE_SWARM_HOVER").ok().filter(|h| model.agent(h).is_some()) } else { None });
@@ -534,7 +542,8 @@ fn overlay(
         let o = LABEL0 + i;
         let Some(id) = ov.slot[i].clone() else { continue };
         let node = scene.nodes.iter().find(|n| n.0 == id);
-        let agent = model.agent(&id);
+        // Hold the Swarm labels only the agents that are asking
+        let agent = model.agent(&id).filter(|a| !swarm.game || a.state == State::Needs);
         let proj_p = node.and_then(|n| proj(n.1).map(|p| (n, p)));
         let (Some(a), Some((n, p))) = (agent, proj_p) else {
             ov.on[o] += (0.0 - ov.on[o]) * ease(8.0, dt);

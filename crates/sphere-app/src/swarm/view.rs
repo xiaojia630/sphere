@@ -66,6 +66,10 @@ pub fn keys(
             }
             continue;
         }
+        // the game has its own Esc
+        if swarm.game {
+            continue;
+        }
         match e.key_code {
             KeyCode::Escape if !moment.shown || matches!(swarm.mode, Mode::Request(_)) => {
                 if swarm.mode == Mode::Overview {
@@ -100,22 +104,25 @@ pub fn step(
     let big = motion::dt(Pace::Big, sim.dt);
     let ui = motion::dt(Pace::Ui, sim.dt);
     let focus = matches!(swarm.mode, Mode::Focus(_));
-    let dim = focus || matches!(swarm.mode, Mode::Request(_));
+    let dim = focus || matches!(swarm.mode, Mode::Request(_)) || (swarm.game && swarm.game_panel);
     swarm.amt.t = if swarm.open { 1.0 } else { 0.0 };
     swarm.dim.t = if dim { 1.0 } else { 0.0 };
     swarm.focus_amt.t = if focus { 1.0 } else { 0.0 };
+    swarm.game_amt.t = if swarm.game { 1.0 } else { 0.0 };
     swarm.orbit_tilt.t = swarm.tilt.deg();
     swarm.amt.step(big);
     swarm.dim.step(ui);
     swarm.focus_amt.step(ui);
+    swarm.game_amt.step(ui);
     swarm.orbit_tilt.step(ui);
     ctl.swarm = swarm.amt.x.clamp(0.0, 1.0);
     ctl.swarm_focus = swarm.focus_amt.x.clamp(0.0, 1.0);
+    ctl.swarm_game = swarm.game_amt.x.clamp(0.0, 1.0);
 }
 
 /// The brand's sub line reads "Agent swarm" while the swarm is open.
 fn brand_sub(swarm: Res<Swarm>, mut q: Query<&mut Text, With<crate::homepanels::BrandSub>>) {
-    let want = if swarm.open { "AGENT SWARM" } else { "AGENT OPERATING SYSTEM" };
+    let want = if swarm.open && swarm.game { "HOLD THE SWARM" } else if swarm.open { "AGENT SWARM" } else { "AGENT OPERATING SYSTEM" };
     for mut t in &mut q {
         if t.0 != want {
             t.0 = want.into();

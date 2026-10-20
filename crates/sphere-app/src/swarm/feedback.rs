@@ -86,7 +86,7 @@ pub fn feedback(
     mut ticker: ResMut<SwarmTicker>,
     mut later: Local<Later>,
 ) {
-    if !swarm.open {
+    if !swarm.open || swarm.game {
         events.0.clear();
         later.0.clear();
         return;
