@@ -211,7 +211,8 @@ impl Manager {
             save: save.clone(),
             at: now,
         };
-        self.start_task_for(params, None, vec![], Some(run)).await
+        self.start_task_for(params, None, vec![], Some(run), None)
+            .await
     }
 
     fn save_protocol(&self, protocol: Protocol) -> ApiResult<()> {
@@ -462,6 +463,7 @@ mod tests {
                 model: None,
                 allow_rewrites: false,
                 resume_session: None,
+                parent_task: None,
                 protocol: None,
             };
             let spent = Turn {

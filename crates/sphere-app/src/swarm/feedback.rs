@@ -177,7 +177,7 @@ pub fn idle_hint(mode: &Mode) -> &'static str {
 pub fn status_line(m: &Model, waited_secs: u64) -> String {
     let n = m.agents.iter().filter(|a| !matches!(a.state, State::Merged | State::Stopped)).count();
     let mut s = format!("{n} {}: {} working", if n == 1 { "agent" } else { "agents" }, m.count(State::Working));
-    for (c, what) in [(m.count(State::Needs), "needs you"), (m.count(State::Done), "ready to merge"), (m.count(State::Queued), "queued")] {
+    for (c, what) in [(m.count(State::Needs), "needs you"), (m.ready(), "ready to merge"), (m.count(State::Queued), "queued")] {
         if c > 0 {
             s.push_str(&format!(", {c} {what}"));
         }

@@ -84,6 +84,9 @@ pub enum Verdict {
     Ask,
 }
 
+/// The server-wide rule that lets an agent use Sphere's own tools.
+pub const SPHERE_TOOLS_RULE: &str = "mcp__sphere";
+
 pub struct Ctx<'a> {
     pub branch: Option<&'a str>,
 }
@@ -213,6 +216,9 @@ impl Policy {
 
     /// The `--settings` JSON for an agent.
     pub fn settings_json(&self, allow_rewrites: bool) -> Value {
+        let mut allow = self.allow.clone();
+        // Sphere's own tools (see `helpers`) only talk to Sphere: no card for them.
+        push_unique(&mut allow, vec![SPHERE_TOOLS_RULE.to_string()]);
         let mut deny = self.deny.clone();
         let mut ask = self.ask.clone();
         if !allow_rewrites {
@@ -228,7 +234,7 @@ impl Policy {
             sandbox["network"] = json!({ "allowedDomains": self.allowed_domains });
         }
         json!({
-            "permissions": { "allow": self.allow, "deny": deny, "ask": ask },
+            "permissions": { "allow": allow, "deny": deny, "ask": ask },
             "sandbox": sandbox,
         })
     }
@@ -270,6 +276,10 @@ impl Policy {
         match best {
             Some((Decision::Allow, n)) => Verdict::Allow(n),
             Some((Decision::Deny, n)) => Verdict::Deny(n),
+            // Settings already allow these; this covers an ask that arrives anyway.
+            _ if tool.starts_with(crate::agent_proto::SPHERE_TOOL_PREFIX) => {
+                Verdict::Allow(SPHERE_TOOLS_RULE.into())
+            }
             _ => Verdict::Ask,
         }
     }
@@ -583,6 +593,32 @@ decision = "allow"
             p.decide("Bash", &push("sphere/fix-login"), &Ctx { branch: None }),
             Verdict::Ask
         );
+    }
+
+    #[test]
+    fn sphere_tools_never_ask() {
+        let s = Policy::default().settings_json(false);
+        assert!(s["permissions"]["allow"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r == "mcp__sphere"));
+        let ctx = Ctx { branch: None };
+        let mut p = Policy::default();
+        let call = |p: &Policy, tool| p.decide(tool, &json!({}), &ctx);
+        assert_eq!(
+            call(&p, "mcp__sphere__start_helper"),
+            Verdict::Allow("mcp__sphere".into())
+        );
+        // Other MCP tools are decided as before.
+        assert_eq!(call(&p, "mcp__other__start_helper"), Verdict::Ask);
+        // Even a catch-all ask rule does not turn them into a card.
+        p.auto.push(auto("*", None, Decision::Ask));
+        assert!(matches!(
+            call(&p, "mcp__sphere__wait_for_helpers"),
+            Verdict::Allow(_)
+        ));
+        assert_eq!(call(&p, "mcp__other__x"), Verdict::Ask);
     }
 
     #[test]

@@ -111,6 +111,25 @@ pub fn relax(boxes: &mut [(Vec2, Vec2)], safe: Rect, iters: usize) {
     }
 }
 
+/// Moves each box clear of the fixed panels (Orbits, Run slots) by the shortest slide that stays inside `safe`.
+pub fn clear_of(boxes: &mut [(Vec2, Vec2)], fixed: &[Rect], safe: Rect) {
+    const GAP: f32 = 8.0;
+    let hit = |c: Vec2, s: Vec2, f: &Rect| c.x + s.x / 2.0 > f.min.x - GAP && c.x - s.x / 2.0 < f.max.x + GAP && c.y + s.y / 2.0 > f.min.y - GAP && c.y - s.y / 2.0 < f.max.y + GAP;
+    for b in boxes.iter_mut() {
+        for f in fixed {
+            if !hit(b.0, b.1, f) {
+                continue;
+            }
+            let h = b.1 / 2.0;
+            let cands = [Vec2::new(f.min.x - GAP - h.x, b.0.y), Vec2::new(f.max.x + GAP + h.x, b.0.y), Vec2::new(b.0.x, f.min.y - GAP - h.y), Vec2::new(b.0.x, f.max.y + GAP + h.y)];
+            let best = cands.into_iter().filter(|c| clamp_box(*c, b.1, safe) == *c && !fixed.iter().any(|g| hit(*c, b.1, g))).min_by(|p, q| p.distance(b.0).total_cmp(&q.distance(b.0)));
+            if let Some(c) = best {
+                b.0 = c;
+            }
+        }
+    }
+}
+
 /// The tooltip's top-left: 22 px right and 18 px below the pointer, on the left of it when it would pass `w - 12`.
 pub fn tip_pos(p: Vec2, size: Vec2, w: f32) -> Vec2 {
     let x = if p.x + 22.0 + size.x > w - 12.0 { p.x - 22.0 - size.x } else { p.x + 22.0 };
@@ -280,7 +299,8 @@ fn build_label(c: &mut Commands, f: &UiFonts, root: Entity, owner: usize, a: &mo
     };
     // repo, chip, percent
     let meta = c.spawn(Node { width: percent(100), flex_direction: dir, align_items: AlignItems::Center, column_gap: px(8), ..default() }).id();
-    let rp = text(c, owner, repo.to_uppercase(), &f.ui600, 9.5, 1.6, mute());
+    // a NEW chip takes the repo's place: the ring already says which repo it is
+    let rp = text(c, owner, if a.unseen { String::new() } else { repo.to_uppercase() }, &f.ui600, 9.5, 1.6, mute());
     let (cb, cbg, ctx) = match a.state {
         State::Needs => (acc, Some(acc), Color::BLACK),
         State::Done | State::Merged => (ok, None, ok),
@@ -292,11 +312,23 @@ fn build_label(c: &mut Commands, f: &UiFonts, root: Entity, owner: usize, a: &mo
         let sq = boxed(c, owner, Node { width: px(5), height: px(5), ..default() }, Some(tc(Role::Fill)), None);
         c.entity(chip).add_child(sq);
     }
-    let ct = text(c, owner, model::chip(a.state).to_uppercase(), &f.ui600, 9.5, 1.5, ctx);
+    let ct = text(c, owner, model::chip_of(a).to_uppercase(), &f.ui600, 9.5, 1.5, ctx);
     c.entity(chip).add_child(ct);
+    let new = a.unseen.then(|| {
+        let fill = tc(Role::Fill);
+        let n = boxed(c, owner, Node { padding: UiRect { left: px(6), right: px(6), top: px(3), bottom: px(2) }, border: UiRect::all(px(1)), flex_direction: dir, align_items: AlignItems::Center, column_gap: px(5), ..default() }, None, Some(fill));
+        let sq = boxed(c, owner, Node { width: px(5), height: px(5), ..default() }, Some(fill), None);
+        let t = text(c, owner, "NEW", &f.ui600, 9.5, 1.5, fill);
+        c.entity(n).add_children(&[sq, t]);
+        n
+    });
     let sp = c.spawn(Node { flex_grow: 1.0, ..default() }).id();
     let pc = text(c, owner, model::pct(a), &f.mono, 10.5, 0.0, if done { ok } else { hot });
-    c.entity(meta).add_children(&[rp, chip, sp, pc]);
+    c.entity(meta).add_children(&[rp, chip]);
+    if let Some(n) = new {
+        c.entity(meta).add_child(n);
+    }
+    c.entity(meta).add_children(&[sp, pc]);
     // step and cost
     let st = c.spawn(Node { width: percent(100), flex_direction: dir, align_items: AlignItems::Center, column_gap: px(7), ..default() }).id();
     if !queued {
@@ -469,6 +501,7 @@ fn overlay(
         }
     }
     let pan = out.panels.clone();
+    let fixed: Vec<Rect> = quads.iter().filter(|(p, _, hp)| p.op.x > 0.3 && hp.is_some_and(|h| matches!(h.kind, panels::Kind::Orbits | panels::Kind::Slots))).filter_map(|(p, tr, _)| panel_rect(cam, &gt, p, tr)).collect();
 
     // ---- satellite labels
     let hover = swarm.hover.clone().or_else(|| if sim.t > 2.5 { std::env::var("SPHERE_SWARM_HOVER").ok().filter(|h| model.agent(h).is_some()) } else { None });
@@ -520,9 +553,9 @@ fn overlay(
         // which side: the scene's rule (80 px from the core), else ours from the node's offset to the core
         let side = if n.4 != 0.0 { n.4 } else { side_for(ov.side[o], p.x - proj(Vec3::new(0.0, 22.0, 0.0)).map(|c| c.x).unwrap_or(size.x / 2.0)) };
         let left = side < 0.0;
-        let repo = model.repos.get(a.repo).map(|r| r.key.as_str()).unwrap_or("");
+        let repo = if a.parent.is_some() { "helper" } else { model.repos.get(a.repo).map(|r| r.key.as_str()).unwrap_or("") };
         let hov_on = hv_t > 0.5;
-        let key = format!("{}|{}|{}|{:?}|{}|{}|{}|{}|{}", a.title, repo, model::pct(a), a.state, a.step, model::cost(a), left, hov_on, ov.theme);
+        let key = format!("{}|{}|{}|{:?}|{}|{}|{}|{}|{}|{}", a.title, repo, model::pct(a), a.state, a.step, model::cost(a), left, hov_on, ov.theme, a.unseen);
         if ov.key[o] != key {
             ov.key[o] = key;
             let at = nodes.get(ov.roots[o]).map(|x| (x.0.left, x.0.top)).unwrap_or_default();
@@ -545,7 +578,11 @@ fn overlay(
     }
     // relax the visible ones, then ease each toward its target
     let mut boxes: Vec<(Vec2, Vec2)> = ls.iter().map(|l| (l.target, l.size)).collect();
-    relax(&mut boxes, safe, 5);
+    clear_of(&mut boxes, &fixed, safe);
+    for _ in 0..6 {
+        relax(&mut boxes, safe, 1);
+        clear_of(&mut boxes, &fixed, safe);
+    }
     out.labels.clear();
     for (l, b) in ls.iter().zip(&boxes) {
         let o = LABEL0 + l.i;
@@ -603,7 +640,7 @@ fn overlay(
         ring(RING0 + r, p, name, sub, 0.85 * rd, &mut ov, &mut commands, &mut nodes);
     }
     let (rn, rs) = model::ready_label(model);
-    ring(READY, (!model.repos.is_empty()).then_some(scene.ready_label_pos), rn, rs, (if model.count(State::Done) > 0 { 0.85 } else { 0.5 }) * rd, &mut ov, &mut commands, &mut nodes);
+    ring(READY, (!model.repos.is_empty()).then_some(scene.ready_label_pos), rn, rs, (if model.ready() > 0 { 0.85 } else { 0.5 }) * rd, &mut ov, &mut commands, &mut nodes);
 
     // ---- conflict chips at the arcs' crests
     for i in 0..N_CHIPS {
@@ -829,6 +866,20 @@ mod tests {
         relax(&mut b, safe, 1);
         assert_eq!(b[0].0.x, 500.0);
         assert!(b[1].0.y - b[0].0.y > 50.0);
+    }
+
+    #[test]
+    fn labels_slide_clear_of_the_fixed_panels() {
+        let safe = rect(36.0, 80.0, 1564.0, 900.0);
+        let panel = rect(1300.0, 60.0, 1560.0, 300.0);
+        let mut b = [(Vec2::new(1250.0, 280.0), Vec2::new(268.0, 78.0))];
+        clear_of(&mut b, &[panel], safe);
+        let r = Rect::from_center_size(b[0].0, b[0].1);
+        assert!(r.max.x <= panel.min.x || r.min.y >= panel.max.y || r.max.y <= panel.min.y);
+        // a box that is already clear stays put
+        let mut c = [(Vec2::new(400.0, 500.0), Vec2::new(268.0, 78.0))];
+        clear_of(&mut c, &[panel], safe);
+        assert_eq!(c[0].0, Vec2::new(400.0, 500.0));
     }
 
     #[test]

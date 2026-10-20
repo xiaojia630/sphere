@@ -142,6 +142,10 @@ impl CodeApp {
         self.task = None;
         self.version += 1;
     }
+    /// The agent's task on screen: the one under review while the app is open on an agent (not on a folder).
+    pub fn shown_task<'a>(&self, tasks: &'a [TaskView]) -> Option<&'a TaskView> {
+        if self.open && self.amt.x > 0.5 && !self.is_folder() { pick(self, tasks) } else { None }
+    }
     pub fn close(&mut self) {
         self.open = false;
         self.armed = None;

@@ -199,16 +199,23 @@ pub fn event_lines(e: &Event, st: &Style) -> Vec<String> {
         EventBody::TaskCreated {
             title,
             budget_usd,
+            parent_task,
             protocol,
             ..
-        } => one(format!(
-            "task created: {title} (budget {}{})",
-            money(*budget_usd),
-            protocol
-                .as_ref()
-                .map(|p| format!(", started by protocol {p}"))
-                .unwrap_or_default()
-        )),
+        } => match parent_task {
+            Some(parent) => one(format!(
+                "helper started by {parent}: {title} (budget {})",
+                money(*budget_usd)
+            )),
+            None => one(format!(
+                "task created: {title} (budget {}{})",
+                money(*budget_usd),
+                protocol
+                    .as_ref()
+                    .map(|p| format!(", started by protocol {p}"))
+                    .unwrap_or_default()
+            )),
+        },
         EventBody::WorkspaceReady {
             workdir, branch, ..
         } => match branch {
@@ -369,6 +376,7 @@ pub fn event_lines(e: &Event, st: &Style) -> Vec<String> {
         }
         EventBody::Warning { message } => one(format!("warning: {message}")),
         EventBody::TakenOver { from } => one(format!("taken over from {from}")),
+        EventBody::Seen {} => vec![],
         EventBody::MemoryChanged { notes } => one(format!(
             "notes changed ({} now)",
             count_notes(*notes as usize)
@@ -512,9 +520,10 @@ pub fn ls_table(snap: &Snapshot) -> Vec<String> {
         "{:<5} {:<10} {:>7}  {:<28} {}",
         "ID", "STATE", "API EST", "BRANCH", "TITLE"
     )];
-    for t in &snap.tasks {
-        out.push(task_row(t));
-        out.push(format!("      {}", clip(&t.status, 100)));
+    for (t, depth) in in_tree_order(&snap.tasks) {
+        let pad = "  ".repeat(depth);
+        out.push(task_row(t, &pad));
+        out.push(format!("      {pad}{}", clip(&t.status, 100)));
     }
     for r in &snap.requests {
         let tag = if r.status == RequestStatus::Snoozed {
@@ -540,10 +549,37 @@ pub fn ls_table(snap: &Snapshot) -> Vec<String> {
     out
 }
 
-fn task_row(t: &TaskView) -> String {
+/// Tasks with each one's helpers right after it, and how deep each sits. A
+/// helper whose parent is not in the list is shown as a top-level task.
+fn in_tree_order(tasks: &[TaskView]) -> Vec<(&TaskView, usize)> {
+    let known = |id: &str| tasks.iter().any(|t| t.id == id);
+    let mut out = vec![];
+    for t in tasks {
+        if t.parent_task.as_deref().is_some_and(known) {
+            continue;
+        }
+        out.push((t, 0));
+        for h in tasks
+            .iter()
+            .filter(|h| h.parent_task.as_deref() == Some(t.id.as_str()))
+        {
+            out.push((h, 1));
+        }
+    }
+    out
+}
+
+fn task_row(t: &TaskView, pad: &str) -> String {
+    let id = format!("{pad}{}", t.id);
+    let proto = t
+        .protocol
+        .as_ref()
+        .map(|p| format!("  (protocol {p})"))
+        .unwrap_or_default();
+    let new = if t.unseen { "  [new]" } else { "" };
     format!(
-        "{:<5} {:<10} {:>7}  {:<28} {}{}",
-        t.id,
+        "{:<5} {:<10} {:>7}  {:<28} {}{proto}{new}",
+        id,
         t.state.as_str(),
         est(t.cost_usd),
         clip(
@@ -553,10 +589,6 @@ fn task_row(t: &TaskView) -> String {
             28
         ),
         clip(&t.title, 60),
-        t.protocol
-            .as_ref()
-            .map(|p| format!("  (protocol {p})"))
-            .unwrap_or_default()
     )
 }
 
@@ -902,6 +934,7 @@ mod tests {
                 model: None,
                 allow_rewrites: false,
                 resume_session: None,
+                parent_task: None,
                 protocol: protocol.map(str::to_string),
             },
         });
@@ -1021,6 +1054,7 @@ mod tests {
                         model: None,
                         allow_rewrites: false,
                         resume_session: None,
+                        parent_task: None,
                         protocol: protocol.map(str::to_string),
                     },
                 ),
@@ -1052,5 +1086,138 @@ mod tests {
         let on = Style { color: true };
         assert!(on.bold("x").contains("\x1b["));
         assert_eq!(plain().bold("x"), "x");
+    }
+
+    fn created(task: &str, title: &str, parent: Option<&str>) -> Event {
+        ev(
+            task,
+            EventBody::TaskCreated {
+                title: title.into(),
+                prompt: "p".into(),
+                repo: "/r".into(),
+                in_place: false,
+                budget_usd: 5.0,
+                mode: None,
+                model: None,
+                allow_rewrites: false,
+                resume_session: None,
+                parent_task: parent.map(str::to_string),
+                protocol: None,
+            },
+        )
+    }
+
+    #[test]
+    fn a_helper_start_names_its_parent() {
+        let lines = event_lines(&created("t2", "Check docs", Some("t1")), &plain());
+        assert_eq!(
+            lines,
+            vec!["[t2] helper started by t1: Check docs (budget $5.00)"]
+        );
+        let lines = event_lines(&created("t1", "Fix it", None), &plain());
+        assert_eq!(lines, vec!["[t1] task created: Fix it (budget $5.00)"]);
+    }
+
+    #[test]
+    fn ls_indents_helpers_under_their_parent_and_marks_new_results() {
+        let mut views = sphere_proto::Views::default();
+        let mut seq = 0;
+        let mut apply = |task: &str, body: EventBody| {
+            seq += 1;
+            views.apply(&Event {
+                seq,
+                task: task.into(),
+                at: "2026-03-04T05:06:07.000Z".into(),
+                body,
+            });
+        };
+        let turn = || EventBody::Turn {
+            ok: true,
+            interrupted: false,
+            summary: "ok".into(),
+            turns: Some(1),
+            duration_ms: None,
+            cost_usd: None,
+            cost_delta_usd: 0.0,
+        };
+        let create = |title: &str, parent: Option<&str>| {
+            let EventBody::TaskCreated { .. } = created("x", title, parent).body else {
+                unreachable!()
+            };
+            created("x", title, parent).body
+        };
+        apply("t1", create("Parent", None));
+        apply("t2", create("Other", None));
+        apply("t3", create("Helper", Some("t1")));
+        apply(
+            "t1",
+            EventBody::AgentStarted {
+                child: "c".into(),
+                pid: 1,
+                resumed: false,
+                briefed: 0,
+            },
+        );
+        apply(
+            "t2",
+            EventBody::AgentStarted {
+                child: "d".into(),
+                pid: 2,
+                resumed: false,
+                briefed: 0,
+            },
+        );
+        apply(
+            "t3",
+            EventBody::AgentStarted {
+                child: "e".into(),
+                pid: 3,
+                resumed: false,
+                briefed: 0,
+            },
+        );
+        apply("t3", turn());
+        apply("t2", turn());
+        let snap = Snapshot {
+            seq,
+            tasks: views.tasks().into_iter().cloned().collect(),
+            requests: vec![],
+            cost_today_usd: 0.0,
+            daily_cap_usd: None,
+            max_concurrent: None,
+            waited_today_secs: 0,
+            memory: vec![],
+            protocols: vec![],
+        };
+        let lines = ls_table(&snap);
+        let ids: Vec<&str> = lines
+            .iter()
+            .skip(1)
+            .filter_map(|l| l.split_whitespace().next())
+            .filter(|w| w.starts_with('t') && w.len() <= 3)
+            .collect();
+        assert_eq!(
+            ids,
+            ["t1", "t3", "t2"],
+            "the helper follows its parent: {lines:#?}"
+        );
+        let helper = lines.iter().find(|l| l.contains("Helper")).unwrap();
+        assert!(helper.starts_with("  t3"), "indented: {helper:?}");
+        // A helper's result is never new; a top-level one is.
+        assert!(!helper.contains("[new]"), "{helper:?}");
+        let other = lines.iter().find(|l| l.contains("Other")).unwrap();
+        assert!(other.ends_with("Other  [new]"), "{other:?}");
+        assert!(!lines
+            .iter()
+            .find(|l| l.contains("Parent"))
+            .unwrap()
+            .contains("[new]"));
+        // Its status line sits under it, as deep.
+        let at = lines.iter().position(|l| l.contains("Helper")).unwrap();
+        assert!(
+            lines[at + 1].starts_with("        Done"),
+            "{:?}",
+            lines[at + 1]
+        );
     }
 }

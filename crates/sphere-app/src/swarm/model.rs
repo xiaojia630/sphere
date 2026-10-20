@@ -61,8 +61,19 @@ pub struct Agent {
     pub queue_pos: Option<usize>,
     /// bumps each time a new step lands (the satellite pulses)
     pub step_seq: u64,
+    /// the agent that started this one as its helper (a satellite near it, with a tether)
+    pub parent: Option<String>,
+    /// finished and you haven't looked at it yet (a NEW mark)
+    pub unseen: bool,
     /// a protocol started the task: its label carries a PROTOCOL tag
     pub protocol: bool,
+}
+
+impl Agent {
+    /// Done and ready to merge: a helper's work goes to its parent, so it has nothing to merge.
+    pub fn ready(&self) -> bool {
+        self.state == State::Done && self.parent.is_none()
+    }
 }
 
 /// A repo with agents on it: one orbit ring.
@@ -100,6 +111,10 @@ impl Model {
     }
     pub fn count(&self, s: State) -> usize {
         self.agents.iter().filter(|a| a.state == s).count()
+    }
+    /// How many are ready to merge (helpers are not).
+    pub fn ready(&self) -> usize {
+        self.agents.iter().filter(|a| a.ready()).count()
     }
     /// The agents in a run slot (working or waiting on you), in model order.
     pub fn running(&self) -> Vec<&Agent> {
@@ -184,6 +199,7 @@ pub fn from_shared(s: &Shared, prev: &Model, now: i64) -> Model {
     let mut picks: Vec<(u8, i64, Agent, String)> = Vec::new();
     for t in &s.tasks {
         let before = prev.agent(&t.id).map(|a| a.state);
+        let helper = t.parent_task.is_some();
         let started = parse_rfc3339(&t.started_at).unwrap_or(0);
         let updated = parse_rfc3339(&t.updated_at).unwrap_or(started);
         let state = match t.state {
@@ -193,6 +209,14 @@ pub fn from_shared(s: &Shared, prev: &Model, now: i64) -> Model {
             // until the app knows which finished branches are merged, finished agents wait off screen (otherwise
             // a launch shows old merged work as ready, then plays its merge again)
             // a question answered changed no files: nothing to merge, so it is not on the ring
+            // a helper's result goes to its parent: it stays beside it for a day, with nothing to merge
+            TaskState::Done if helper => {
+                if now - updated <= DAY {
+                    State::Done
+                } else {
+                    continue;
+                }
+            }
             TaskState::Done if crate::live::answered(t) => continue,
             TaskState::Done if !s.merged_checked => continue,
             TaskState::Done => {
@@ -254,11 +278,15 @@ pub fn from_shared(s: &Shared, prev: &Model, now: i64) -> Model {
             State::Queued => 2,
             State::Done => 3,
         };
-        let agent = Agent { id: t.id.clone(), title: t.title.clone(), repo: 0, branch: t.branch.clone().unwrap_or_default(), state, p, step, cost: t.cost_usd, started_at: started, steps, files, editing, queue_pos: None, step_seq, protocol: t.protocol.is_some() };
+        let agent = Agent { id: t.id.clone(), title: t.title.clone(), repo: 0, branch: t.branch.clone().unwrap_or_default(), state, p, step, cost: t.cost_usd, started_at: started, steps, files, editing, queue_pos: None, step_seq, parent: t.parent_task.clone(), unseen: t.unseen, protocol: t.protocol.is_some() };
         picks.push((rank, tie, agent, t.repo.clone()));
     }
-    picks.sort_by(|x, y| (x.0, x.1, &x.2.id).cmp(&(y.0, y.1, &y.2.id)));
+    // helpers go behind every other agent, so they never push one out of the nine
+    picks.sort_by(|x, y| (x.2.parent.is_some(), x.0, x.1, &x.2.id).cmp(&(y.2.parent.is_some(), y.0, y.1, &y.2.id)));
     picks.truncate(MAX_AGENTS);
+    // a finished helper stays only beside its parent
+    let ids: Vec<String> = picks.iter().map(|p| p.2.id.clone()).collect();
+    picks.retain(|p| p.2.state != State::Done || p.2.parent.as_ref().is_none_or(|q| ids.contains(q)));
     // stable order: the agents already on screen keep their places, new ones follow, oldest first
     let place = |id: &str| prev.agents.iter().position(|a| a.id == id);
     picks.sort_by_key(|p| match place(&p.2.id) {
@@ -310,11 +338,15 @@ struct Def {
     script: &'static [(&'static str, Option<&'static str>)],
     done: &'static str,
     hist: &'static [&'static str],
+    /// the agent that started this one as its helper
+    parent: Option<&'static str>,
+    /// finished and not looked at yet
+    unseen: bool,
 }
 
 const DEMO_REPOS: [&str; 3] = ["api-server", "web-app", "sphere-cli"];
 
-const DEFS: [Def; 6] = [
+const DEFS: [Def; 8] = [
     Def {
         id: "rate",
         repo: 0,
@@ -340,6 +372,8 @@ const DEFS: [Def; 6] = [
         ],
         done: "PR #482 · CI green",
         hist: &["planning the limiter", "reading src/auth.rs", "creating branch feat/login-rate-limit"],
+        parent: None,
+        unseen: false,
     },
     Def {
         id: "redis",
@@ -369,6 +403,8 @@ const DEFS: [Def; 6] = [
         ],
         done: "PR #483 · CI green",
         hist: &["migrating the session type", "reading src/session.rs", "creating branch feat/redis-sessions"],
+        parent: None,
+        unseen: false,
     },
     Def {
         id: "checkout",
@@ -394,6 +430,8 @@ const DEFS: [Def; 6] = [
         ],
         done: "20 / 20 pass · PR #232",
         hist: &["reproduced the flake 3 / 20", "reading e2e/helpers.ts", "creating branch fix/checkout-flake"],
+        parent: None,
+        unseen: false,
     },
     Def {
         id: "react",
@@ -419,6 +457,8 @@ const DEFS: [Def; 6] = [
         ],
         done: "PR #233 · CI green",
         hist: &[],
+        parent: None,
+        unseen: false,
     },
     Def {
         id: "json",
@@ -435,6 +475,8 @@ const DEFS: [Def; 6] = [
         script: &[],
         done: "PR #77 · CI green",
         hist: &["opening PR #77", "committing 3 files", "running cargo test · 24 / 24"],
+        parent: None,
+        unseen: true,
     },
     Def {
         id: "cold",
@@ -459,6 +501,44 @@ const DEFS: [Def; 6] = [
         ],
         done: "PR #78 · 410 → 210 ms",
         hist: &[],
+        parent: None,
+        unseen: false,
+    },
+    Def {
+        id: "rate-tests",
+        repo: 0,
+        title: "Write limiter tests",
+        branch: "feat/login-rate-limit",
+        state: State::Working,
+        p: 0.5,
+        cost: 0.05,
+        age: 70,
+        iv: 3.4,
+        files: &[("tests/login_rate.rs", 36, 0)],
+        first: ("writing tests/login_rate.rs", Some("tests/login_rate.rs")),
+        script: &[("running cargo test · 6 / 9", None), ("editing tests/login_rate.rs", Some("tests/login_rate.rs"))],
+        done: "9 / 9 passing",
+        hist: &[],
+        parent: Some("rate"),
+        unseen: false,
+    },
+    Def {
+        id: "rate-audit",
+        repo: 0,
+        title: "Audit the login routes",
+        branch: "feat/login-rate-limit",
+        state: State::Done,
+        p: 1.0,
+        cost: 0.04,
+        age: 140,
+        iv: 3.5,
+        files: &[],
+        first: ("3 routes need the limiter", None),
+        script: &[],
+        done: "3 routes need the limiter",
+        hist: &["reading src/routes.rs"],
+        parent: Some("rate"),
+        unseen: false,
     },
 ];
 
@@ -496,6 +576,8 @@ fn demo_agent(d: &Def) -> Agent {
         files: d.files.iter().map(|f| File { path: f.0.to_string(), added: f.1, removed: f.2 }).collect(),
         editing: if d.state == State::Working { d.first.1.map(str::to_string) } else { None },
         queue_pos: None,
+        parent: d.parent.map(str::to_string),
+        unseen: d.unseen,
         protocol: false,
     }
 }
@@ -515,7 +597,7 @@ fn finish_demo(agents: Vec<Agent>) -> Model {
     }
     let conflicts = find_conflicts(&agents, false);
     let cost_today = DEMO_TODAY0 + agents.iter().map(|a| a.cost).sum::<f64>();
-    Model { agents, repos: demo_repos(), conflicts, limit: 3, cost_today }
+    Model { agents, repos: demo_repos(), conflicts, limit: 4, cost_today }
 }
 
 /// The prototype's six example agents at the start (SPEC 9).
@@ -638,6 +720,15 @@ pub fn chip(s: State) -> &'static str {
     }
 }
 
+/// The state chip's words for this agent: a finished helper is "Done", not ready to merge.
+pub fn chip_of(a: &Agent) -> &'static str {
+    if a.state == State::Done && a.parent.is_some() {
+        "Done"
+    } else {
+        chip(a.state)
+    }
+}
+
 /// "48%", queued "—".
 pub fn pct(a: &Agent) -> String {
     if a.state == State::Queued {
@@ -679,7 +770,8 @@ pub fn tooltip(a: &Agent, m: &Model, now: i64) -> (String, String) {
     let repo = m.repos.get(a.repo).map(|r| r.key.as_str()).unwrap_or("");
     let status = match a.state {
         State::Needs => "Needs you · click to answer".to_string(),
-        State::Done => "Ready to merge · click to open".to_string(),
+        State::Done if a.parent.is_some() => format!("Done · helper of {}", a.parent.as_deref().and_then(|p| m.agent(p)).map_or("another agent", |p| p.title.as_str())),
+        State::Done => if a.unseen { "New result · ready to merge · click to open" } else { "Ready to merge · click to open" }.to_string(),
         State::Queued => "Queued · starts when a slot frees".to_string(),
         State::Working => format!("Step {} · {} · {} running", a.step_seq, a.step, fmt_dur(now - a.started_at)),
         State::Merged => "Merged".to_string(),
@@ -704,7 +796,7 @@ pub fn ring_label(m: &Model, repo: usize) -> (String, String) {
 
 /// The outer ring's label: ("Ready to merge", "1 ready" or "none yet").
 pub fn ready_label(m: &Model) -> (String, String) {
-    let n = m.count(State::Done);
+    let n = m.ready();
     ("Ready to merge".to_string(), if n == 0 { "none yet".to_string() } else { format!("{n} ready") })
 }
 
@@ -716,7 +808,7 @@ pub fn strip(m: &Model) -> Vec<(String, String, Option<State>)> {
         (n.to_string(), if n == 1 { "agent" } else { "agents" }.to_string(), None),
         (m.count(State::Working).to_string(), "working".to_string(), None),
         (m.count(State::Needs).to_string(), "needs you".to_string(), Some(State::Needs)),
-        (m.count(State::Done).to_string(), "ready".to_string(), Some(State::Done)),
+        (m.ready().to_string(), "ready".to_string(), Some(State::Done)),
         (m.count(State::Queued).to_string(), "queued".to_string(), None),
     ]
 }
@@ -816,7 +908,7 @@ pub fn diff(prev: &Model, next: &Model) -> Vec<Event> {
             match n.state {
                 State::Working if p.state == State::Queued => out.push(Event::Started(n.id.clone())),
                 State::Needs => out.push(Event::NeedsYou(n.id.clone())),
-                State::Done if matches!(p.state, State::Working | State::Needs) => out.push(Event::Ready(n.id.clone())),
+                State::Done if matches!(p.state, State::Working | State::Needs) && n.parent.is_none() => out.push(Event::Ready(n.id.clone())),
                 State::Merged => out.push(Event::Merged(n.id.clone())),
                 State::Stopped => out.push(Event::Stopped(n.id.clone())),
                 _ => {}
@@ -1252,31 +1344,31 @@ mod tests {
         let now = DEMO_NOW;
         assert_eq!(tooltip(get("rate"), &m, now), ("Add rate limiting to /login".to_string(), "api-server · Step 4 · editing src/auth.rs · 3:12 running".to_string()));
         assert_eq!(tooltip(get("react"), &m, now).1, "web-app · Queued · starts when a slot frees");
-        assert_eq!(tooltip(get("json"), &m, now).1, "sphere-cli · Ready to merge · click to open");
+        assert_eq!(tooltip(get("json"), &m, now).1, "sphere-cli · New result · ready to merge · click to open");
         let mut n = get("rate").clone();
         n.state = State::Needs;
         assert_eq!(tooltip(&n, &m, now).1, "api-server · Needs you · click to answer");
-        assert_eq!(ring_label(&m, 0), ("api-server".to_string(), "2 agents".to_string()));
+        assert_eq!(ring_label(&m, 0), ("api-server".to_string(), "4 agents".to_string()));
         let mut one = m.clone();
         one.agents.retain(|a| a.id != "react");
         assert_eq!(ring_label(&one, 1), ("web-app".to_string(), "1 agent".to_string()));
         assert_eq!(ready_label(&m), ("Ready to merge".to_string(), "1 ready".to_string()));
         assert_eq!(ready_label(&Model::default()).1, "none yet");
         let sg = strip(&m);
-        assert_eq!(sg[0], ("6".to_string(), "agents".to_string(), None));
-        assert_eq!(sg[1], ("3".to_string(), "working".to_string(), None));
+        assert_eq!(sg[0], ("8".to_string(), "agents".to_string(), None));
+        assert_eq!(sg[1], ("4".to_string(), "working".to_string(), None));
         assert_eq!(sg[2], ("0".to_string(), "needs you".to_string(), Some(State::Needs)));
         assert_eq!(sg[3], ("1".to_string(), "ready".to_string(), Some(State::Done)));
         assert_eq!(sg[4], ("2".to_string(), "queued".to_string(), None));
-        assert_eq!(strip_cost(&m), "≈ $1.84");
+        assert_eq!(strip_cost(&m), "≈ $1.93");
         assert_eq!(strip(&one)[0].1, "agents");
         let (rows, q) = slots(&m);
         assert_eq!(rows[0], Some(("Add rate limiting to /login".to_string(), "34%".to_string(), 0.34, false)));
-        assert_eq!(rows.len(), 3);
+        assert_eq!(rows.len(), 4);
         assert_eq!(q, vec!["Upgrade React to 19", "Speed up cold start"]);
-        assert_eq!(slots_header(&m), "3 of 3");
+        assert_eq!(slots_header(&m), "4 of 4");
         let o = orbits(&m);
-        assert_eq!(o[0], ("api-server".to_string(), "main · 2 agents".to_string(), vec![State::Working, State::Working]));
+        assert_eq!(o[0], ("api-server".to_string(), "main · 4 agents".to_string(), vec![State::Working, State::Working, State::Working, State::Done]));
         assert_eq!(o[2].2, vec![State::Done, State::Queued]);
         assert_eq!(orbits_header(&m), "3 repos");
         assert_eq!(orbits_header(&Model { repos: vec![Repo::default()], ..Default::default() }), "1 repo");
@@ -1291,11 +1383,11 @@ mod tests {
     fn demo_matches_the_spec() {
         let m = demo();
         let ids: Vec<&str> = m.agents.iter().map(|a| a.id.as_str()).collect();
-        assert_eq!(ids, vec!["rate", "redis", "checkout", "react", "json", "cold"]);
+        assert_eq!(ids, vec!["rate", "redis", "checkout", "react", "json", "cold", "rate-tests", "rate-audit"]);
         assert_eq!(m.repos.iter().map(|r| (r.key.as_str(), r.branch.as_str())).collect::<Vec<_>>(), vec![("api-server", "main"), ("web-app", "main"), ("sphere-cli", "main")]);
         let states: Vec<State> = m.agents.iter().map(|a| a.state).collect();
-        assert_eq!(states, vec![State::Working, State::Working, State::Working, State::Queued, State::Done, State::Queued]);
-        assert_eq!(m.agents.iter().map(|a| a.repo).collect::<Vec<_>>(), vec![0, 0, 1, 1, 2, 2]);
+        assert_eq!(states, vec![State::Working, State::Working, State::Working, State::Queued, State::Done, State::Queued, State::Working, State::Done]);
+        assert_eq!(m.agents.iter().map(|a| a.repo).collect::<Vec<_>>(), vec![0, 0, 1, 1, 2, 2, 0, 0]);
         assert_eq!(m.agent("checkout").unwrap().p, 0.71);
         assert_eq!(m.agent("redis").unwrap().cost, 0.31);
         assert_eq!(m.agent("rate").unwrap().steps.len(), 4);
@@ -1308,7 +1400,7 @@ mod tests {
         assert_eq!(DEMO_NOW - m.agent("rate").unwrap().started_at, 192);
         assert_eq!(m.agent("react").unwrap().queue_pos, Some(0));
         assert_eq!(m.agent("cold").unwrap().queue_pos, Some(1));
-        assert_eq!(m.limit, 3);
+        assert_eq!(m.limit, 4);
         // the conflict is live at the start, like the prototype
         assert_eq!(m.conflicts.len(), 0);
     }

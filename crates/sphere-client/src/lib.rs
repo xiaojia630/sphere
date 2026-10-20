@@ -259,6 +259,14 @@ impl Client {
         Ok(())
     }
 
+    /// You looked at a task's result: it is no longer new.
+    pub async fn seen(&self, task: &str) -> Result<()> {
+        let _: api::Ack = self
+            .call(method::TASK_SEEN, api::TaskParams { task: task.into() })
+            .await?;
+        Ok(())
+    }
+
     pub async fn set_mode(&self, task: &str, mode: &str) -> Result<()> {
         let _: api::Ack = self
             .call(

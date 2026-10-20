@@ -298,6 +298,7 @@ mod tests {
             model: None,
             allow_rewrites: false,
             resume_session: None,
+            parent_task: None,
             protocol: None,
         }
     }

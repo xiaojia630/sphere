@@ -7,6 +7,7 @@
 
 use crate::agent_proto::{self as proto, Block, CanUseTool, Incoming};
 use crate::config::Config;
+use crate::helpers::{self, Routed, Tool, ToolCall, Wait, WaitEnd};
 use crate::host_link::HostLink;
 use crate::hub::Hub;
 use crate::policy::{self, Ctx, Policy, Verdict};
@@ -81,6 +82,34 @@ struct Rt {
     launching: HashSet<String>,
     /// The wait for the daily cap to end, while queued tasks sit it out.
     cap_wait: Option<AbortHandle>,
+    /// Parents inside `wait_for_helpers`. They hold no concurrency slot, or
+    /// their queued helpers could never start.
+    waiting: HashSet<String>,
+}
+
+/// Marks a parent as waiting for its helpers until dropped, on any exit.
+struct WaitGuard {
+    mgr: Arc<Manager>,
+    task: String,
+}
+
+impl WaitGuard {
+    fn new(mgr: &Arc<Manager>, task: &str) -> WaitGuard {
+        mgr.rt.lock().unwrap().waiting.insert(task.to_string());
+        // The slot it held is free: queued helpers may start.
+        mgr.pump();
+        WaitGuard {
+            mgr: mgr.clone(),
+            task: task.to_string(),
+        }
+    }
+}
+
+impl Drop for WaitGuard {
+    fn drop(&mut self) {
+        // The parent carries on, even if that briefly exceeds the limit.
+        self.mgr.rt.lock().unwrap().waiting.remove(&self.task);
+    }
 }
 
 #[derive(Default)]
@@ -100,6 +129,10 @@ pub struct Manager {
     ctl_seq: AtomicU64,
     info: Mutex<Info>,
     outside: tokio::sync::Mutex<Outside>,
+    /// Held while a helper is checked against the limits and started.
+    helper_lock: tokio::sync::Mutex<()>,
+    /// Requests of helpers that `wait_for_helpers` already told an agent about.
+    reported_asks: Mutex<HashSet<String>>,
     /// What protocols read the time from: the system's clock and zone, or a test's.
     pub(crate) clock: Arc<dyn Clock>,
     pub(crate) zone: Arc<dyn Zone + Send + Sync>,
@@ -131,6 +164,8 @@ pub struct Plan {
     pub refresh_files: bool,
     pub turn_ended: bool,
     pub ctl: Option<(String, bool, Option<String>)>,
+    /// A call to one of Sphere's own tools, answered on its own task.
+    pub mcp_call: Option<ToolCall>,
 }
 
 /// Everything `plan_line` may look at.
@@ -298,6 +333,23 @@ pub fn plan_line(cx: &LineCtx, inc: Incoming) -> Plan {
                 });
             }
         }
+        Incoming::McpMessage {
+            request_id,
+            server_name,
+            message,
+        } => {
+            if server_name != "sphere" {
+                plan.writes.push(proto::control_error(
+                    &request_id,
+                    &format!("no MCP server `{server_name}` is served by this host"),
+                ));
+            } else {
+                match helpers::route(cx.view, &request_id, &message) {
+                    Routed::Write(line) => plan.writes.push(line),
+                    Routed::Call(call) => plan.mcp_call = Some(call),
+                }
+            }
+        }
         Incoming::Other(ty) => tracing::debug!(%task, %ty, "ignoring agent message"),
     }
     plan
@@ -409,6 +461,8 @@ impl Manager {
             ctl_seq: AtomicU64::new(0),
             info: Mutex::new(Info::default()),
             outside: tokio::sync::Mutex::new(Outside::default()),
+            helper_lock: tokio::sync::Mutex::new(()),
+            reported_asks: Mutex::new(HashSet::new()),
             clock,
             zone,
             protocol_lock: tokio::sync::Mutex::new(()),
@@ -548,7 +602,12 @@ impl Manager {
         let start: Vec<String> = {
             let mut rt = self.rt.lock().unwrap();
             let launching = rt.launching.clone();
+            let waiting = rt.waiting.clone();
             let (active, queued) = self.hub.view(|v| {
+                let waiting = waiting
+                    .iter()
+                    .filter(|t| v.task(t).is_some_and(|t| t.state.is_active()))
+                    .count();
                 let queued_launching = launching
                     .iter()
                     .filter(|t| v.task(t).is_some_and(|t| t.state == TaskState::Queued))
@@ -559,7 +618,10 @@ impl Manager {
                     .filter(|t| !launching.contains(&t.id))
                     .map(|t| t.id.clone())
                     .collect();
-                (v.active_count() + queued_launching, queued)
+                (
+                    (v.active_count() + queued_launching).saturating_sub(waiting),
+                    queued,
+                )
             });
             let free = self.cfg.max_concurrent.saturating_sub(active);
             let pick: Vec<String> = queued.into_iter().take(free).collect();
@@ -683,6 +745,7 @@ impl Manager {
             mode: view.mode.as_deref().unwrap_or("acceptEdits"),
             model: view.model.as_deref(),
             resume: resume.as_deref(),
+            sphere_tools: true,
             briefing: briefing.as_ref().map(|b| b.text.as_str()),
         });
         let mut args = self.cfg.agent_args.clone();
@@ -947,6 +1010,11 @@ impl Manager {
             if let Some(tx) = self.ctl.lock().unwrap().remove(&id) {
                 let _ = tx.send(CtlReply { ok, error });
             }
+        }
+        if let Some(call) = plan.mcp_call {
+            // A wait can take minutes; the agent's output keeps being read meanwhile.
+            let (this, task, child) = (self.clone(), task.to_string(), child.to_string());
+            tokio::spawn(async move { this.sphere_tool(&task, &child, call).await });
         }
         if plan.refresh_files {
             self.refresh_files(task);
@@ -1242,7 +1310,7 @@ impl Manager {
     // ---- API ---------------------------------------------------------------------
 
     pub async fn start_task(self: &Arc<Self>, p: api::StartParams) -> ApiResult<api::StartResult> {
-        self.start_task_inner(p, None, vec![]).await
+        self.start_task_inner(p, None, vec![], None).await
     }
 
     /// `extra` events are committed with the creation, before anything else.
@@ -1253,8 +1321,10 @@ impl Manager {
         p: api::StartParams,
         resume_session: Option<String>,
         extra: Vec<EventBody>,
+        parent_task: Option<String>,
     ) -> ApiResult<api::StartResult> {
-        self.start_task_for(p, resume_session, extra, None).await
+        self.start_task_for(p, resume_session, extra, None, parent_task)
+            .await
     }
 
     /// Starts a task like `task.start`. `protocol` is the protocol that starts it on its schedule: the task carries
@@ -1266,6 +1336,7 @@ impl Manager {
         resume_session: Option<String>,
         extra: Vec<EventBody>,
         protocol: Option<ProtocolRun>,
+        parent_task: Option<String>,
     ) -> ApiResult<api::StartResult> {
         if p.prompt.trim().is_empty() && resume_session.is_none() {
             return Err(ApiError(RpcError {
@@ -1318,6 +1389,7 @@ impl Manager {
             model: p.model,
             allow_rewrites: p.allow_rewrites,
             resume_session,
+            parent_task,
             protocol: protocol.as_ref().map(|r| r.save.id.clone()),
         }];
         bodies.extend(extra);
@@ -1494,7 +1566,30 @@ impl Manager {
         Ok(())
     }
 
+    /// Stop a task, and with it the helpers it started that are still working.
     pub async fn stop(self: &Arc<Self>, task: &str) -> ApiResult<()> {
+        let helpers: Vec<String> = self.hub.view(|v| {
+            v.helpers_of(task)
+                .into_iter()
+                .filter(|h| helpers::is_working(h))
+                .map(|h| h.id.clone())
+                .collect()
+        });
+        let mut set = tokio::task::JoinSet::new();
+        for h in helpers {
+            let this = self.clone();
+            set.spawn(async move {
+                if let Err(e) = this.stop_one(&h).await {
+                    tracing::warn!(task = %h, "could not stop a helper: {}", e.0);
+                }
+            });
+        }
+        let result = self.stop_one(task).await;
+        while set.join_next().await.is_some() {}
+        result
+    }
+
+    async fn stop_one(self: &Arc<Self>, task: &str) -> ApiResult<()> {
         let view = self.task_view(task)?;
         if view.child.is_none() && !view.state.is_active() && view.state != TaskState::Queued {
             return Ok(()); // nothing is running
@@ -1531,6 +1626,17 @@ impl Manager {
                     .map_err(ApiError::from)?;
                 self.pump();
             }
+        }
+        Ok(())
+    }
+
+    /// You looked at the task's result. Nothing changes for one that is not new.
+    pub fn seen(&self, task: &str) -> ApiResult<()> {
+        let unseen = self.task_view(task)?.unseen;
+        if unseen {
+            self.hub
+                .publish(task, EventBody::Seen {})
+                .map_err(ApiError::from)?;
         }
         Ok(())
     }
@@ -1667,6 +1773,126 @@ impl Manager {
             )
             .map_err(ApiError::from)?;
         Ok(())
+    }
+
+    // ---- Sphere's tools for agents --------------------------------------------------
+
+    /// Run one `tools/call` from `task`'s agent and write the answer. Runs on
+    /// its own task. After a restart the reader may read the same call again;
+    /// every tool is safe to run twice (a start finds the helper it already
+    /// started).
+    async fn sphere_tool(self: &Arc<Self>, task: &str, child: &str, call: ToolCall) {
+        let is_helper = self
+            .hub
+            .view(|v| v.task(task).is_some_and(|t| t.parent_task.is_some()));
+        let result = match helpers::parse_tool(&call.name, &call.args, is_helper) {
+            Ok(tool) => self.run_sphere_tool(task, tool).await,
+            Err(e) => Err(e),
+        };
+        let (text, is_error) = match result {
+            Ok(Some(text)) => (text, false),
+            Ok(None) => return, // the agent stopped waiting for an answer
+            Err(e) => (e, true),
+        };
+        let line = helpers::call_reply(&call, &text, is_error);
+        if let Err(e) = self.host.write(child, line.as_bytes()).await {
+            tracing::warn!(%task, "could not answer a tool call: {e:#}");
+        }
+    }
+
+    async fn run_sphere_tool(
+        self: &Arc<Self>,
+        parent: &str,
+        tool: Tool,
+    ) -> Result<Option<String>, String> {
+        let api = |e: ApiError| e.0.message;
+        match tool {
+            Tool::Start { title, prompt } => {
+                // The check and the start are one step, or two calls at once could pass it together.
+                let _guard = self.helper_lock.lock().await;
+                let (existing, repo) = self.hub.view(|v| {
+                    helpers::check_start(v, parent)?;
+                    let existing =
+                        helpers::already_started(v, parent, &title, &prompt).map(|t| t.id.clone());
+                    Ok::<_, String>((existing, v.task(parent).map(|t| t.repo.clone())))
+                })?;
+                if let Some(id) = existing {
+                    return Ok(Some(started_line(&id, false, self.cfg.max_concurrent)));
+                }
+                let started = self
+                    .start_task_inner(
+                        api::StartParams {
+                            repo: repo.unwrap_or_default(),
+                            prompt,
+                            title: Some(title),
+                            ..Default::default()
+                        },
+                        None,
+                        vec![],
+                        Some(parent.to_string()),
+                    )
+                    .await
+                    .map_err(api)?;
+                let queued = self
+                    .hub
+                    .view(|v| v.task(&started.task).map(|t| t.state == TaskState::Queued))
+                    .unwrap_or(false);
+                Ok(Some(started_line(
+                    &started.task,
+                    queued,
+                    self.cfg.max_concurrent,
+                )))
+            }
+            Tool::Wait { helpers, timeout } => {
+                let ids = self.hub.view(|v| match helpers {
+                    Some(ids) => ids
+                        .into_iter()
+                        .map(|i| helpers::own_helper(v, parent, &i).map(|t| t.id.clone()))
+                        .collect::<Result<Vec<_>, _>>(),
+                    None => Ok(v
+                        .helpers_of(parent)
+                        .into_iter()
+                        .map(|t| t.id.clone())
+                        .collect()),
+                })?;
+                if ids.is_empty() {
+                    return Ok(Some("You have not started any helpers.".into()));
+                }
+                let reported = self.reported_asks.lock().unwrap().clone();
+                let _waiting = WaitGuard::new(self, parent);
+                let began = std::time::Instant::now();
+                let end = helpers::wait(&self.hub, parent, &ids, timeout, &reported).await;
+                match &end {
+                    WaitEnd::Done(Wait::ParentGone) => return Ok(None),
+                    WaitEnd::Done(Wait::NeedsHuman { request, .. }) => {
+                        self.reported_asks.lock().unwrap().insert(request.clone());
+                    }
+                    _ => {}
+                }
+                Ok(Some(helpers::wait_report(
+                    &self.hub,
+                    &ids,
+                    &end,
+                    began.elapsed(),
+                )))
+            }
+            Tool::Message { helper, text } => {
+                let id = self
+                    .hub
+                    .view(|v| helpers::own_helper(v, parent, &helper).map(|t| t.id.clone()))?;
+                self.send(&id, text).await.map_err(api)?;
+                Ok(Some(format!(
+                    "Sent to helper {id}. Use wait_for_helpers for its answer."
+                )))
+            }
+            Tool::Stop { helper } => {
+                let id = self
+                    .hub
+                    .view(|v| helpers::own_helper(v, parent, &helper).map(|t| t.id.clone()))?;
+                self.stop_one(&id).await.map_err(api)?;
+                Ok(Some(format!("Stopped helper {id}.")))
+            }
+        }
     }
 
     // ---- reads ---------------------------------------------------------------------
@@ -2013,6 +2239,7 @@ impl Manager {
                 vec![EventBody::TakenOver {
                     from: where_.clone(),
                 }],
+                None,
             )
             .await?;
         Ok(api::TakeOverResult {
@@ -2071,6 +2298,7 @@ impl Manager {
             },
             Some(p.session_id),
             vec![],
+            None,
         )
         .await
     }
@@ -2087,6 +2315,19 @@ impl Manager {
         }
         roots
     }
+}
+
+/// What `start_helper` answers.
+fn started_line(id: &str, queued: bool, max_concurrent: usize) -> String {
+    let mut line = format!(
+        "Started helper {id}. Its permission asks go to the human; use wait_for_helpers for its result."
+    );
+    if queued {
+        line.push_str(&format!(
+            " It is queued: Sphere runs {max_concurrent} agents at once, so it starts when one finishes."
+        ));
+    }
+    line
 }
 
 /// Does the task hold its session: queued, working, or with an agent alive?
@@ -2154,6 +2395,7 @@ mod tests {
                 model: None,
                 allow_rewrites: false,
                 resume_session: None,
+                parent_task: None,
                 protocol: None,
             },
         });
@@ -2514,6 +2756,60 @@ mod tests {
     }
 
     #[test]
+    fn messages_for_the_sphere_server_are_answered_or_handed_on() {
+        let v = view();
+        let hub = |_: ()| "r1".to_string();
+        let run = |inc: Incoming| {
+            let policy = Policy::default();
+            plan_line(
+                &LineCtx {
+                    view: &v,
+                    policy: &policy,
+                    open_requests: &[],
+                    revises: None,
+                    interrupted: false,
+                    child: "c1",
+                    offset: 0,
+                    len: 10,
+                    excerpt_bytes: 4096,
+                    new_request_id: &|| hub(()),
+                },
+                inc,
+            )
+        };
+        let mcp = |server: &str, message: Value| Incoming::McpMessage {
+            request_id: "req_1".into(),
+            server_name: server.into(),
+            message,
+        };
+        let list = run(mcp(
+            "sphere",
+            json!({"jsonrpc":"2.0","id":3,"method":"tools/list"}),
+        ));
+        assert_eq!(list.writes.len(), 1);
+        assert!(list.writes[0].contains("start_helper") && list.writes[0].contains("req_1"));
+        assert!(list.mcp_call.is_none() && list.events.is_empty());
+
+        let call = run(mcp(
+            "sphere",
+            json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"wait_for_helpers","arguments":{}}}),
+        ));
+        assert!(call.writes.is_empty(), "a call is answered later");
+        assert_eq!(
+            call.mcp_call.map(|c| c.name),
+            Some("wait_for_helpers".into())
+        );
+
+        // A server we do not serve gets an error, not silence.
+        let other = run(mcp(
+            "elsewhere",
+            json!({"jsonrpc":"2.0","id":1,"method":"tools/list"}),
+        ));
+        assert!(other.writes[0].contains("\"subtype\":\"error\""));
+        assert!(other.mcp_call.is_none());
+    }
+
+    #[test]
     fn controls_deltas_cancels_and_unknowns() {
         let v = view();
         let p = Policy::default();
@@ -2608,6 +2904,7 @@ mod tests {
                     model: None,
                     allow_rewrites: false,
                     resume_session: None,
+                    parent_task: None,
                     protocol: None,
                 },
             )

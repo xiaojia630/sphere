@@ -567,7 +567,7 @@ fn build_focus(c: &mut Commands, ui: &Ui, root: Entity, m: &Model, a: &Agent, no
     c.entity(body).add_child(db);
     // actions: Open in Code / Ask / Stop, or Merge first for a finished agent
     let ac = c.spawn((Node { flex_direction: FlexDirection::Row, align_items: AlignItems::Center, column_gap: px(12), margin: UiRect::top(px(14)), padding: UiRect::top(px(12)), border: UiRect::top(px(1)), ..default() }, BorderColor::all(with_alpha(line(), 0.15)))).id();
-    if a.state == State::Done {
+    if a.ready() {
         let b1 = button(c, ui, "Merge", ok(), true, KeyCode::Enter);
         let b2 = button(c, ui, "Open in Code", hot(), false, KeyCode::KeyO);
         let b3 = button(c, ui, "Ask", hot(), false, KeyCode::KeyA);
