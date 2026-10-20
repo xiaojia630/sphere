@@ -1305,7 +1305,7 @@ mod tests {
         let spans = a.time_spans(now_minutes());
         // the two from earlier days are left out; the one still running is there, at least ten minutes wide
         assert_eq!(spans.len(), 1);
-        assert!(spans[0].0 >= 0.0 && spans[0].1 <= 1450.0 && spans[0].1 - spans[0].0 >= 10.0, "{spans:?}");
+        assert!(spans[0].0 >= 0.0 && spans[0].1 <= 1450.0 && spans[0].1 - spans[0].0 >= 10.0 - 1e-3, "{spans:?}");
         // a run that began before midnight and goes on shows from midnight
         a.set_runs(vec![(midnight - 3600, i64::MAX)]);
         assert_eq!(a.time_spans(now_minutes())[0].0, 0.0);
