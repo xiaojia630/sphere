@@ -16,6 +16,8 @@ pub struct Live {
     pub requests: Vec<RequestView>,
     /// Task titles by id, for the card header.
     pub titles: Vec<(String, String)>,
+    /// Helper tasks and the task that started each: (helper id, parent id).
+    pub parents: Vec<(String, String)>,
     /// The repo each task works in, by id (the checkout's root, as notes are kept by).
     pub repos: Vec<(String, String)>,
     /// Seconds agents waited on you today over requests already closed (sphered's count, from the link's mirror).
@@ -27,6 +29,12 @@ pub struct Live {
 impl Live {
     pub fn title<'a>(&'a self, task: &'a str) -> &'a str {
         self.titles.iter().find(|(id, _)| id == task).map(|(_, t)| t.as_str()).unwrap_or(task)
+    }
+
+    /// The title of the task that started `task` as its helper, when it is one.
+    pub fn parent_title(&self, task: &str) -> Option<&str> {
+        let (_, p) = self.parents.iter().find(|(id, _)| id == task)?;
+        Some(self.title(p))
     }
 
     /// The repo a task works in, when the task is known.
@@ -107,7 +115,7 @@ impl Toasts {
 /// A finished task that changed no files: a question answered, nothing to merge.
 pub fn answered(t: &TaskView) -> bool { t.state == TaskState::Done && t.files.is_empty() }
 
-fn row(t: &TaskView, merged: bool) -> Agent {
+fn row(t: &TaskView, merged: bool, parent: Option<&str>) -> Agent {
     let (state, chip) = match t.state {
         TaskState::Queued | TaskState::Working => (AState::Working, None),
         TaskState::NeedsYou => (AState::Needs, None),
@@ -135,26 +143,32 @@ fn row(t: &TaskView, merged: bool) -> Agent {
     if name.chars().count() > 30 {
         name = name.chars().take(29).collect::<String>() + "…";
     }
-    let mut step = step;
+    // a helper says whose it is
+    let mut step = match parent {
+        Some(p) => format!("Helper of {p} · {step}"),
+        None => step,
+    };
     if step.chars().count() > 44 {
         step = step.chars().take(43).collect::<String>() + "…";
     }
     Agent { name, state, p: p.max(0.04), step, rate: 0.0, figure, chip, protocol: t.protocol.is_some() }
 }
 
-/// How a task ranks on the panel: what needs you first, then working, then queued, then the finished.
+/// How a task ranks on the panel: what needs you first, then working, then queued, then the finished. Helpers go
+/// behind every other agent (unless they need you), so they never push one out of the four rows.
 fn rank(t: &TaskView) -> u8 {
-    match t.state {
-        TaskState::NeedsYou => 0,
+    let r = match t.state {
+        TaskState::NeedsYou => return 0,
         TaskState::Working => 1,
         TaskState::Queued => 2,
         _ => 3,
-    }
+    };
+    if t.parent_task.is_some() { r + 4 } else { r }
 }
 
 /// A task that failed or was stopped before its agent ever ran (no session, no step, no cost): a start
 /// that didn't happen, not an agent.
-fn never_ran(t: &TaskView) -> bool {
+pub(crate) fn never_ran(t: &TaskView) -> bool {
     matches!(t.state, TaskState::Failed | TaskState::Stopped) && t.session_id.is_none() && t.steps == 0 && t.cost_usd == 0.0
 }
 
@@ -196,7 +210,8 @@ fn pick(tasks: &[TaskView], merged: &HashSet<String>, now: i64) -> Roster {
             top[at] = i;
         }
     }
-    let rows = top[..n].iter().map(|&i| row(&tasks[i], merged.contains(&tasks[i].id))).collect();
+    let parent_of = |t: &TaskView| t.parent_task.as_deref().and_then(|p| tasks.iter().find(|o| o.id == p)).map(|o| o.title.as_str());
+    let rows = top[..n].iter().map(|&i| row(&tasks[i], merged.contains(&tasks[i].id), parent_of(&tasks[i]))).collect();
     Roster { rows, total, working, waiting }
 }
 
@@ -405,6 +420,11 @@ pub fn sync(svc: Res<Service>, mut live: ResMut<Live>, mut agents: ResMut<Agents
     open.sort_by(|a, b| a.opened_at.cmp(&b.opened_at));
     let new_requests = open.len() != live.requests.len() || open.iter().zip(&live.requests).any(|(a, b)| *a != b);
     let titles = (s.roster != seen.0).then(|| s.tasks.iter().map(|t| (t.id.clone(), t.title.clone())).collect::<Vec<_>>());
+    let parents: Vec<(String, String)> = s.tasks.iter().filter_map(|t| Some((t.id.clone(), t.parent_task.clone()?))).collect();
+    if live.parents != parents {
+        live.parents = parents;
+        live.version += 1;
+    }
     let repos = (s.roster != seen.0).then(|| s.tasks.iter().map(|t| (t.id.clone(), t.repo.clone())).collect::<Vec<_>>());
     seen.0 = s.roster;
     let new_titles = titles.as_ref().is_some_and(|t| *t != live.titles);
@@ -630,7 +650,7 @@ mod tests {
         };
         let mut v: Vec<&TaskView> = tasks.iter().filter(|t| keep(t)).collect();
         v.sort_by(|a, b| rank(a).cmp(&rank(b)).then_with(|| b.updated_at.cmp(&a.updated_at)));
-        v.into_iter().map(|t| row(t, merged.contains(&t.id))).collect()
+        v.into_iter().map(|t| row(t, merged.contains(&t.id), None)).collect()
     }
 
     #[test]
@@ -742,7 +762,7 @@ mod tests {
     // ---- the systems, on a bare App
 
     fn args() -> crate::Args {
-        crate::Args { cmd: None, bench: None, shot: None, record: None, record_frames: 180, frames: 120, depth: false, orbit: false, apps: false, work: false, swarm: false, code: false, git: false, open_app: None, icon: false, aa: "smaa".into(), offscreen: false, collapsed: false, focus_term: false, msaa: true, size: (1600, 1000), dt: 0.05, demo: false, live: false, moment: false, elsewhere: false, calendar: false, takeover: None, memory: None, protocols: None, fixit: None, theme: None, motion: None, output: None }
+        crate::Args { cmd: None, bench: None, shot: None, record: None, record_frames: 180, frames: 120, depth: false, orbit: false, apps: false, work: false, swarm: false, code: false, git: false, open_app: None, icon: false, aa: "smaa".into(), offscreen: false, collapsed: false, focus_term: false, msaa: true, size: (1600, 1000), dt: 0.05, demo: false, live: false, moment: false, elsewhere: false, calendar: false, takeover: None, memory: None, protocols: None, fixit: None, theme: None, motion: None, goto: None, tasks: false, output: None }
     }
 
     fn app() -> App {
@@ -941,11 +961,11 @@ mod tests {
         let mut t = task("q1", TaskState::Done, "2026-10-19T00:00:00Z");
         t.last_say = "It is slow because of the N+1 query.\nMore detail.".into();
         assert!(answered(&t));
-        let a = row(&t, false);
+        let a = row(&t, false, None);
         assert_eq!((a.chip, a.step.as_str()), (Some("ANSWERED"), "It is slow because of the N+1 query."));
         t.files = vec![sphere_proto::FileStat { path: "a.rs".into(), added: 1, removed: 0 }];
         assert!(!answered(&t));
-        assert_eq!(row(&t, false).chip, None);
+        assert_eq!(row(&t, false, None).chip, None);
         assert!(!answered(&task("q2", TaskState::Working, "2026-10-19T00:00:00Z")));
     }
 }

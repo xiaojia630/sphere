@@ -565,11 +565,12 @@ pub fn draw(mut commands: Commands, svc: Res<Service>, roots: Option<Res<WorkRoo
     if w.amt.x < 0.001 && !w.open {
         return;
     }
-    let (task, run) = {
+    let (task, run, kin) = {
         let s = svc.shared.lock().unwrap();
         let t = pick(&w, &s.tasks).cloned();
         let r = t.as_ref().and_then(|t| s.runs.get(&t.id).cloned()).unwrap_or_default();
-        (t, r)
+        let kin = t.as_ref().map(|t| Kin::of(t, &s.tasks)).unwrap_or_default();
+        (t, r, kin)
     };
     // the clock ticks once a second (a frozen look test stops it, so its screenshot can settle)
     let clock = if sim.frozen { seen.3 } else { time.elapsed_secs() as i64 };
@@ -580,7 +581,7 @@ pub fn draw(mut commands: Commands, svc: Res<Service>, roots: Option<Res<WorkRoo
         *last = cur;
         w.out_scroll = if done { usize::MAX } else { 0 };
     }
-    let key = (run.version, task.as_ref().map(|t| format!("{}{:?}{}", t.id, t.state, t.status)), w.version, clock, w.out_scroll);
+    let key = (run.version, task.as_ref().map(|t| format!("{}{:?}{}{:?}{:?}", t.id, t.state, t.status, kin.helpers, kin.parent)), w.version, clock, w.out_scroll);
     if *seen == key {
         return;
     }
@@ -597,7 +598,7 @@ pub fn draw(mut commands: Commands, svc: Res<Service>, roots: Option<Res<WorkRoo
         c.entity(roots.run).add_child(b);
         return;
     };
-    build_run(c, roots.run, &f, &t, &run);
+    build_run(c, roots.run, &f, &t, &run, &kin);
     let max = build_out(c, roots.out, &f, &t, &run, w.out_scroll);
     if w.out_scroll > max {
         w.out_scroll = max; // wheel overshoot; the next frame redraws at the clamped spot
@@ -611,18 +612,22 @@ pub fn draw(mut commands: Commands, svc: Res<Service>, roots: Option<Res<WorkRoo
     }
 }
 
-fn state_chip(c: &mut Commands, f: &UiFonts, t: &TaskView) -> Entity {
-    let (label, bg, fg, border) = match t.state {
+pub(crate) fn state_chip(c: &mut Commands, f: &UiFonts, t: &TaskView) -> Entity {
+    chip_of(c, f, t.state, false)
+}
+
+/// A state chip for `state`; `small` is the one in lists (the helpers under a run, Go to's rows).
+pub(crate) fn chip_of(c: &mut Commands, f: &UiFonts, state: TaskState, small: bool) -> Entity {
+    let (label, bg, fg, border) = match state {
         TaskState::Working | TaskState::Queued => ("WORKING", Color::NONE, role_color(Role::Line), with_alpha(role_color(Role::Line), 0.72)),
         TaskState::NeedsYou => ("NEEDS YOU", role_color(Role::Acc), Color::BLACK, role_color(Role::Acc)),
         TaskState::Done => ("DONE", Color::NONE, role_color(Role::Ok), with_alpha(role_color(Role::Ok), 0.72)),
         TaskState::Failed => ("FAILED", Color::NONE, role_color(Role::Bad), with_alpha(role_color(Role::Bad), 0.72)),
         TaskState::Stopped => ("STOPPED", Color::NONE, role_color(Role::Dim), with_alpha(role_color(Role::Dim), 0.72)),
     };
-    let chip = c
-        .spawn((Node { min_width: px(78), padding: UiRect { left: px(6), right: px(6), top: px(4), bottom: px(3) }, border: UiRect::all(px(1)), justify_content: JustifyContent::Center, flex_shrink: 0.0, ..default() }, BackgroundColor(bg), BorderColor::all(border)))
-        .id();
-    let tx = c.spawn((Text::new(label), font(&f.ui700, 10.0, 2.0), TextColor(fg), LineHeight::Px(10.0))).id();
+    let (min_w, pad, size, sp) = if small { (66.0, UiRect { left: px(5), right: px(5), top: px(3), bottom: px(2) }, 9.0, 1.6) } else { (78.0, UiRect { left: px(6), right: px(6), top: px(4), bottom: px(3) }, 10.0, 2.0) };
+    let chip = c.spawn((Node { min_width: px(min_w), padding: pad, border: UiRect::all(px(1)), justify_content: JustifyContent::Center, flex_shrink: 0.0, ..default() }, BackgroundColor(bg), BorderColor::all(border))).id();
+    let tx = c.spawn((Text::new(label), font(&f.ui700, size, sp), TextColor(fg), LineHeight::Px(size))).id();
     c.entity(chip).add_child(tx);
     chip
 }
@@ -691,12 +696,41 @@ pub fn parse_rfc3339(s: &str) -> Option<i64> {
     Some(secs)
 }
 
+/// The helpers a task started and, when it is one, whose helper it is: what the run panel says about the family.
+#[derive(Default, Clone, Debug, PartialEq)]
+pub(crate) struct Kin {
+    /// (title, state), in the order they started
+    pub helpers: Vec<(String, TaskState)>,
+    /// the title of the task it is a helper of
+    pub parent: Option<String>,
+}
+
+impl Kin {
+    pub fn of(t: &TaskView, tasks: &[TaskView]) -> Kin {
+        Kin {
+            helpers: tasks.iter().filter(|h| h.parent_task.as_deref() == Some(t.id.as_str())).map(|h| (h.title.clone(), h.state)).collect(),
+            parent: t.parent_task.as_deref().and_then(|p| tasks.iter().find(|o| o.id == p)).map(|o| o.title.clone()),
+        }
+    }
+}
+
+/// "1 working · 1 done" for the helpers' states (needs you and failed count when there are any), upper case.
+pub(crate) fn helpers_summary(h: &[(String, TaskState)]) -> String {
+    let n = |f: fn(TaskState) -> bool| h.iter().filter(|(_, s)| f(*s)).count();
+    [(n(|s| matches!(s, TaskState::Working | TaskState::Queued)), "WORKING"), (n(|s| s == TaskState::NeedsYou), "NEEDS YOU"), (n(|s| s == TaskState::Done), "DONE"), (n(|s| matches!(s, TaskState::Failed | TaskState::Stopped)), "FAILED")]
+        .iter()
+        .filter(|(k, _)| *k > 0)
+        .map(|(k, w)| format!("{k} {w}"))
+        .collect::<Vec<_>>()
+        .join(" · ")
+}
+
 /// The tag for a task whose agent was told some of your notes when it started: "BRIEFED · 3".
 fn briefed_tag(notes: u32) -> Option<String> {
     (notes > 0).then(|| format!("BRIEFED · {notes}"))
 }
 
-fn build_run(c: &mut Commands, root: Entity, f: &UiFonts, t: &TaskView, run: &Run) {
+fn build_run(c: &mut Commands, root: Entity, f: &UiFonts, t: &TaskView, run: &Run, kin: &Kin) {
     let line = role_color(Role::Line);
     let hot = role_color(Role::Hot);
     let dim = role_color(Role::Dim);
@@ -726,6 +760,8 @@ fn build_run(c: &mut Commands, root: Entity, f: &UiFonts, t: &TaskView, run: &Ru
     // a session taken over from a terminal says where it came from, and how many of your notes it was told at the start
     // (see `memory`) shows beside it
     let from = run.taken_from.as_ref().map(|w| c.spawn((Text::new(format!("Taken over from {}", crate::takeover::from_label(w))), font(&f.ui500, 12.0, 0.96), TextColor(role_color(Role::Fill)), LineHeight::Px(15.0))).id());
+    // a helper says whose it is
+    let helper_of = kin.parent.as_ref().map(|p| c.spawn((Text::new(format!("Helper of {}", clip(p, 34))), font(&f.ui500, 12.0, 0.96), TextColor(role_color(Role::Fill)), LineHeight::Px(15.0))).id());
     let briefed = briefed_tag(t.briefed).map(|tag| {
         let ch = c.spawn((Node { padding: UiRect { left: px(6), right: px(6), top: px(4), bottom: px(3) }, border: UiRect::all(px(1)), flex_shrink: 0.0, ..default() }, BorderColor::all(with_alpha(line, 0.34)))).id();
         let tx = c.spawn((Text::new(tag), font(&f.ui700, 10.0, 2.0), TextColor(line), LineHeight::Px(10.0))).id();
@@ -757,11 +793,16 @@ fn build_run(c: &mut Commands, root: Entity, f: &UiFonts, t: &TaskView, run: &Ru
         c.entity(row).add_children(&tags);
         c.entity(b).add_child(row);
     }
+    if let Some(h) = helper_of {
+        c.entity(b).add_child(h);
+    }
     c.entity(b).add_child(pr);
-    // steps: the last eight (seven when a row of tags takes the room of one)
+    // steps: the last eight, fewer when the helpers take some of the room
+    let shown_helpers = kin.helpers.len().min(3);
+    let room = (if kin.helpers.is_empty() { 8 } else { 7 - shown_helpers }) - !tags.is_empty() as usize;
     let list = c.spawn(Node { flex_direction: FlexDirection::Column, margin: UiRect { top: px(4), ..default() }, ..default() }).id();
     let n = run.steps.len();
-    let first = n.saturating_sub(if tags.is_empty() { 8 } else { 7 });
+    let first = n.saturating_sub(room);
     for (k, s) in run.steps.iter().enumerate().skip(first) {
         let now = k + 1 == n && s.ok.is_none();
         let row = c.spawn(Node { height: px(27), flex_direction: FlexDirection::Row, align_items: AlignItems::Center, column_gap: px(10), ..default() }).id();
@@ -784,6 +825,33 @@ fn build_run(c: &mut Commands, root: Entity, f: &UiFonts, t: &TaskView, run: &Ru
         c.entity(list).add_child(e);
     }
     c.entity(b).add_child(list);
+    // the helpers: a title and a state each
+    if !kin.helpers.is_empty() {
+        let hl = c.spawn((Text::new(format!("HELPERS · {} · {}", kin.helpers.len(), helpers_summary(&kin.helpers))), font(&f.ui700, 9.5, 3.0), TextColor(dim), LineHeight::Px(12.0), Node { margin: UiRect { top: px(8), ..default() }, ..default() })).id();
+        let hs = c.spawn(Node { flex_direction: FlexDirection::Column, ..default() }).id();
+        for (title, state) in kin.helpers.iter().take(3) {
+            let row = c.spawn(Node { height: px(26), flex_direction: FlexDirection::Row, align_items: AlignItems::Center, column_gap: px(10), ..default() }).id();
+            let (nc, nb) = match state {
+                TaskState::Done => (role_color(Role::Ok), role_color(Role::Ok)),
+                TaskState::Failed => (role_color(Role::Bad), role_color(Role::Bad)),
+                TaskState::NeedsYou => (role_color(Role::Acc), role_color(Role::Acc)),
+                TaskState::Working => (role_color(Role::Fill), role_color(Role::Fill)),
+                _ => (Color::NONE, dim),
+            };
+            let node = c.spawn((Node { width: px(7), height: px(7), border: UiRect::all(px(1)), flex_shrink: 0.0, ..default() }, BackgroundColor(nc), BorderColor::all(nb), UiTransform { rotation: Rot2::degrees(45.0), ..default() })).id();
+            let nm = c
+                .spawn((Text::new(clip(title, 28)), font(&f.ui500, 13.0, 0.5), TextColor(line), LineHeight::Px(16.0), TextLayout { linebreak: LineBreak::NoWrap, ..default() }, Node { overflow: Overflow::clip(), flex_shrink: 1.0, flex_grow: 1.0, ..default() }))
+                .id();
+            let chip = chip_of(c, f, *state, true);
+            c.entity(row).add_children(&[node, nm, chip]);
+            c.entity(hs).add_child(row);
+        }
+        if kin.helpers.len() > 3 {
+            let more = c.spawn((Text::new(format!("+{} MORE", kin.helpers.len() - 3)), font(&f.ui700, 9.5, 1.9), TextColor(dim), LineHeight::Px(12.0))).id();
+            c.entity(hs).add_child(more);
+        }
+        c.entity(b).add_children(&[hl, hs]);
+    }
     let sp = c.spawn(Node { flex_grow: 1.0, ..default() }).id();
     c.entity(b).add_child(sp);
     if !run.files.is_empty() {
@@ -1294,7 +1362,7 @@ mod tests {
         let mut app = App::new();
         app.insert_resource(UiFonts { ui500: default(), ui600: default(), ui700: default(), display: default(), mono: default(), mono_bold: default() });
         let root = app.world_mut().spawn(Node::default()).id();
-        app.world_mut().run_system_once(move |mut c: Commands, f: Res<UiFonts>| build_run(&mut c, root, &f, &t, &run)).unwrap();
+        app.world_mut().run_system_once(move |mut c: Commands, f: Res<UiFonts>| build_run(&mut c, root, &f, &t, &run, &Kin::default())).unwrap();
         let world = app.world_mut();
         world.query::<&Text>().iter(world).map(|t| t.0.clone()).collect()
     }
@@ -1430,6 +1498,29 @@ mod tests {
         assert_eq!(wrap("one\n\n  \ntwo three", 20), ["one", "two three"]);
         assert_eq!(wrap("abcdefghij kl", 4), ["abcd", "efgh", "ij", "kl"]);
         assert!(wrap("", 10).is_empty());
+    }
+
+    #[test]
+    fn the_helpers_read_as_counts_by_state() {
+        let h = |s| ("h".to_string(), s);
+        assert_eq!(helpers_summary(&[]), "");
+        assert_eq!(helpers_summary(&[h(TaskState::Working), h(TaskState::Done)]), "1 WORKING · 1 DONE");
+        assert_eq!(helpers_summary(&[h(TaskState::Queued), h(TaskState::Working), h(TaskState::NeedsYou), h(TaskState::Failed), h(TaskState::Stopped)]), "2 WORKING · 1 NEEDS YOU · 2 FAILED");
+    }
+
+    #[test]
+    fn a_task_knows_its_helpers_and_its_parent() {
+        let mk = |id: &str, parent: Option<&str>, state: &str| -> TaskView {
+            serde_json::from_value(serde_json::json!({"id": id, "title": format!("T {id}"), "prompt": "", "state": state, "status": "", "repo": "/r", "in_place": false, "budget_usd": 0.0, "cost_usd": 0.0, "started_at": "", "updated_at": "", "parent_task": parent})).unwrap()
+        };
+        let all = [mk("p", None, "working"), mk("a", Some("p"), "working"), mk("b", Some("p"), "done"), mk("x", None, "done")];
+        let k = Kin::of(&all[0], &all);
+        assert_eq!(k.helpers, vec![("T a".to_string(), TaskState::Working), ("T b".to_string(), TaskState::Done)]);
+        assert_eq!(k.parent, None);
+        let k = Kin::of(&all[1], &all);
+        assert!(k.helpers.is_empty());
+        assert_eq!(k.parent.as_deref(), Some("T p"));
+        assert_eq!(Kin::of(&all[3], &all), Kin::default());
     }
 
     #[test]

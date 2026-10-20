@@ -222,6 +222,11 @@ struct SatGfx {
     marks_m: H,
     /// the discs the marks mesh was built from
     marks_built: Vec<(Vec3, f32, f32)>,
+    /// a helper's tether to its parent
+    tether: Entity,
+    tether_mesh: Handle<Mesh>,
+    tether_m: H,
+    tether_built: Option<(Vec3, Vec3, f32, f32)>,
 }
 
 struct ArcGfx {
@@ -268,6 +273,8 @@ struct Slot {
     pos: Vec3,
     sc: f32,
     fade: f32,
+    /// the agent this one is a helper of
+    parent: Option<String>,
 }
 
 impl Slot {
@@ -305,6 +312,7 @@ impl Slot {
             pos: Vec3::ZERO,
             sc: 1.0,
             fade: 0.0,
+            parent: None,
         }
     }
 }
@@ -408,7 +416,8 @@ fn spawn(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut mats: Res
         let (_, halo) = g.part(sroot, mesh::halo_mesh(HALO_R), Kind::Ring, Role::Line, 0.26, tf);
         let (trail, trail_mesh, trail_m) = g.loose(mesh::trail_mesh(REPOS[0].rad, 1.0), Role::Fill);
         let (marks, marks_mesh, marks_m) = g.loose(mesh::discs_mesh(&[]), Role::Hot);
-        sats.push(SatGfx { root: sroot, shell, ico, edges, fill, gy1, gy1_m, gy2, gy2_m, track, prog, pulse, pulse_m, hov, hov_m, halo, trail, trail_mesh, trail_m, built: None, marks, marks_mesh, marks_m, marks_built: Vec::new() });
+        let (tether, tether_mesh, tether_m) = g.loose(mesh::ribbon_mesh(&[Vec3::ZERO, Vec3::X], 0.5, &[0.0, 0.0]), Role::Line);
+        sats.push(SatGfx { root: sroot, shell, ico, edges, fill, gy1, gy1_m, gy2, gy2_m, track, prog, pulse, pulse_m, hov, hov_m, halo, trail, trail_mesh, trail_m, built: None, marks, marks_mesh, marks_m, marks_built: Vec::new(), tether, tether_mesh, tether_m, tether_built: None });
     }
     let mut arcs = Vec::new();
     for _ in 0..NARC {
@@ -471,7 +480,7 @@ pub fn update(
     if amt < 0.001 {
         if !sc.hidden {
             sc.hidden = true;
-            for e in [sc.root].into_iter().chain(sc.sats.iter().flat_map(|s| [s.root, s.trail, s.marks])).chain(sc.arcs.iter().map(|a| a.e)) {
+            for e in [sc.root].into_iter().chain(sc.sats.iter().flat_map(|s| [s.root, s.trail, s.marks, s.tether])).chain(sc.arcs.iter().map(|a| a.e)) {
                 show(&mut vis, e, false);
             }
             for s in &mut sc.slots {
@@ -541,7 +550,7 @@ pub fn update(
             });
         }
     }
-    let any_done = model.agents.iter().any(|a| a.state == State::Done);
+    let any_done = model.agents.iter().any(|a| a.ready());
     let rd = &mut sc.ready;
     rd.fade = lerp(rd.fade, if any_done { 1.0 } else { 0.4 }, 1.0 - (-3.0 * dt).exp());
     rd.ticks_a += TAU / 160.0 * dt * sc.spin_mul;
@@ -574,6 +583,7 @@ pub fn update(
                 let mut s = Slot::blank();
                 s.alive = true;
                 s.id = a.id.clone();
+                s.parent = a.parent.clone();
                 s.ring = ring;
                 s.ang = pick_angle(&a.id, &taken);
                 s.phase = hash(&a.id, 7) * TAU;
@@ -598,8 +608,12 @@ pub fn update(
     out.marks.clear();
     out.crests.clear();
     let tgt_state = |s: &Slot| if s.gone { State::Stopped } else { s.state };
-    for si in 0..NSAT {
+    // a helper follows its parent, so the parents move first
+    let mut order: Vec<usize> = (0..NSAT).collect();
+    order.sort_by_key(|&i| sc.slots[i].parent.is_some());
+    for si in order {
         if !sc.slots[si].alive {
+            show(&mut vis, sc.sats[si].tether, false);
             show(&mut vis, sc.sats[si].root, false);
             show(&mut vis, sc.sats[si].trail, false);
             show(&mut vis, sc.sats[si].marks, false);
@@ -608,8 +622,10 @@ pub fn update(
         let agent = assigned[si].map(|ai| &model.agents[ai]);
         // the ready slot of an agent that just finished: the farthest from those already there
         let taken: Vec<f32> = sc.slots.iter().enumerate().filter(|(j, o)| *j != si && o.alive && matches!(o.prev, Some(State::Done | State::Merged))).map(|(_, o)| o.ang_r).collect();
+        let anchor = sc.slots[si].parent.as_ref().and_then(|p| sc.slots.iter().find(|o| o.alive && !o.gone && &o.id == p)).map(|o| (o.pos, o.sc));
         let s = &mut sc.slots[si];
         if let Some(a) = agent {
+            s.parent = a.parent.clone();
             s.state = a.state;
             s.p = a.p;
             s.ring = a.repo % NRING;
@@ -691,9 +707,16 @@ pub fn update(
         let on_ring = sw.point(&def, s.ang + wob + sway, bob);
         let on_ready = sw.point(&READY, s.ang_r + wob, bob);
         let orb = on_ring.lerp(on_ready, s.rb.x);
+        let orb = match anchor {
+            Some((pp, _)) => {
+                let a = t * 0.55 + s.phase;
+                pp + Vec3::new(a.cos() * 44.0, a.sin() * 44.0 + 4.0, 10.0) * sw.s.max(0.5)
+            }
+            None => orb,
+        };
         s.pos = orb.lerp(front, s.fly.x).lerp(ftar, s.foc.x).lerp(core, clamp(s.mg.x, 0.0, 1.05));
         let (hv, fly, foc_x, mg, q) = (clamp(s.hv.x, 0.0, 1.0), s.fly.x, s.foc.x, s.mg.x, clamp(s.q.x, 0.0, 1.0));
-        s.sc = (1.0 + hv * 0.22 + s.kick.x.max(0.0) * 0.1 + fly * 0.35 + foc_x * 0.25) * (1.0 - 0.84 * smooth(0.0, 1.0, mg)) * (1.0 - 0.12 * q);
+        s.sc = (1.0 + hv * 0.22 + s.kick.x.max(0.0) * 0.1 + fly * 0.35 + foc_x * 0.25) * (1.0 - 0.84 * smooth(0.0, 1.0, mg)) * (1.0 - 0.12 * q) * if anchor.is_some() { 0.66 } else { 1.0 };
         let dim_o = if cur.is_some() && !is(cur) { 1.0 - 0.48 * dim } else { 1.0 };
         s.fade = clamp(s.vis.x, 0.0, 1.0) * (1.0 - 0.3 * q) * dim_o * (1.0 - smooth(0.5, 1.0, mg));
         if s.gone && s.vis.x < 0.01 {
@@ -716,7 +739,8 @@ pub fn update(
         let mut discs = Vec::new();
         let on_ring_k = (1.0 - clamp(fly.max(foc_x).max(s.rb.x).max(mg), 0.0, 1.0)) * if matches!(state, State::Queued | State::Stopped) { 0.0 } else { 1.0 };
         let mk = clamp((if swarm.tracks { 0.85 } else { 0.0 }) + hv, 0.0, 1.0) * on_ring_k;
-        for (i, m) in s.marks.iter().enumerate() {
+        let marks_on = if anchor.is_some() { &[][..] } else { &s.marks[..] };
+        for (i, m) in marks_on.iter().enumerate() {
             let back = (s.ang - m) * sgn;
             let inside = (0.0..=mesh::TRAIL_SPAN).contains(&back);
             let f = clamp(back / mesh::TRAIL_SPAN, 0.0, 1.0);
@@ -774,7 +798,7 @@ pub fn update(
 
         // ---- the step trail (rebuilt only when its ring changes) and marks
         let g = &mut sc.sats[si];
-        let trail_f = s.trk.x * on_ring_k * ft;
+        let trail_f = if anchor.is_some() { 0.0 } else { s.trk.x * on_ring_k * ft };
         if shown && trail_f > 0.004 {
             let want = (s.ring, sgn);
             if g.built != Some(want) {
@@ -815,6 +839,33 @@ pub fn update(
             show(&mut vis, g.marks, true);
         } else {
             show(&mut vis, g.marks, false);
+        }
+
+        // ---- a helper's tether back to its parent
+        match anchor {
+            Some((pp, psc)) if shown => {
+                let (a, b) = (pp, s.pos);
+                let d = (b - a).normalize_or_zero();
+                let (a, b) = (a + d * 17.0 * psc, b - d * 11.0 * s.sc);
+                let w = 0.9 / kpx(a.lerp(b, 0.5).z);
+                let want = (a, b, w, t);
+                if g.tether_built.map(|o| (o.0, o.1, o.2)) != Some((a, b, w)) {
+                    g.tether_built = Some(want);
+                    let n = 8;
+                    let pts: Vec<Vec3> = (0..=n).map(|i| a.lerp(b, i as f32 / n as f32)).collect();
+                    let ks: Vec<f32> = (0..=n).map(|i| 0.35 + 0.65 * (std::f32::consts::PI * i as f32 / n as f32).sin()).collect();
+                    if let Some(mut m) = meshes.get_mut(&g.tether_mesh) {
+                        *m = mesh::ribbon_mesh(&pts, w, &ks);
+                    }
+                }
+                gslots.update(&mut mats, &g.tether_m, |u| {
+                    u.color = line;
+                    u.a.x = 1.0;
+                    u.b.x = ft;
+                });
+                show(&mut vis, g.tether, true);
+            }
+            _ => show(&mut vis, g.tether, false),
         }
     }
 

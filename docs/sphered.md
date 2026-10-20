@@ -83,7 +83,7 @@ claude -p --input-format stream-json --output-format stream-json --verbose \
 - Your messages go to stdin. Every step, result and live text chunk comes back on stdout.
 - Permission asks arrive as `can_use_tool` requests on the same pipe, carrying the tool, its exact input and suggested "always allow" rules. Sphere answers allow (optionally with edited input) or deny (with a message the agent reads).
 - Control messages on the same pipe interrupt the agent, switch its permission mode (for example into plan mode), switch its model, report how full its context is, rewind its file changes and turn MCP servers on or off.
-- Sphere's own tools for agents (`ask_human`, `start_task`, `wait`) are served on the same pipe as an in-process MCP server.
+- Sphere's own tools for agents are served on the same pipe as an in-process MCP server named `sphere` (see **Helpers** below). They never ask you.
 - Claude Code's first message lists its model, permission mode and slash commands, and marks the commands that only make sense in its own terminal. Sphere offers the rest, including your skills, in the command bar.
 
 All of this was checked against the installed Claude Code (2.1.301).
@@ -93,6 +93,17 @@ All of this was checked against the installed Claude Code (2.1.301).
 **Opening Claude Code itself.** For anything the conversation view doesn't cover yet, "Open in terminal" pauses the agent and runs Claude Code's own screen on the same session in a Sphere terminal tab. Closing the tab hands it back.
 
 **Bringing a session into Sphere.** Claude sessions started before Sphere existed, or outside it, are listed from `claude agents --json` and the transcripts on disk. Bringing one in resumes the session under Sphere. If the outside copy is still running, Sphere asks you to stop it first.
+
+**Helpers.** An agent can hand work to helper agents with four tools:
+
+- `start_helper` starts a new task in the agent's repo, in its own worktree, with the agent's task as its `parent_task`. It returns the helper's id.
+- `wait_for_helpers` waits until the helpers (all of them, or the ones listed) are done, failed or stopped, and returns each one's final summary, branch and changed files. It returns early when a helper needs you, saying which, and after a timeout (300 seconds by default, 900 at most). A request it has already reported doesn't end the next wait again.
+- `message_helper` sends a helper a message, like `task.send`, and wakes it if it finished.
+- `stop_helper` stops a helper.
+
+An agent can only touch its own helpers, and a helper can't start helpers. A parent has at most 4 helpers working at once and 8 in all, and the daily cap and the concurrency limit apply as for any task. Stopping a parent stops the helpers that are still working. A helper's permission asks go to you, like any other, and agents still can't answer them. A tool call runs on its own task, so a long wait never holds up reading the agent's output. If `sphered` restarts mid-wait, it reads the call again and answers it again, and a `start_helper` it already ran finds the helper that is working instead of starting a second one.
+
+A helper that finishes isn't new: only a finished top-level task is, until you call `task.seen`. Sending it a message or stopping it clears the mark too.
 
 **Notes.** What you tell Sphere to remember ("use pnpm, never npm", from the command bar, from a Change you just sent, or from `sphere remember`) is kept by sphered per repo (the root of the checkout) or for every repo, and every agent it starts is told. A new task and every resume pass the notes for that repo, then the ones for every repo, newest first, to Claude Code with `--append-system-prompt` (4 KB at most; what doesn't fit is left out), and the task view says how many it was told (`briefed`). The notes live in their own SQLite table, not in the event log, so a removed note is really gone: the log holds only `memory_changed` with the new count, and a client reads the notes again with `memory.list`. Notes are instructions every later agent follows, so only the app and the CLI add or remove them; the assistant and anything an agent started are refused.
 
@@ -197,7 +208,7 @@ A client connects with `snapshot` (current tasks, the queue, status lines and th
 A Unix socket, user-only, speaking JSON-RPC 2.0 over newline-delimited JSON. The `sphere-client` crate wraps it with types, and the app and the CLI both use it.
 
 - **Sync:** `snapshot`, `subscribe`, `history`, `blob.read`.
-- **Agents:** `task.start`, `task.send`, `task.interrupt`, `task.set_mode`, `task.set_model`, `task.rewind`, `task.stop`, `task.open_in_terminal`, `session.list`, `session.bring_in`.
+- **Agents:** `task.start`, `task.send`, `task.interrupt`, `task.set_mode`, `task.set_model`, `task.rewind`, `task.stop`, `task.seen`, `task.open_in_terminal`, `session.list`, `session.bring_in`.
 - **Protocols:** `protocol.add`, `protocol.list`, `protocol.set_enabled`, `protocol.remove`, `protocol.run_now`.
 - **Requests:** `request.answer`.
 - **Notes:** `memory.list`, `memory.add`, `memory.remove`. The snapshot carries them too.

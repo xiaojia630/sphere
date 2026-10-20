@@ -80,6 +80,13 @@ pub struct TaskView {
     /// Where the session ran before it was taken over into Sphere.
     #[serde(default)]
     pub taken_over_from: Option<String>,
+    /// The task that started this one as its helper.
+    #[serde(default)]
+    pub parent_task: Option<String>,
+    /// It finished (or failed) and you haven't looked at it since.
+    /// Helpers never are: their parent reads their results.
+    #[serde(default)]
+    pub unseen: bool,
     /// How many of the user's notes the latest agent process was told when it started.
     #[serde(default)]
     pub briefed: u32,
@@ -196,6 +203,21 @@ impl Views {
             .iter()
             .filter_map(|id| self.tasks.get(id))
             .collect()
+    }
+
+    /// The helpers a task started, in the order it started them.
+    pub fn helpers_of(&self, parent: &str) -> Vec<&TaskView> {
+        self.tasks()
+            .into_iter()
+            .filter(|t| t.parent_task.as_deref() == Some(parent))
+            .collect()
+    }
+
+    /// Finished results you haven't looked at yet, newest first.
+    pub fn unseen(&self) -> Vec<&TaskView> {
+        let mut v: Vec<&TaskView> = self.tasks().into_iter().filter(|t| t.unseen).collect();
+        v.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        v
     }
 
     pub fn protocol(&self, id: &str) -> Option<&Protocol> {
@@ -324,6 +346,7 @@ impl Views {
                 model,
                 allow_rewrites,
                 resume_session,
+                parent_task,
                 protocol,
             } => {
                 self.max_task = self.max_task.max(numeric_suffix(id));
@@ -363,6 +386,8 @@ impl Views {
                         last_total_cost: 0.0,
                         starts: 0,
                         taken_over_from: None,
+                        parent_task: parent_task.clone(),
+                        unseen: false,
                         briefed: 0,
                         protocol: protocol.clone(),
                     },
@@ -505,7 +530,9 @@ impl Views {
                 }
                 t.slash_commands = slash_commands.clone();
             }
+            EventBody::Seen {} => t.unseen = false,
             EventBody::UserMessage { .. } => {
+                t.unseen = false;
                 if matches!(t.state, TaskState::Done | TaskState::Failed) {
                     t.state = TaskState::Working;
                     t.status = "Working".into();
@@ -558,6 +585,7 @@ impl Views {
                     t.state = TaskState::Done;
                 } else if *ok || *interrupted {
                     t.state = TaskState::Done;
+                    t.unseen = !*interrupted && t.parent_task.is_none();
                     let s = first_line(summary, 120);
                     t.status = if *interrupted {
                         "Interrupted".to_string()
@@ -569,14 +597,17 @@ impl Views {
                 } else {
                     t.state = TaskState::Failed;
                     t.status = format!("Failed: {}", first_line(summary, 120));
+                    t.unseen = t.parent_task.is_none();
                 }
             }
             EventBody::Stopped {} => {
+                t.unseen = false;
                 t.state = TaskState::Stopped;
                 t.status = "Stopped".into();
                 t.child = None;
             }
             EventBody::Failed { message } => {
+                t.unseen = t.parent_task.is_none();
                 t.state = TaskState::Failed;
                 t.status = format!("Failed: {}", first_line(message, 120));
             }
@@ -621,6 +652,7 @@ fn request_line(info: &RequestInfo) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::event::StepKind;
     use crate::protocol::{Schedule, Weekday};
     use crate::request::AnswerKind::{Change, Later, Yes};
     use crate::request::RequestKind;
@@ -649,6 +681,7 @@ mod tests {
                 model: None,
                 allow_rewrites: false,
                 resume_session: None,
+                parent_task: None,
                 protocol: None,
             },
         )
@@ -772,6 +805,7 @@ mod tests {
                 model: None,
                 allow_rewrites: false,
                 resume_session: Some("s1".into()),
+                parent_task: None,
                 protocol: None,
             },
         ));
@@ -1593,6 +1627,176 @@ mod tests {
         assert_eq!(v.waited_on("2026-03-04"), 0);
         assert_eq!(v.waited_on(""), 0);
         assert!(v.open_requests().is_empty(), "they still closed");
+    }
+
+    fn finish(seq: u64, task: &str, ok: bool, interrupted: bool) -> Event {
+        ev(
+            seq,
+            task,
+            EventBody::Turn {
+                ok,
+                interrupted,
+                summary: "s".into(),
+                turns: Some(1),
+                duration_ms: None,
+                cost_usd: None,
+                cost_delta_usd: 0.0,
+            },
+        )
+    }
+
+    fn helper_created(seq: u64, task: &str, parent: &str) -> Event {
+        let mut e = created(seq, task);
+        if let EventBody::TaskCreated { parent_task, .. } = &mut e.body {
+            *parent_task = Some(parent.into());
+        }
+        e
+    }
+
+    fn unseen_ids(v: &Views) -> Vec<&str> {
+        v.unseen().iter().map(|t| t.id.as_str()).collect()
+    }
+
+    #[test]
+    fn a_finished_top_level_task_is_new_until_seen() {
+        let mut v = with_task();
+        assert!(unseen_ids(&v).is_empty());
+        v.apply(&finish(3, "t1", true, false));
+        assert_eq!(unseen_ids(&v), ["t1"]);
+        v.apply(&ev(4, "t1", EventBody::Seen {}));
+        assert!(unseen_ids(&v).is_empty());
+        // Seen again changes nothing.
+        v.apply(&ev(5, "t1", EventBody::Seen {}));
+        assert!(!v.task("t1").unwrap().unseen);
+    }
+
+    #[test]
+    fn a_failed_task_is_new_too() {
+        let mut v = with_task();
+        v.apply(&finish(3, "t1", false, false));
+        assert_eq!(unseen_ids(&v), ["t1"]);
+        v.apply(&ev(4, "t1", EventBody::Seen {}));
+        v.apply(&ev(
+            5,
+            "t1",
+            EventBody::UserMessage {
+                text: "again".into(),
+            },
+        ));
+        v.apply(&ev(
+            6,
+            "t1",
+            EventBody::Failed {
+                message: "boom".into(),
+            },
+        ));
+        assert_eq!(unseen_ids(&v), ["t1"]);
+    }
+
+    #[test]
+    fn an_interrupted_turn_is_not_new() {
+        let mut v = with_task();
+        v.apply(&finish(3, "t1", false, true));
+        assert_eq!(v.task("t1").unwrap().state, TaskState::Done);
+        assert!(unseen_ids(&v).is_empty());
+    }
+
+    #[test]
+    fn a_message_or_a_stop_clears_new() {
+        let mut v = with_task();
+        v.apply(&finish(3, "t1", true, false));
+        v.apply(&ev(
+            4,
+            "t1",
+            EventBody::UserMessage {
+                text: "more".into(),
+            },
+        ));
+        assert!(unseen_ids(&v).is_empty());
+        assert_eq!(v.task("t1").unwrap().state, TaskState::Working);
+        v.apply(&finish(5, "t1", true, false));
+        assert_eq!(unseen_ids(&v), ["t1"]);
+        v.apply(&ev(6, "t1", EventBody::Stopped {}));
+        assert!(unseen_ids(&v).is_empty());
+    }
+
+    #[test]
+    fn a_helpers_result_is_never_new() {
+        let mut v = with_task();
+        v.apply(&helper_created(3, "t2", "t1"));
+        v.apply(&started(4, "t2"));
+        v.apply(&finish(5, "t2", true, false));
+        assert_eq!(v.task("t2").unwrap().state, TaskState::Done);
+        assert!(unseen_ids(&v).is_empty());
+        v.apply(&ev(
+            6,
+            "t2",
+            EventBody::UserMessage {
+                text: "more".into(),
+            },
+        ));
+        v.apply(&finish(7, "t2", false, false));
+        v.apply(&ev(
+            8,
+            "t2",
+            EventBody::Failed {
+                message: "boom".into(),
+            },
+        ));
+        assert!(unseen_ids(&v).is_empty());
+    }
+
+    #[test]
+    fn new_results_come_newest_first() {
+        let mut v = Views::default();
+        for (i, id) in ["t1", "t2"].iter().enumerate() {
+            v.apply(&created(1 + i as u64 * 10, id));
+            v.apply(&started(2 + i as u64 * 10, id));
+        }
+        for (seq, task, when) in [(30, "t2", "05"), (31, "t1", "06")] {
+            v.apply(&Event {
+                at: format!("2026-03-04T{when}:00:00.000Z"),
+                ..finish(seq, task, true, false)
+            });
+        }
+        assert_eq!(unseen_ids(&v), ["t1", "t2"]);
+    }
+
+    #[test]
+    fn helpers_of_lists_a_parents_helpers_in_order() {
+        let mut v = with_task();
+        v.apply(&helper_created(3, "t2", "t1"));
+        v.apply(&created(4, "t3"));
+        v.apply(&helper_created(5, "t4", "t1"));
+        v.apply(&helper_created(6, "t5", "t3"));
+        let ids =
+            |p: &str| -> Vec<String> { v.helpers_of(p).iter().map(|t| t.id.clone()).collect() };
+        assert_eq!(ids("t1"), ["t2", "t4"]);
+        assert_eq!(ids("t3"), ["t5"]);
+        assert!(ids("t2").is_empty() && ids("zz").is_empty());
+        assert_eq!(v.task("t2").unwrap().parent_task.as_deref(), Some("t1"));
+        assert_eq!(v.task("t1").unwrap().parent_task, None);
+    }
+
+    #[test]
+    fn a_waiting_parent_reads_as_the_step_it_is_in() {
+        let mut v = with_task();
+        v.apply(&ev(
+            3,
+            "t1",
+            EventBody::Step {
+                id: "s1".into(),
+                step_kind: StepKind::Delegate,
+                tool: "mcp__sphere__wait_for_helpers".into(),
+                title: "Waiting for 2 helpers".into(),
+                detail: String::new(),
+                parent: None,
+            },
+        ));
+        assert_eq!(
+            v.task("t1").unwrap().status,
+            "Waiting for 2 helpers, step 1"
+        );
     }
 
     #[test]

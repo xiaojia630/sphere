@@ -69,3 +69,54 @@ async fn a_real_agent_answers_one_word_within_a_tiny_budget() {
     );
     c.stop("t1").await.unwrap();
 }
+
+/// The real Claude Code starts a helper through Sphere's own tools, waits for
+/// it and reports its answer. Spends a few cents on Haiku; same way to run.
+#[tokio::test]
+#[ignore = "talks to the real Claude Code and spends a little money; see the module docs"]
+async fn a_real_agent_hands_a_question_to_a_helper_and_reports_the_answer() {
+    let command = std::env::var("SPHERE_LIVE_CLAUDE").unwrap_or_else(|_| "claude".into());
+    let mut env = Env::new("basic")
+        .set_str("agent_command", &command)
+        .set("agent_args", "[]");
+    env.start_daemon().await;
+    let c = env.client().await;
+    let mut w = env.watcher(0, None).await;
+    c.start_task(StartParams {
+        repo: env.repo.to_string_lossy().to_string(),
+        prompt:
+            "Use the start_helper tool of the sphere server to start one helper whose prompt is \
+                 'What is 17*3? Answer with just the number. Do not use any tools or edit files.'. \
+                 Then call wait_for_helpers, and finish by reporting the helper's answer."
+                .into(),
+        title: Some("Live helper test".into()),
+        budget_usd: Some(0.30),
+        model: Some("haiku".into()),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    let turn = w
+        .wait("the parent's turn", |e| e.task == "t1" && is_turn(e))
+        .await;
+    println!("parent turn: {:?}", turn.body);
+    let EventBody::Turn { ok, summary, .. } = &turn.body else {
+        unreachable!()
+    };
+    assert!(
+        *ok && summary.contains("51"),
+        "the answer is reported: {summary}"
+    );
+    let created = w
+        .find(|e| e.task == "t2" && matches!(&e.body, EventBody::TaskCreated { .. }))
+        .expect("the helper was created");
+    assert!(
+        matches!(&created.body, EventBody::TaskCreated { parent_task: Some(p), .. } if p == "t1")
+    );
+    assert_eq!(w.count(is_request), 0, "Sphere's tools never ask");
+    let snap = c.snapshot().await.unwrap();
+    for t in &snap.tasks {
+        println!("{} {:?} cost {}", t.id, t.state, t.cost_usd);
+    }
+    c.stop("t1").await.unwrap();
+}
