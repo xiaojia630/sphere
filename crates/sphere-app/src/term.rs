@@ -161,6 +161,8 @@ pub struct Terminal {
     pub back_to: Option<usize>,
     /// The program's name for the header (`zsh`, `bash`).
     pub name: String,
+    /// The folder the shell started in (Go to files the tab under that repo).
+    pub cwd: Option<String>,
     /// The newest command that failed in this tab inside a git work tree, which Fix it offers a fix for. It goes
     /// when the next command starts, or when it is dismissed or used.
     pub fix: Option<crate::fixit::Failure>,
@@ -306,6 +308,7 @@ impl Terminal {
             c.cwd(std::env::var_os("HOME").unwrap_or_default());
             c
         };
+        let cwd = if look { Some(repo_dir()) } else { std::env::var_os("HOME").map(std::path::PathBuf::from) }.map(|p| p.to_string_lossy().to_string());
         let name = if look { "bash".to_string() } else { std::path::Path::new(&shell).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default() };
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
@@ -345,11 +348,13 @@ impl Terminal {
         let mut inner = Inner::new(term, rx, writer, nonce.as_deref());
         inner._master = Some(pair.master);
         inner.child = Some(child);
-        Ok(Self::with(inner, name))
+        let mut t = Self::with(inner, name);
+        t.cwd = cwd;
+        Ok(t)
     }
 
     fn with(inner: Inner, name: String) -> Self {
-        Self { inner: Mutex::new(inner), dirty: true, exited: false, back_to: None, name, fix: None, fix_seq: 0 }
+        Self { inner: Mutex::new(inner), dirty: true, exited: false, back_to: None, name, cwd: None, fix: None, fix_seq: 0 }
     }
 
     /// A tab with no shell: it prints what is sent through the returned sender, and takes its directory for the
@@ -400,7 +405,9 @@ impl Terminal {
         let mut inner = Inner::new(term, rx, writer, h.nonce.as_deref());
         inner.host = Some(h);
         inner.replay = attach.map(crate::hostterm::replay_len).unwrap_or(0);
-        Some(Self::with(inner, name))
+        let mut t = Self::with(inner, name);
+        t.cwd = attach.and_then(|c| c.cwd.clone()).or_else(|| std::env::var("HOME").ok());
+        Some(t)
     }
 
     pub fn send(&self, bytes: &[u8]) {

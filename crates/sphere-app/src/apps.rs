@@ -22,6 +22,10 @@ pub struct Open {
     pub swarm_cmds: Vec<crate::swarm::input::SwarmCmd>,
     /// typed "take over" / "elsewhere": `takeover::commands` opens the card
     pub takeover: Option<crate::takeover::Words>,
+    /// Go to: the Working view opens on this task
+    pub work_task: Option<String>,
+    /// the bar's `go <filter>`, the NEW indicator: open Go to with this filter typed
+    pub goto: Option<String>,
     /// typed "memory": `memory::commands` opens the card of notes
     pub memory: bool,
     /// a click on the Agents panel (panel px): an "elsewhere" row opens its card, anywhere else opens the Working view
@@ -109,7 +113,7 @@ pub fn apply(
         swarm.close();
     }
     // one app at a time
-    if matches!(i, 2..=6 | SYSTEM) {
+    if matches!(i, 2..=6 | SYSTEM) || (i == 1 && open.work_task.is_some()) {
         working.close();
         code.close();
         git.close();
@@ -141,6 +145,9 @@ pub fn apply(
         5 => ports.open(),
         6 => files.open(),
         SYSTEM => sys.open(),
-        _ => working.open_latest(),
+        _ => match open.work_task.take() {
+            Some(t) => working.open_task(t),
+            None => working.open_latest(),
+        },
     }
 }

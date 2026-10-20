@@ -4,6 +4,7 @@ pub mod agent_proto;
 pub mod briefing;
 pub mod config;
 pub mod envpath;
+pub mod helpers;
 pub mod host_link;
 pub mod hub;
 pub mod manager;
