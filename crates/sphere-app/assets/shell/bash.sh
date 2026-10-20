@@ -2,11 +2,16 @@
 #
 # It tells Sphere's terminal when a command starts and ends, with its exit status and the directory it ran in, so a
 # failed command can offer "Fix it". Sphere reads these sequences from the terminal's output:
-#   OSC 7700 ; cmd ; <base64 of the command line> BEL    the command about to run
-#   OSC 133 ; C BEL                                       its output starts
-#   OSC 7 ; file://host/path BEL                          the working directory
-#   OSC 133 ; D ; <exit status> BEL                       the command finished
-#   OSC 133 ; A BEL                                       the prompt is about to be drawn
+#   OSC 7700 ; cmd ; <base64 of the command line> ; <nonce> BEL    the command about to run
+#   OSC 133 ; C ; sphere=<nonce> BEL                                 its output starts
+#   OSC 7 ; file://host/path BEL                                     the working directory
+#   OSC 133 ; D ; <exit status> ; sphere=<nonce> BEL                 the command finished
+#   OSC 133 ; A ; sphere=<nonce> BEL                                 the prompt is about to be drawn
+#
+# The nonce is a secret that Sphere gives this one shell in SPHERE_SHELL_NONCE, and Sphere believes only the marks
+# that carry it, so nothing else that prints to the terminal can pose as this shell. It is copied to a variable
+# and unset first of all, before your files run, so nothing you start inherits it. (VS Code does the same with
+# VSCODE_NONCE.) Without one (bash started by hand with this file) no hooks are added.
 #
 # Adapted from the shell integration scripts of VS Code (https://github.com/microsoft/vscode, MIT License,
 # Copyright (c) Microsoft Corporation): the login emulation, the DEBUG trap and the PROMPT_COMMAND handling follow
@@ -20,6 +25,8 @@
 # ~/.bash_profile, ~/.bash_login and ~/.profile (what `bash -l` reads).
 if [ -z "${__sphere_loaded-}" ]; then
 	__sphere_loaded=1
+	__sphere_nonce=${SPHERE_SHELL_NONCE-}
+	builtin unset SPHERE_SHELL_NONCE
 	if [ -r /etc/profile ]; then
 		. /etc/profile
 	fi
@@ -61,9 +68,9 @@ if [ -z "${__sphere_loaded-}" ]; then
 			fi
 			if [ "${__sphere_ran-}" = 1 ]; then
 				__sphere_ran=0
-				d=$'\033]133;D;'$__sphere_status$'\a'
+				d=$'\033]133;D;'$__sphere_status$';sphere='$__sphere_nonce$'\a'
 			fi
-			builtin printf '\033]7;file://%s%s\a%s\033]133;A\a' "${HOSTNAME-}" "${__sphere_url-}" "$d"
+			builtin printf '\033]7;file://%s%s\a%s\033]133;A;sphere=%s\a' "${HOSTNAME-}" "${__sphere_url-}" "$d" "$__sphere_nonce"
 		} 2>/dev/null || :
 		# your own PROMPT_COMMAND sees the status the command left
 		builtin return "$__sphere_status"
@@ -95,7 +102,7 @@ if [ -z "${__sphere_loaded-}" ]; then
 		builtin local line="${1-}" b64
 		__sphere_ran=1
 		b64=$(\command base64 <<<"${line:0:4096}" 2>/dev/null)
-		builtin printf '\033]7700;cmd;%s\a\033]133;C\a' "${b64//$'\n'/}"
+		builtin printf '\033]7700;cmd;%s;%s\a\033]133;C;sphere=%s\a' "${b64//$'\n'/}" "$__sphere_nonce" "$__sphere_nonce"
 	}
 
 	# With bash-preexec loaded (iTerm2's integration, atuin...): it tells your commands from the prompt's already
@@ -180,7 +187,7 @@ if [ -z "${__sphere_loaded-}" ]; then
 		*)
 			case $- in
 				*i*)
-					if [ -t 1 ] && [ -z "${__sphere_hooked-}" ]; then
+					if [ -t 1 ] && [ -n "${__sphere_nonce-}" ] && [ -z "${__sphere_hooked-}" ]; then
 						# The DEBUG trap is read and set here and not in a function: bash 3.2 hides it from a
 						# function and puts the old one back when the function returns.
 						__sphere_old=()

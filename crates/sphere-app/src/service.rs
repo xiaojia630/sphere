@@ -183,8 +183,9 @@ impl Run {
 }
 
 pub enum Cmd {
-    /// `title`: the agent's name; none lets sphered take it from the prompt
-    Start { repo: String, prompt: String, title: Option<String> },
+    /// `title`: the agent's name; none lets sphered take it from the prompt. `in_place`: the agent works in the repo
+    /// itself and not in a worktree of its own.
+    Start { repo: String, prompt: String, title: Option<String>, in_place: bool },
     /// `always`: also save the rule the agent suggested (a yes only)
     Answer { request: String, answer: AnswerKind, text: Option<String>, always: bool },
     Send { task: String, text: String },
@@ -665,6 +666,11 @@ fn set_outside(sh: &Mutex<Shared>, list: Vec<sphere_proto::api::OutsideSession>)
     }
 }
 
+/// What sphered is asked for by a `Cmd::Start`: the budget, mode and model are its own defaults.
+fn start_params(repo: String, prompt: String, title: Option<String>, in_place: bool) -> StartParams {
+    StartParams { repo, prompt, title, in_place, budget_usd: None, mode: None, model: None, allow_rewrites: false }
+}
+
 async fn command(c: &Client, cmd: Cmd, sh: &Mutex<Shared>) -> Result<(), String> {
     use sphere_proto::api::kind;
     match cmd {
@@ -675,17 +681,8 @@ async fn command(c: &Client, cmd: Cmd, sh: &Mutex<Shared>) -> Result<(), String>
             s.version += 1;
             Ok(())
         }
-        Cmd::Start { repo, prompt, title } => {
-            let p = StartParams {
-                repo,
-                prompt,
-                title,
-                in_place: false,
-                budget_usd: None,
-                mode: None,
-                model: None,
-                allow_rewrites: false,
-            };
+        Cmd::Start { repo, prompt, title, in_place } => {
+            let p = start_params(repo, prompt, title, in_place);
             c.start_task(p).await.map(|_| ()).map_err(|e| format!("could not start: {e}"))
         }
         Cmd::Answer { request, answer, text, always } => {
@@ -765,6 +762,15 @@ mod tests {
         assert!(!outside_due(true, false, Some(s(60))));
         // not while the last ask is still out
         assert!(!outside_due(false, true, Some(s(60))));
+    }
+
+    #[test]
+    fn a_start_asks_for_a_worktree_or_for_the_repo_itself() {
+        for in_place in [false, true] {
+            let p = start_params("/work/sphere".into(), "fix the test".into(), Some("Fix: make".into()), in_place);
+            assert_eq!((p.repo.as_str(), p.prompt.as_str(), p.title.as_deref(), p.in_place), ("/work/sphere", "fix the test", Some("Fix: make"), in_place));
+            assert!(p.budget_usd.is_none() && p.mode.is_none() && p.model.is_none() && !p.allow_rewrites);
+        }
     }
 
     #[test]

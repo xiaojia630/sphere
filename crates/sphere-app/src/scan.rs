@@ -1,14 +1,21 @@
 //! Reads the bytes a terminal tab prints, on their way to the VT emulator, and notices commands: where each one
 //! starts and ends, what it was, the directory it ran in, its exit status and what it printed. The shell
 //! integration (shellint.rs) makes the shell send these as escape sequences:
-//!   OSC 7700 ; cmd ; <base64>    the command line about to run
-//!   OSC 133 ; C                  its output starts
-//!   OSC 7 ; file://host/path     the working directory
-//!   OSC 133 ; D ; <status>       it finished
-//!   OSC 133 ; A                  a prompt is drawn
+//!   OSC 7700 ; cmd ; <base64> ; <nonce>      the command line about to run
+//!   OSC 133 ; C ; sphere=<nonce>             its output starts
+//!   OSC 7 ; file://host/path                 the working directory
+//!   OSC 133 ; D ; <status> ; sphere=<nonce>  it finished
+//!   OSC 133 ; A ; sphere=<nonce>             a prompt is drawn
 //! The scanner never changes the bytes (the emulator still gets all of them). It turns a command's output into
 //! plain text, with colours and cursor moves stripped and carriage returns and backspaces applied, and keeps
 //! only the end of it. Sequences may be split across any two chunks.
+//!
+//! Anything that prints to the terminal can print an escape sequence, so the scanner believes only the marks that
+//! carry the tab's nonce, a secret that Sphere gives the shell of that tab and nobody else (`SPHERE_SHELL_NONCE`
+//! in shellint.rs, as VS Code does with its VSCODE_NONCE). A mark without it, or with another, is ignored: a
+//! `cat` of a crafted file can't make a command that you never ran look like it failed, and another tool's own
+//! OSC 133 (powerlevel10k, iTerm2, VS Code) doesn't drive Fix it. A tab with no integration has no nonce, and its
+//! scanner reports nothing.
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
@@ -68,6 +75,8 @@ pub struct Scanner {
     u_need: u8,
     u_acc: u32,
     cwd: String,
+    /// the secret that the marks of this tab's shell carry (empty: no integration, nothing is believed)
+    nonce: Vec<u8>,
     /// a command line seen before its start mark
     pending: Option<String>,
     run: Option<Run>,
@@ -81,15 +90,12 @@ struct Run {
     alt: bool,
 }
 
-impl Default for Scanner {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl Scanner {
-    pub fn new() -> Self {
-        Self { mode: Mode::Ground, csi: Vec::new(), osc: Vec::new(), osc_over: false, u_need: 0, u_acc: 0, cwd: String::new(), pending: None, run: None }
+    /// `nonce`: the secret that the shell integration of this tab puts in its marks. Marks without it are
+    /// ignored; with none (a tab without the integration) the scanner reports nothing.
+    pub fn new(nonce: Option<&str>) -> Self {
+        let nonce = nonce.unwrap_or_default().as_bytes().to_vec();
+        Self { mode: Mode::Ground, csi: Vec::new(), osc: Vec::new(), osc_over: false, u_need: 0, u_acc: 0, cwd: String::new(), nonce, pending: None, run: None }
     }
 
     /// A command is running (its start mark came, its end has not).
@@ -107,6 +113,9 @@ impl Scanner {
     /// Scans a chunk of output. `now` stamps the commands that start or end in it.
     pub fn feed(&mut self, bytes: &[u8], now: Instant) -> Vec<Event> {
         let mut ev = Vec::new();
+        if self.nonce.is_empty() {
+            return ev;
+        }
         let mut i = 0;
         while i < bytes.len() {
             if self.mode == Mode::Ground {
@@ -309,9 +318,13 @@ impl Scanner {
         }
     }
 
-    /// OSC 133 marks: `A` a prompt, `C` output starts, `D;status` it ended.
+    /// OSC 133 marks: `A` a prompt, `C` output starts, `D;status` it ended; each with `sphere=<nonce>` among its
+    /// parameters (other tools' marks have none, and anything that prints can't know it).
     fn mark(&mut self, rest: &[u8], now: Instant, ev: &mut Vec<Event>) {
         let (kind, args) = split_once(rest, b';');
+        if !args.split(|&b| b == b';').any(|p| p.strip_prefix(b"sphere=").is_some_and(|n| self.is_nonce(n))) {
+            return;
+        }
         match kind {
             b"A" => {
                 // a prompt while a command is open: its end never came (the shell was replaced, say)
@@ -335,18 +348,24 @@ impl Scanner {
         }
     }
 
-    /// Our own OSC 7700: `cmd;<base64 of the command line>`.
+    /// Our own OSC 7700: `cmd;<base64 of the command line>;<nonce>`.
     fn private(&mut self, rest: &[u8]) {
         let (kind, args) = split_once(rest, b';');
-        if kind != b"cmd" {
+        let (line, nonce) = split_once(args, b';');
+        if kind != b"cmd" || !self.is_nonce(nonce) {
             return;
         }
-        let text = command_text(&base64_decode(args).unwrap_or_default());
+        let text = command_text(&base64_decode(line).unwrap_or_default());
         match self.run.as_mut() {
             // sent after the start mark, though the shell scripts send it before
             Some(run) if run.command.is_empty() => run.command = text,
             _ => self.pending = Some(text),
         }
+    }
+
+    /// Whether `s` is this tab's nonce.
+    fn is_nonce(&self, s: &[u8]) -> bool {
+        !self.nonce.is_empty() && s == self.nonce
     }
 }
 
@@ -528,15 +547,31 @@ mod tests {
         out
     }
 
+    /// The nonce of the tab that the tests scan.
+    const NONCE: &str = "9f2c41d0b7e6a835c1d4f0e92b6a7c38";
+
     fn osc(body: &str) -> String {
         format!("\x1b]{body}\x07")
     }
+    /// The marks as the shell integration prints them.
+    fn command_mark(line: &str) -> String {
+        osc(&format!("7700;cmd;{};{NONCE}", b64(line)))
+    }
+    fn start_mark() -> String {
+        osc(&format!("133;C;sphere={NONCE}"))
+    }
+    fn end_mark(exit: i32) -> String {
+        osc(&format!("133;D;{exit};sphere={NONCE}"))
+    }
+    fn prompt_mark() -> String {
+        osc(&format!("133;A;sphere={NONCE}"))
+    }
     /// What the integration prints around a command: its line, the start, `output`, the directory, the end.
     fn session(cmd: &str, cwd: &str, output: &str, exit: i32) -> String {
-        format!("{}{}{output}{}{}{}", osc(&format!("7700;cmd;{}", b64(cmd))), osc("133;C"), osc(&format!("7;file://host{cwd}")), osc(&format!("133;D;{exit}")), osc("133;A"))
+        format!("{}{}{output}{}{}{}", command_mark(cmd), start_mark(), osc(&format!("7;file://host{cwd}")), end_mark(exit), prompt_mark())
     }
     fn scan(s: &str) -> Vec<Event> {
-        Scanner::new().feed(s.as_bytes(), Instant::now())
+        Scanner::new(Some(NONCE)).feed(s.as_bytes(), Instant::now())
     }
     fn finished(events: &[Event]) -> &Finished {
         events.iter().find_map(|e| if let Event::Finished(f) = e { Some(f) } else { None }).expect("a finished command")
@@ -559,7 +594,7 @@ mod tests {
         let all = session("ls /nope", "/tmp/my dir", "ls: /nope: No such file\r\n", 2);
         let whole = scan(&all);
         for size in [1, 2, 3, 5, 7, 16] {
-            let mut sc = Scanner::new();
+            let mut sc = Scanner::new(Some(NONCE));
             let now = Instant::now();
             let mut ev = Vec::new();
             for chunk in all.as_bytes().chunks(size) {
@@ -571,7 +606,7 @@ mod tests {
 
     #[test]
     fn bel_and_st_both_end_an_osc() {
-        let st = format!("\x1b]7700;cmd;{}\x1b\\\x1b]133;C\x1b\\hi\r\n\x1b]133;D;3\x1b\\", b64("make"));
+        let st = format!("\x1b]7700;cmd;{};{NONCE}\x1b\\\x1b]133;C;sphere={NONCE}\x1b\\hi\r\n\x1b]133;D;3;sphere={NONCE}\x1b\\", b64("make"));
         let f = finished(&scan(&st)).clone();
         assert_eq!((f.command.as_str(), f.exit, f.output_tail.as_str()), ("make", 3, "hi"));
     }
@@ -632,9 +667,9 @@ mod tests {
 
     #[test]
     fn a_huge_output_stays_within_the_caps() {
-        let mut sc = Scanner::new();
+        let mut sc = Scanner::new(Some(NONCE));
         let now = Instant::now();
-        sc.feed(osc("133;C").as_bytes(), now);
+        sc.feed(start_mark().as_bytes(), now);
         let chunk = "some output that goes on and on\r\n".repeat(2000);
         for _ in 0..300 {
             sc.feed(chunk.as_bytes(), now);
@@ -648,19 +683,20 @@ mod tests {
 
     #[test]
     fn the_exit_status_must_be_a_number() {
-        for bad in ["133;D", "133;D;", "133;D;abc", "133;D;1x"] {
-            let ev = scan(&format!("{}{}", osc("133;C"), osc(bad)));
+        for bad in ["", ";", "abc;", "1x;"] {
+            let ev = scan(&format!("{}{}", start_mark(), osc(&format!("133;D;{bad}sphere={NONCE}"))));
             assert_eq!(ev, vec![Event::Started], "{bad}");
         }
-        let ev = scan(&format!("{}{}", osc("133;C"), osc("133;D;130;aid=7")));
+        // other parameters may come with it, before and after
+        let ev = scan(&format!("{}{}", start_mark(), osc(&format!("133;D;130;aid=7;sphere={NONCE};more"))));
         assert_eq!(finished(&ev).exit, 130);
-        let ev = scan(&format!("{}{}", osc("133;C"), osc("133;D;0")));
+        let ev = scan(&format!("{}{}", start_mark(), end_mark(0)));
         assert_eq!(finished(&ev).exit, 0);
     }
 
     #[test]
     fn the_directory_is_percent_decoded() {
-        let mut sc = Scanner::new();
+        let mut sc = Scanner::new(Some(NONCE));
         let now = Instant::now();
         for (url, want) in [
             ("file://mac.local/Users/me/my%20proj/%C3%A9t%C3%A9", "/Users/me/my proj/été"),
@@ -679,39 +715,39 @@ mod tests {
 
     #[test]
     fn the_command_is_the_one_sent_just_before_the_start() {
-        let a = format!("{}{}", osc(&format!("7700;cmd;{}", b64("first"))), osc(&format!("7700;cmd;{}", b64("  second \n"))));
-        let ev = scan(&format!("{a}{}{}", osc("133;C"), osc("133;D;1")));
+        let a = format!("{}{}", command_mark("first"), command_mark("  second \n"));
+        let ev = scan(&format!("{a}{}{}", start_mark(), end_mark(1)));
         assert_eq!(finished(&ev).command, "second");
         // after the start mark works too
-        let ev = scan(&format!("{}{}{}", osc("133;C"), osc(&format!("7700;cmd;{}", b64("late"))), osc("133;D;1")));
+        let ev = scan(&format!("{}{}{}", start_mark(), command_mark("late"), end_mark(1)));
         assert_eq!(finished(&ev).command, "late");
         // none at all: an empty command
-        let ev = scan(&format!("{}{}", osc("133;C"), osc("133;D;1")));
+        let ev = scan(&format!("{}{}", start_mark(), end_mark(1)));
         assert_eq!(finished(&ev).command, "");
     }
 
     #[test]
     fn a_command_line_is_decoded_trimmed_and_capped() {
         let long = "é".repeat(5000);
-        let ev = scan(&format!("{}{}{}", osc(&format!("7700;cmd;{}", b64(&long))), osc("133;C"), osc("133;D;1")));
+        let ev = scan(&format!("{}{}{}", command_mark(&long), start_mark(), end_mark(1)));
         let c = &finished(&ev).command;
         assert!(c.len() <= CMD_MAX && c.len() > CMD_MAX - 4 && c.chars().all(|c| c == 'é'));
         // bad base64 is no command, not a crash
-        let ev = scan(&format!("{}{}{}", osc("7700;cmd;!!not base64!!"), osc("133;C"), osc("133;D;1")));
+        let ev = scan(&format!("{}{}{}", osc(&format!("7700;cmd;!!not base64!!;{NONCE}")), start_mark(), end_mark(1)));
         assert_eq!(finished(&ev).command, "");
     }
 
     #[test]
     fn a_prompt_while_a_command_is_open_drops_it() {
-        let ev = scan(&format!("{}{}{}{}", osc("133;C"), "output", osc("133;A"), osc("133;D;1")));
+        let ev = scan(&format!("{}{}{}{}", start_mark(), "output", prompt_mark(), end_mark(1)));
         assert_eq!(ev, vec![Event::Started]);
     }
 
     #[test]
     fn an_end_without_a_start_is_ignored() {
-        assert!(scan(&osc("133;D;1")).is_empty());
+        assert!(scan(&end_mark(1)).is_empty());
         // and the first prompt of a shell is not a command
-        assert!(scan(&format!("{}{}", osc("7;file://h/tmp"), osc("133;A"))).is_empty());
+        assert!(scan(&format!("{}{}", osc("7;file://h/tmp"), prompt_mark())).is_empty());
     }
 
     #[test]
@@ -730,7 +766,7 @@ mod tests {
     #[test]
     fn utf8_split_between_chunks_is_whole_again() {
         let all = session("x", "/", "naïve ☃ 日本\r\n", 1);
-        let mut sc = Scanner::new();
+        let mut sc = Scanner::new(Some(NONCE));
         let now = Instant::now();
         let mut ev = Vec::new();
         for b in all.as_bytes() {
@@ -741,21 +777,21 @@ mod tests {
 
     #[test]
     fn broken_utf8_becomes_replacement_characters() {
-        let mut bytes = osc("133;C").into_bytes();
+        let mut bytes = start_mark().into_bytes();
         bytes.extend_from_slice(b"a\xffb\xe2\x98c\x80d\r\n");
-        bytes.extend_from_slice(osc("133;D;1").as_bytes());
-        let ev = Scanner::new().feed(&bytes, Instant::now());
+        bytes.extend_from_slice(end_mark(1).as_bytes());
+        let ev = Scanner::new(Some(NONCE)).feed(&bytes, Instant::now());
         assert_eq!(finished(&ev).output_tail, "a\u{fffd}bc\u{fffd}d");
     }
 
     #[test]
     fn a_runaway_osc_is_dropped_and_the_next_output_is_fine() {
-        let mut s = osc("133;C");
+        let mut s = start_mark();
         s.push_str("\x1b]52;c;");
         s.push_str(&"A".repeat(100_000));
         s.push('\x07');
         s.push_str("after\r\n");
-        s.push_str(&osc("133;D;1"));
+        s.push_str(&end_mark(1));
         let f = finished(&scan(&s)).clone();
         assert_eq!(f.output_tail, "after");
     }
@@ -770,10 +806,10 @@ mod tests {
 
     #[test]
     fn duration_comes_from_the_clock_it_is_given() {
-        let mut sc = Scanner::new();
+        let mut sc = Scanner::new(Some(NONCE));
         let t0 = Instant::now();
-        sc.feed(osc("133;C").as_bytes(), t0);
-        let ev = sc.feed(osc("133;D;1").as_bytes(), t0 + Duration::from_millis(3200));
+        sc.feed(start_mark().as_bytes(), t0);
+        let ev = sc.feed(end_mark(1).as_bytes(), t0 + Duration::from_millis(3200));
         assert_eq!(finished(&ev).duration, Duration::from_millis(3200));
     }
 
@@ -786,9 +822,105 @@ mod tests {
         assert_eq!(ev.iter().filter(|e| **e == Event::Started).count(), 3);
     }
 
+    /// What a crafted file can make `cat` print: the marks of a command that nobody ran and that failed. `sign133`
+    /// follows the status in the 133 marks and `sign7700` the command line in the 7700 one.
+    fn forged(command: &str, sign133: &str, sign7700: &str) -> String {
+        let before = osc(&format!("133;D;1{sign133}"));
+        let line = osc(&format!("7700;cmd;{}{sign7700}", b64(command)));
+        format!("{before}{line}{}fake output\r\n{}{}", osc(&format!("133;C{sign133}")), osc(&format!("133;D;1{sign133}")), osc(&format!("133;A{sign133}")))
+    }
+
+    /// Ways to get the signature wrong, as `(133 marks, 7700 mark)`.
+    fn wrong_signatures() -> Vec<(String, String)> {
+        let other = "0".repeat(NONCE.len());
+        vec![
+            // none at all: what a program that knows nothing of Sphere prints
+            (String::new(), String::new()),
+            // another tool's parameters (iTerm2, VS Code, powerlevel10k...)
+            (";aid=4242;cl=m".into(), ";633".into()),
+            // an empty one
+            (";sphere=".into(), ";".into()),
+            // another nonce, as another tab's shell would print
+            (format!(";sphere={other}"), format!(";{other}")),
+            // the right one, a character short or long
+            (format!(";sphere={}", &NONCE[1..]), format!(";{}", &NONCE[1..])),
+            (format!(";sphere={NONCE}0"), format!(";{NONCE}0")),
+            // the right one under the other mark's form
+            (format!(";nonce={NONCE}"), format!(";sphere={NONCE}")),
+        ]
+    }
+
+    #[test]
+    fn marks_without_the_nonce_or_with_another_are_not_believed() {
+        for (sign133, sign7700) in wrong_signatures() {
+            let ev = scan(&forged("rm -rf /", &sign133, &sign7700));
+            assert!(ev.is_empty(), "{sign133:?} {sign7700:?}: {ev:?}");
+        }
+        // the same marks with the nonce are the real thing
+        let ev = scan(&forged("rm -rf /", &format!(";sphere={NONCE}"), &format!(";{NONCE}")));
+        let f = finished(&ev);
+        assert_eq!((f.command.as_str(), f.exit, f.output_tail.as_str()), ("rm -rf /", 1, "fake output"));
+    }
+
+    #[test]
+    fn forged_marks_during_a_command_change_neither_its_end_nor_its_line() {
+        for (sign133, sign7700) in wrong_signatures() {
+            // the command's own marks, with the crafted ones in the middle of its output
+            let s = format!("{}{}before\r\n{}after\r\n{}{}", command_mark("make"), start_mark(), forged("rm -rf /", &sign133, &sign7700), end_mark(2), prompt_mark());
+            let ev = scan(&s);
+            assert_eq!(ev.len(), 2, "{sign133:?}: {ev:?}");
+            let f = finished(&ev);
+            // the crafted marks are only text in its output
+            assert_eq!((f.command.as_str(), f.exit, f.output_tail.as_str()), ("make", 2, "before\nfake output\nafter"), "{sign133:?}");
+        }
+    }
+
+    #[test]
+    fn a_forged_command_line_is_not_the_one_that_ran() {
+        for (_, sign7700) in wrong_signatures() {
+            let line = osc(&format!("7700;cmd;{}{sign7700}", b64("rm -rf /")));
+            // before the start mark, where the shell puts its own
+            let ev = scan(&format!("{}{line}{}{}", command_mark("ls"), start_mark(), end_mark(1)));
+            assert_eq!(finished(&ev).command, "ls", "{sign7700:?}");
+            // after it
+            let ev = scan(&format!("{}{line}{}", start_mark(), end_mark(1)));
+            assert_eq!(finished(&ev).command, "", "{sign7700:?}");
+        }
+    }
+
+    #[test]
+    fn a_forged_prompt_does_not_drop_the_command_that_runs() {
+        for (sign133, _) in wrong_signatures() {
+            let ev = scan(&format!("{}output{}{}", start_mark(), osc(&format!("133;A{sign133}")), end_mark(3)));
+            assert_eq!(finished(&ev).exit, 3, "{sign133:?}");
+        }
+    }
+
+    #[test]
+    fn a_scanner_without_a_nonce_reports_nothing() {
+        let all = session("make", "/work/sphere", "boom\r\n", 2);
+        let now = Instant::now();
+        for nonce in [None, Some("")] {
+            let mut sc = Scanner::new(nonce);
+            assert!(sc.feed(all.as_bytes(), now).is_empty(), "{nonce:?}");
+            assert!(!sc.running() && sc.cwd().is_empty());
+        }
+        // and one for another nonce reads nothing of this tab's
+        let mut sc = Scanner::new(Some("not-the-nonce-of-this-shell"));
+        assert!(sc.feed(all.as_bytes(), now).is_empty());
+        assert!(!sc.running());
+    }
+
+    #[test]
+    fn the_shells_own_directory_replaces_a_forged_one_before_the_end() {
+        // OSC 7 has no nonce, but the shell prints its own right before the end mark
+        let s = format!("{}{}{}{}{}", command_mark("make"), start_mark(), osc("7;file://host/forged"), osc("7;file://host/work/sphere"), end_mark(2));
+        assert_eq!(finished(&scan(&s)).cwd, "/work/sphere");
+    }
+
     #[test]
     fn output_with_bytes_before_any_mark_is_ignored() {
-        let mut sc = Scanner::new();
+        let mut sc = Scanner::new(Some(NONCE));
         let now = Instant::now();
         assert!(sc.feed(b"\x1b[1mwelcome\x1b[0m\r\nlast login: today\r\n", now).is_empty());
         assert!(!sc.running());

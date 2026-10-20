@@ -1,11 +1,13 @@
 # Sphere's shell integration for zsh, 3 of 4. See zshenv. Besides reading your .zshrc, this adds the hooks that tell
 # Sphere's terminal when a command starts and ends, with its exit status and the directory it ran in, so a failed
 # command can offer "Fix it". Sphere reads these sequences from the terminal's output:
-#   OSC 7700 ; cmd ; <base64 of the command line> BEL    the command about to run
-#   OSC 133 ; C BEL                                       its output starts
-#   OSC 7 ; file://host/path BEL                          the working directory
-#   OSC 133 ; D ; <exit status> BEL                       the command finished
-#   OSC 133 ; A BEL                                       the prompt is about to be drawn
+#   OSC 7700 ; cmd ; <base64 of the command line> ; <nonce> BEL    the command about to run
+#   OSC 133 ; C ; sphere=<nonce> BEL                                 its output starts
+#   OSC 7 ; file://host/path BEL                                     the working directory
+#   OSC 133 ; D ; <exit status> ; sphere=<nonce> BEL                 the command finished
+#   OSC 133 ; A ; sphere=<nonce> BEL                                 the prompt is about to be drawn
+# The nonce is the secret that .zshenv took from SPHERE_SHELL_NONCE; Sphere believes only the marks that carry it.
+# Without one (zsh started by hand with these files) no hooks are added.
 # The hooks swallow their own errors and never change your options, variables or prompt.
 # Adapted from VS Code's shellIntegration-rc.zsh (MIT License, Copyright (c) Microsoft Corporation).
 
@@ -54,9 +56,9 @@ __sphere_precmd() {
 	o=$'\e]7;file://'${HOST-}${__sphere_url-}$'\a'
 	if ((${__sphere_ran:-0})); then
 		__sphere_ran=0
-		o+=$'\e]133;D;'$s$'\a'
+		o+=$'\e]133;D;'$s$';sphere='$__sphere_nonce$'\a'
 	fi
-	o+=$'\e]133;A\a'
+	o+=$'\e]133;A;sphere='$__sphere_nonce$'\a'
 	builtin print -rn -- $o 2>/dev/null
 	# If zsh never got to .zlogin, hand ZDOTDIR back to you now.
 	if [[ -n ${__sphere_zdir-} ]]; then
@@ -76,12 +78,12 @@ __sphere_preexec() {
 	builtin local line=$1 b64
 	__sphere_ran=1
 	b64=$(\command base64 <<<"${line[1,4096]}" 2>/dev/null)
-	builtin print -rn -- $'\e]7700;cmd;'${b64//$'\n'/}$'\a\e]133;C\a' 2>/dev/null
+	builtin print -rn -- $'\e]7700;cmd;'${b64//$'\n'/}';'$__sphere_nonce$'\a\e]133;C;sphere='$__sphere_nonce$'\a' 2>/dev/null
 }
 
 __sphere_install() {
 	builtin emulate -L zsh
-	[[ -o interactive && -t 1 && -z ${__sphere_hooked-} ]] || return 0
+	[[ -o interactive && -t 1 && -n ${__sphere_nonce-} && -z ${__sphere_hooked-} ]] || return 0
 	[[ ${SPHERE_SHELL_INTEGRATION-1} == (0|false|off|no) ]] && return 0
 	__sphere_hooked=1
 	__sphere_ran=0

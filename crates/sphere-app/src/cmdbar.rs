@@ -471,7 +471,7 @@ fn run(text: &str, svc: &Service, toasts: &mut Toasts, terms: &mut crate::term::
             // watch it work
             working.open_latest();
             remember(&repo);
-            svc.send(Cmd::Start { repo, prompt, title: None });
+            svc.send(Cmd::Start { repo, prompt, title: None, in_place: false });
         }
         Err(e) => toasts.push(e),
     }
