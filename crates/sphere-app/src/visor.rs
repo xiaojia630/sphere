@@ -224,7 +224,7 @@ pub fn setup(mut commands: Commands, f: Res<UiFonts>, dock: Query<Entity, With<D
     c.entity(strip).add_child(row);
     // toasts, centred above the dock
     let stack = c
-        .spawn((ToastStack, Node { position_type: PositionType::Absolute, left: px(0), right: px(0), bottom: px(104), flex_direction: FlexDirection::Column, align_items: AlignItems::Center, row_gap: px(6), ..default() }))
+        .spawn((ToastStack, Node { position_type: PositionType::Absolute, left: px(0), right: px(0), bottom: px(TOASTS_BOTTOM), flex_direction: FlexDirection::Column, align_items: AlignItems::Center, row_gap: px(6), ..default() }))
         .id();
     c.entity(root.0).add_children(&[strip, stack]);
     c.init_resource::<Visor>();
@@ -382,6 +382,9 @@ pub fn ticker(
         ut.translation = Val2::px(v.ticker_x, 0.0);
     }
 }
+
+/// How far the toasts sit above the bottom of the window, in px (the command bar's protocol preview lifts them).
+pub const TOASTS_BOTTOM: f32 = 104.0;
 
 #[derive(Component)]
 pub struct ToastBox(pub usize);

@@ -26,8 +26,15 @@ pub struct Open {
     pub work_task: Option<String>,
     /// the bar's `go <filter>`, the NEW indicator: open Go to with this filter typed
     pub goto: Option<String>,
+    /// typed "memory": `memory::commands` opens the card of notes
+    pub memory: bool,
     /// a click on the Agents panel (panel px): an "elsewhere" row opens its card, anywhere else opens the Working view
     pub agents_click: Option<bevy::math::Vec2>,
+    /// typed "protocols": `protocols::commands` opens the card of what runs on a schedule
+    pub protocols: bool,
+    /// a click on the Terminal panel (panel px): FIX IT and DISMISS on a failed command's strip, anywhere else focuses
+    /// the terminal (`fixit::apply` finds which)
+    pub term_click: Option<bevy::math::Vec2>,
 }
 
 /// The Code app's tile.
@@ -38,6 +45,11 @@ pub const FILES: usize = 6;
 const SYSTEM: usize = 100;
 
 impl Open {
+    /// The app that is about to open (tests).
+    #[cfg(test)]
+    pub fn pending(&self) -> Option<usize> {
+        self.pending
+    }
     pub fn app(&mut self, i: usize, toasts: &mut Toasts) {
         match APPS.get(i) {
             Some((_, true)) => self.pending = Some(i),

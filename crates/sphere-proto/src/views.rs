@@ -4,6 +4,7 @@
 
 use crate::api::Snapshot;
 use crate::event::{Event, EventBody, FileStat, PlanItem, TaskState};
+use crate::protocol::Protocol;
 use crate::request::{AnswerKind, RequestInfo, RequestStatus};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
@@ -86,6 +87,12 @@ pub struct TaskView {
     /// Helpers never are: their parent reads their results.
     #[serde(default)]
     pub unseen: bool,
+    /// How many of the user's notes the latest agent process was told when it started.
+    #[serde(default)]
+    pub briefed: u32,
+    /// The protocol (`p1`) that started the task on its schedule.
+    #[serde(default)]
+    pub protocol: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -106,8 +113,12 @@ pub struct Views {
     cost_by_day: BTreeMap<String, f64>,
     /// Seconds agents waited on the human, by the UTC day the request closed.
     waited_by_day: BTreeMap<String, u64>,
+    protocols: HashMap<String, Protocol>,
+    protocol_order: Vec<String>,
     max_task: u64,
     max_request: u64,
+    /// The highest protocol number ever saved: ids are not reused when a protocol is removed.
+    max_protocol: u64,
     /// `task + tool` -> the request that was answered `change`.
     revise_hints: HashMap<String, String>,
 }
@@ -124,7 +135,7 @@ fn hint_key(task: &str, tool: &str) -> String {
 
 /// Whole seconds from one RFC 3339 time to a later one. 0 when either won't parse or the span
 /// runs backwards.
-fn seconds_between(from: &str, to: &str) -> u64 {
+pub(crate) fn seconds_between(from: &str, to: &str) -> u64 {
     let parse = |s: &str| OffsetDateTime::parse(s, &Rfc3339).ok();
     match (parse(from), parse(to)) {
         (Some(a), Some(b)) => u64::try_from((b - a).whole_seconds()).unwrap_or(0),
@@ -165,6 +176,9 @@ impl Views {
             }
             v.requests.insert(r.info.id.clone(), r);
         }
+        for p in snap.protocols {
+            v.save_protocol(p);
+        }
         v.cost_by_day.insert(today.to_string(), snap.cost_today_usd);
         v.waited_by_day
             .insert(today.to_string(), snap.waited_today_secs);
@@ -204,6 +218,31 @@ impl Views {
         let mut v: Vec<&TaskView> = self.tasks().into_iter().filter(|t| t.unseen).collect();
         v.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
         v
+    }
+
+    pub fn protocol(&self, id: &str) -> Option<&Protocol> {
+        self.protocols.get(id)
+    }
+
+    /// Protocols in the order they were written.
+    pub fn protocols(&self) -> Vec<&Protocol> {
+        self.protocol_order
+            .iter()
+            .filter_map(|id| self.protocols.get(id))
+            .collect()
+    }
+
+    /// The highest protocol number ever saved, for numbering the next one.
+    pub fn max_protocol(&self) -> u64 {
+        self.max_protocol
+    }
+
+    fn save_protocol(&mut self, p: Protocol) {
+        self.max_protocol = self.max_protocol.max(numeric_suffix(&p.id));
+        if !self.protocols.contains_key(&p.id) {
+            self.protocol_order.push(p.id.clone());
+        }
+        self.protocols.insert(p.id.clone(), p);
     }
 
     pub fn request(&self, id: &str) -> Option<&RequestView> {
@@ -308,6 +347,7 @@ impl Views {
                 allow_rewrites,
                 resume_session,
                 parent_task,
+                protocol,
             } => {
                 self.max_task = self.max_task.max(numeric_suffix(id));
                 if !self.tasks.contains_key(id) {
@@ -348,11 +388,22 @@ impl Views {
                         taken_over_from: None,
                         parent_task: parent_task.clone(),
                         unseen: false,
+                        briefed: 0,
+                        protocol: protocol.clone(),
                     },
                 );
                 return;
             }
-            EventBody::Warning { .. } => return,
+            EventBody::ProtocolSaved { protocol } => {
+                self.save_protocol(protocol.clone());
+                return;
+            }
+            EventBody::ProtocolRemoved { id: removed } => {
+                self.protocols.remove(removed);
+                self.protocol_order.retain(|p| p != removed);
+                return;
+            }
+            EventBody::Warning { .. } | EventBody::MemoryChanged { .. } => return,
             _ => {}
         }
 
@@ -440,9 +491,15 @@ impl Views {
                 t.branch = branch.clone();
                 t.base = Some(base.clone());
             }
-            EventBody::AgentStarted { child, pid, .. } => {
+            EventBody::AgentStarted {
+                child,
+                pid,
+                briefed,
+                ..
+            } => {
                 t.child = Some(child.clone());
                 t.pid = Some(*pid);
+                t.briefed = *briefed;
                 t.state = TaskState::Working;
                 t.last_total_cost = 0.0;
                 if t.starts == 0 && t.prompt.trim().is_empty() {
@@ -595,6 +652,8 @@ fn request_line(info: &RequestInfo) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::event::StepKind;
+    use crate::protocol::{Schedule, Weekday};
     use crate::request::AnswerKind::{Change, Later, Yes};
     use crate::request::RequestKind;
     use serde_json::json;
@@ -623,8 +682,37 @@ mod tests {
                 allow_rewrites: false,
                 resume_session: None,
                 parent_task: None,
+                protocol: None,
             },
         )
+    }
+
+    fn created_by(seq: u64, task: &str, protocol: &str) -> Event {
+        let mut e = created(seq, task);
+        if let EventBody::TaskCreated { protocol: p, .. } = &mut e.body {
+            *p = Some(protocol.to_string());
+        }
+        e
+    }
+
+    fn saved(id: &str, enabled: bool) -> EventBody {
+        EventBody::ProtocolSaved {
+            protocol: Protocol {
+                id: id.into(),
+                text: format!("every day 9:00 sphere: {id}"),
+                schedule: Schedule::Weekly {
+                    days: Weekday::ALL.to_vec(),
+                    hour: 9,
+                    minute: 0,
+                },
+                repo: "/r".into(),
+                prompt: id.into(),
+                enabled,
+                created_at: 1,
+                last_run: None,
+                next_run: enabled.then_some(3600),
+            },
+        }
     }
 
     fn started(seq: u64, task: &str) -> Event {
@@ -635,6 +723,7 @@ mod tests {
                 child: "c1".into(),
                 pid: 5,
                 resumed: false,
+                briefed: 0,
             },
         )
     }
@@ -717,6 +806,7 @@ mod tests {
                 allow_rewrites: false,
                 resume_session: Some("s1".into()),
                 parent_task: None,
+                protocol: None,
             },
         ));
         v.apply(&ev(
@@ -758,6 +848,41 @@ mod tests {
         assert_eq!((t.cost_usd, t.last_total_cost), (0.0, 0.26));
         v.apply(&turn(5, Some(1)));
         assert_eq!(v.task("t1").unwrap().status, "Done");
+    }
+
+    #[test]
+    fn a_task_keeps_how_many_notes_its_latest_agent_was_told() {
+        let mut v = Views::default();
+        v.apply(&created(1, "t1"));
+        assert_eq!(v.task("t1").unwrap().briefed, 0);
+        let start = |seq, briefed| {
+            ev(
+                seq,
+                "t1",
+                EventBody::AgentStarted {
+                    child: "c1".into(),
+                    pid: 5,
+                    resumed: seq > 2,
+                    briefed,
+                },
+            )
+        };
+        v.apply(&start(2, 3));
+        assert_eq!(v.task("t1").unwrap().briefed, 3);
+        // a resumed process is briefed again, with the notes as they are by then
+        v.apply(&start(3, 1));
+        assert_eq!(v.task("t1").unwrap().briefed, 1);
+    }
+
+    #[test]
+    fn a_memory_change_moves_the_seq_and_touches_no_task() {
+        let mut v = Views::default();
+        v.apply(&created(1, "t1"));
+        let before = v.task("t1").unwrap().clone();
+        v.apply(&ev(2, "", EventBody::MemoryChanged { notes: 4 }));
+        assert_eq!(v.seq, 2);
+        assert_eq!(v.task("t1"), Some(&before));
+        assert_eq!(v.tasks().len(), 1);
     }
 
     #[test]
@@ -976,6 +1101,8 @@ mod tests {
             daily_cap_usd: None,
             max_concurrent: None,
             waited_today_secs: v.waited_on(TODAY),
+            memory: vec![],
+            protocols: v.protocols().into_iter().cloned().collect(),
         }
     }
 
@@ -988,6 +1115,7 @@ mod tests {
             server.open_requests(),
             "{what}: open requests"
         );
+        assert_eq!(client.protocols(), server.protocols(), "{what}: protocols");
         assert_eq!(client.cost_on(TODAY), server.cost_on(TODAY), "{what}: cost");
         assert_eq!(
             client.waited_on(TODAY),
@@ -1227,12 +1355,17 @@ mod tests {
         for seq in 1..=n {
             let at = format!("2026-03-0{}T05:06:{:02}.000Z", 3 + next(2), next(60));
             let mut task = format!("t{}", 1 + next(4));
-            let kind = next(14);
+            let kind = next(16);
             let body = match kind {
                 _ if made < 4 && (kind < 3 || task == format!("t{}", made + 1)) => {
                     made += 1;
                     task = format!("t{made}");
-                    created(0, &task).body
+                    // Every other task is one a protocol started.
+                    if made % 2 == 0 {
+                        created_by(0, &task, &format!("p{}", 1 + next(3))).body
+                    } else {
+                        created(0, &task).body
+                    }
                 }
                 0 | 1 => started(0, &task).body,
                 2..=4 => {
@@ -1286,6 +1419,16 @@ mod tests {
                 12 => EventBody::UserMessage {
                     text: "again".into(),
                 },
+                14 => {
+                    task = String::new();
+                    saved(&format!("p{}", 1 + next(3)), next(2) == 0)
+                }
+                15 => {
+                    task = String::new();
+                    EventBody::ProtocolRemoved {
+                        id: format!("p{}", 1 + next(3)),
+                    }
+                }
                 _ => [
                     EventBody::Warning {
                         message: "w".into(),
@@ -1484,5 +1627,242 @@ mod tests {
         assert_eq!(v.waited_on("2026-03-04"), 0);
         assert_eq!(v.waited_on(""), 0);
         assert!(v.open_requests().is_empty(), "they still closed");
+    }
+
+    fn finish(seq: u64, task: &str, ok: bool, interrupted: bool) -> Event {
+        ev(
+            seq,
+            task,
+            EventBody::Turn {
+                ok,
+                interrupted,
+                summary: "s".into(),
+                turns: Some(1),
+                duration_ms: None,
+                cost_usd: None,
+                cost_delta_usd: 0.0,
+            },
+        )
+    }
+
+    fn helper_created(seq: u64, task: &str, parent: &str) -> Event {
+        let mut e = created(seq, task);
+        if let EventBody::TaskCreated { parent_task, .. } = &mut e.body {
+            *parent_task = Some(parent.into());
+        }
+        e
+    }
+
+    fn unseen_ids(v: &Views) -> Vec<&str> {
+        v.unseen().iter().map(|t| t.id.as_str()).collect()
+    }
+
+    #[test]
+    fn a_finished_top_level_task_is_new_until_seen() {
+        let mut v = with_task();
+        assert!(unseen_ids(&v).is_empty());
+        v.apply(&finish(3, "t1", true, false));
+        assert_eq!(unseen_ids(&v), ["t1"]);
+        v.apply(&ev(4, "t1", EventBody::Seen {}));
+        assert!(unseen_ids(&v).is_empty());
+        // Seen again changes nothing.
+        v.apply(&ev(5, "t1", EventBody::Seen {}));
+        assert!(!v.task("t1").unwrap().unseen);
+    }
+
+    #[test]
+    fn a_failed_task_is_new_too() {
+        let mut v = with_task();
+        v.apply(&finish(3, "t1", false, false));
+        assert_eq!(unseen_ids(&v), ["t1"]);
+        v.apply(&ev(4, "t1", EventBody::Seen {}));
+        v.apply(&ev(
+            5,
+            "t1",
+            EventBody::UserMessage {
+                text: "again".into(),
+            },
+        ));
+        v.apply(&ev(
+            6,
+            "t1",
+            EventBody::Failed {
+                message: "boom".into(),
+            },
+        ));
+        assert_eq!(unseen_ids(&v), ["t1"]);
+    }
+
+    #[test]
+    fn an_interrupted_turn_is_not_new() {
+        let mut v = with_task();
+        v.apply(&finish(3, "t1", false, true));
+        assert_eq!(v.task("t1").unwrap().state, TaskState::Done);
+        assert!(unseen_ids(&v).is_empty());
+    }
+
+    #[test]
+    fn a_message_or_a_stop_clears_new() {
+        let mut v = with_task();
+        v.apply(&finish(3, "t1", true, false));
+        v.apply(&ev(
+            4,
+            "t1",
+            EventBody::UserMessage {
+                text: "more".into(),
+            },
+        ));
+        assert!(unseen_ids(&v).is_empty());
+        assert_eq!(v.task("t1").unwrap().state, TaskState::Working);
+        v.apply(&finish(5, "t1", true, false));
+        assert_eq!(unseen_ids(&v), ["t1"]);
+        v.apply(&ev(6, "t1", EventBody::Stopped {}));
+        assert!(unseen_ids(&v).is_empty());
+    }
+
+    #[test]
+    fn a_helpers_result_is_never_new() {
+        let mut v = with_task();
+        v.apply(&helper_created(3, "t2", "t1"));
+        v.apply(&started(4, "t2"));
+        v.apply(&finish(5, "t2", true, false));
+        assert_eq!(v.task("t2").unwrap().state, TaskState::Done);
+        assert!(unseen_ids(&v).is_empty());
+        v.apply(&ev(
+            6,
+            "t2",
+            EventBody::UserMessage {
+                text: "more".into(),
+            },
+        ));
+        v.apply(&finish(7, "t2", false, false));
+        v.apply(&ev(
+            8,
+            "t2",
+            EventBody::Failed {
+                message: "boom".into(),
+            },
+        ));
+        assert!(unseen_ids(&v).is_empty());
+    }
+
+    #[test]
+    fn new_results_come_newest_first() {
+        let mut v = Views::default();
+        for (i, id) in ["t1", "t2"].iter().enumerate() {
+            v.apply(&created(1 + i as u64 * 10, id));
+            v.apply(&started(2 + i as u64 * 10, id));
+        }
+        for (seq, task, when) in [(30, "t2", "05"), (31, "t1", "06")] {
+            v.apply(&Event {
+                at: format!("2026-03-04T{when}:00:00.000Z"),
+                ..finish(seq, task, true, false)
+            });
+        }
+        assert_eq!(unseen_ids(&v), ["t1", "t2"]);
+    }
+
+    #[test]
+    fn helpers_of_lists_a_parents_helpers_in_order() {
+        let mut v = with_task();
+        v.apply(&helper_created(3, "t2", "t1"));
+        v.apply(&created(4, "t3"));
+        v.apply(&helper_created(5, "t4", "t1"));
+        v.apply(&helper_created(6, "t5", "t3"));
+        let ids =
+            |p: &str| -> Vec<String> { v.helpers_of(p).iter().map(|t| t.id.clone()).collect() };
+        assert_eq!(ids("t1"), ["t2", "t4"]);
+        assert_eq!(ids("t3"), ["t5"]);
+        assert!(ids("t2").is_empty() && ids("zz").is_empty());
+        assert_eq!(v.task("t2").unwrap().parent_task.as_deref(), Some("t1"));
+        assert_eq!(v.task("t1").unwrap().parent_task, None);
+    }
+
+    #[test]
+    fn a_waiting_parent_reads_as_the_step_it_is_in() {
+        let mut v = with_task();
+        v.apply(&ev(
+            3,
+            "t1",
+            EventBody::Step {
+                id: "s1".into(),
+                step_kind: StepKind::Delegate,
+                tool: "mcp__sphere__wait_for_helpers".into(),
+                title: "Waiting for 2 helpers".into(),
+                detail: String::new(),
+                parent: None,
+            },
+        ));
+        assert_eq!(
+            v.task("t1").unwrap().status,
+            "Waiting for 2 helpers, step 1"
+        );
+    }
+
+    #[test]
+    fn protocols_are_saved_replaced_and_removed_in_order() {
+        let mut v = Views::default();
+        v.apply(&ev(1, "", saved("p1", true)));
+        v.apply(&ev(2, "", saved("p2", true)));
+        assert_eq!(v.seq, 2);
+        let ids = |v: &Views| {
+            v.protocols()
+                .iter()
+                .map(|p| p.id.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(ids(&v), ["p1", "p2"]);
+        // Saving again replaces what was there and keeps its place.
+        v.apply(&ev(3, "", saved("p1", false)));
+        assert_eq!(ids(&v), ["p1", "p2"]);
+        assert!(!v.protocol("p1").unwrap().enabled);
+        assert_eq!(v.protocol("p1").unwrap().next_run, None);
+        v.apply(&ev(4, "", EventBody::ProtocolRemoved { id: "p1".into() }));
+        assert_eq!(ids(&v), ["p2"]);
+        assert!(v.protocol("p1").is_none());
+        // A number that was used is not handed out again, even once its protocol is gone.
+        assert_eq!(v.max_protocol(), 2);
+        v.apply(&ev(5, "", EventBody::ProtocolRemoved { id: "p2".into() }));
+        assert_eq!(v.max_protocol(), 2);
+        // Removing what isn't there is nothing.
+        v.apply(&ev(6, "", EventBody::ProtocolRemoved { id: "p9".into() }));
+        assert!(v.protocols().is_empty() && v.seq == 6);
+        assert!(v.tasks().is_empty());
+    }
+
+    #[test]
+    fn a_task_remembers_the_protocol_that_started_it() {
+        let mut v = Views::default();
+        v.apply(&created(1, "t1"));
+        v.apply(&created_by(2, "t2", "p3"));
+        assert_eq!(v.task("t1").unwrap().protocol, None);
+        assert_eq!(v.task("t2").unwrap().protocol.as_deref(), Some("p3"));
+        // The task view travels in a snapshot with it, and one from an older sphered has none.
+        let json = serde_json::to_value(v.task("t2").unwrap()).unwrap();
+        assert_eq!(json["protocol"], "p3");
+        let mut old = json;
+        old.as_object_mut().unwrap().remove("protocol");
+        let t: TaskView = serde_json::from_value(old).unwrap();
+        assert_eq!(t.protocol, None);
+    }
+
+    #[test]
+    fn a_client_keeps_the_protocols_current_from_a_snapshot() {
+        let mut server = Views::default();
+        server.apply(&ev(1, "", saved("p1", true)));
+        server.apply(&created_by(2, "t1", "p1"));
+        let mut client = Views::from_snapshot(snapshot_of(&server), TODAY);
+        assert_eq!(client.protocols(), server.protocols());
+        assert_eq!(client.max_protocol(), 1);
+        for e in [
+            ev(3, "", saved("p2", true)),
+            ev(4, "", saved("p1", false)),
+            ev(5, "", EventBody::ProtocolRemoved { id: "p2".into() }),
+        ] {
+            server.apply(&e);
+            client.apply(&e);
+        }
+        assert_eq!(client.protocols(), server.protocols());
+        assert_eq!(client.protocols().len(), 1);
     }
 }

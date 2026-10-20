@@ -111,6 +111,25 @@ pub fn relax(boxes: &mut [(Vec2, Vec2)], safe: Rect, iters: usize) {
     }
 }
 
+/// Moves each box clear of the fixed panels (Orbits, Run slots) by the shortest slide that stays inside `safe`.
+pub fn clear_of(boxes: &mut [(Vec2, Vec2)], fixed: &[Rect], safe: Rect) {
+    const GAP: f32 = 8.0;
+    let hit = |c: Vec2, s: Vec2, f: &Rect| c.x + s.x / 2.0 > f.min.x - GAP && c.x - s.x / 2.0 < f.max.x + GAP && c.y + s.y / 2.0 > f.min.y - GAP && c.y - s.y / 2.0 < f.max.y + GAP;
+    for b in boxes.iter_mut() {
+        for f in fixed {
+            if !hit(b.0, b.1, f) {
+                continue;
+            }
+            let h = b.1 / 2.0;
+            let cands = [Vec2::new(f.min.x - GAP - h.x, b.0.y), Vec2::new(f.max.x + GAP + h.x, b.0.y), Vec2::new(b.0.x, f.min.y - GAP - h.y), Vec2::new(b.0.x, f.max.y + GAP + h.y)];
+            let best = cands.into_iter().filter(|c| clamp_box(*c, b.1, safe) == *c && !fixed.iter().any(|g| hit(*c, b.1, g))).min_by(|p, q| p.distance(b.0).total_cmp(&q.distance(b.0)));
+            if let Some(c) = best {
+                b.0 = c;
+            }
+        }
+    }
+}
+
 /// The tooltip's top-left: 22 px right and 18 px below the pointer, on the left of it when it would pass `w - 12`.
 pub fn tip_pos(p: Vec2, size: Vec2, w: f32) -> Vec2 {
     let x = if p.x + 22.0 + size.x > w - 12.0 { p.x - 22.0 - size.x } else { p.x + 22.0 };
@@ -265,7 +284,19 @@ fn build_label(c: &mut Commands, f: &UiFonts, root: Entity, owner: usize, a: &mo
     let dir = if left { FlexDirection::RowReverse } else { FlexDirection::Row };
     let title_col = if needs { acc } else if queued { line } else { hot };
     let title = text(c, owner, a.title.to_uppercase(), &f.ui700, 10.5, 1.6, title_col);
-    c.entity(title).insert(Node { max_width: px(LABEL_W - 26.0), overflow: Overflow::clip(), ..default() });
+    // an agent a protocol started carries a small PROTOCOL tag after its title
+    let head = if a.protocol {
+        c.entity(title).insert(Node { max_width: px(LABEL_W - 26.0 - 66.0), overflow: Overflow::clip(), ..default() });
+        let tag = boxed(c, owner, Node { padding: UiRect { left: px(4), right: px(4), top: px(1), bottom: px(0) }, border: UiRect::all(px(1)), flex_shrink: 0.0, ..default() }, None, Some(with_alpha(line, 0.4)));
+        let tt = text(c, owner, "PROTOCOL", &f.ui700, 8.0, 1.3, with_alpha(line, 0.85));
+        c.entity(tag).add_child(tt);
+        let row = c.spawn(Node { width: percent(100), flex_direction: dir, align_items: AlignItems::Center, column_gap: px(8), ..default() }).id();
+        c.entity(row).add_children(&[title, tag]);
+        row
+    } else {
+        c.entity(title).insert(Node { max_width: px(LABEL_W - 26.0), overflow: Overflow::clip(), ..default() });
+        title
+    };
     // repo, chip, percent
     let meta = c.spawn(Node { width: percent(100), flex_direction: dir, align_items: AlignItems::Center, column_gap: px(8), ..default() }).id();
     // a NEW chip takes the repo's place: the ring already says which repo it is
@@ -316,7 +347,7 @@ fn build_label(c: &mut Commands, f: &UiFonts, root: Entity, owner: usize, a: &mo
     let fc = if needs { acc } else if done { ok } else { tc(Role::Fill) };
     let fl = boxed(c, owner, Node { width: percent(w), height: px(2), ..default() }, Some(fc), None);
     c.entity(bar).add_child(fl);
-    c.entity(root).add_children(&[title, meta, st, bar]);
+    c.entity(root).add_children(&[head, meta, st, bar]);
 }
 
 fn build_ring(c: &mut Commands, f: &UiFonts, root: Entity, owner: usize, name: &str, sub: &str) {
@@ -470,6 +501,7 @@ fn overlay(
         }
     }
     let pan = out.panels.clone();
+    let fixed: Vec<Rect> = quads.iter().filter(|(p, _, hp)| p.op.x > 0.3 && hp.is_some_and(|h| matches!(h.kind, panels::Kind::Orbits | panels::Kind::Slots))).filter_map(|(p, tr, _)| panel_rect(cam, &gt, p, tr)).collect();
 
     // ---- satellite labels
     let hover = swarm.hover.clone().or_else(|| if sim.t > 2.5 { std::env::var("SPHERE_SWARM_HOVER").ok().filter(|h| model.agent(h).is_some()) } else { None });
@@ -546,7 +578,11 @@ fn overlay(
     }
     // relax the visible ones, then ease each toward its target
     let mut boxes: Vec<(Vec2, Vec2)> = ls.iter().map(|l| (l.target, l.size)).collect();
-    relax(&mut boxes, safe, 5);
+    clear_of(&mut boxes, &fixed, safe);
+    for _ in 0..6 {
+        relax(&mut boxes, safe, 1);
+        clear_of(&mut boxes, &fixed, safe);
+    }
     out.labels.clear();
     for (l, b) in ls.iter().zip(&boxes) {
         let o = LABEL0 + l.i;
@@ -830,6 +866,20 @@ mod tests {
         relax(&mut b, safe, 1);
         assert_eq!(b[0].0.x, 500.0);
         assert!(b[1].0.y - b[0].0.y > 50.0);
+    }
+
+    #[test]
+    fn labels_slide_clear_of_the_fixed_panels() {
+        let safe = rect(36.0, 80.0, 1564.0, 900.0);
+        let panel = rect(1300.0, 60.0, 1560.0, 300.0);
+        let mut b = [(Vec2::new(1250.0, 280.0), Vec2::new(268.0, 78.0))];
+        clear_of(&mut b, &[panel], safe);
+        let r = Rect::from_center_size(b[0].0, b[0].1);
+        assert!(r.max.x <= panel.min.x || r.min.y >= panel.max.y || r.max.y <= panel.min.y);
+        // a box that is already clear stays put
+        let mut c = [(Vec2::new(400.0, 500.0), Vec2::new(268.0, 78.0))];
+        clear_of(&mut c, &[panel], safe);
+        assert_eq!(c[0].0, Vec2::new(400.0, 500.0));
     }
 
     #[test]

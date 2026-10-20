@@ -1,0 +1,29 @@
+# Sphere's shell integration for zsh, 1 of 4: .zshenv, .zprofile, .zshrc and .zlogin. Sphere starts zsh with ZDOTDIR
+# pointing at the directory that holds these, so zsh reads them first. Each one reads your own file of the same name
+# from where zsh would have looked without us (your ZDOTDIR, or your home), with ZDOTDIR set to your value so your
+# files see what they always do, then points ZDOTDIR back here for the next file. .zlogin hands it back for good.
+# .zshrc adds the hooks that tell Sphere when a command starts and ends (see there).
+#
+# Adapted from the shell integration scripts of VS Code (https://github.com/microsoft/vscode, MIT License,
+# Copyright (c) Microsoft Corporation): shellIntegration-env.zsh, -profile.zsh, -rc.zsh and -login.zsh.
+#
+# SPHERE_USER_ZDOTDIR is your own ZDOTDIR (empty when you have none); SPHERE_SHELL_INTEGRATION=0 turns it all off.
+#
+# SPHERE_SHELL_NONCE is a secret that Sphere gives this one shell. Every mark the hooks print carries it, and Sphere
+# believes no mark without it, so nothing else that prints to the terminal can pose as this shell. It is copied to
+# a variable of the shell and unset first of all, before your files run, so nothing you start inherits it.
+# (VS Code does the same with VSCODE_NONCE.)
+
+builtin typeset -g +x __sphere_nonce=${SPHERE_SHELL_NONCE-}
+builtin unset SPHERE_SHELL_NONCE
+
+__sphere_dir=$ZDOTDIR
+ZDOTDIR=${SPHERE_USER_ZDOTDIR-}
+[[ -n $ZDOTDIR ]] || builtin unset ZDOTDIR
+if [[ ${ZDOTDIR:-$HOME} != $__sphere_dir && -r ${ZDOTDIR:-$HOME}/.zshenv ]]; then
+	. "${ZDOTDIR:-$HOME}/.zshenv"
+fi
+# your .zshenv may have moved ZDOTDIR
+SPHERE_USER_ZDOTDIR=${ZDOTDIR-}
+ZDOTDIR=$__sphere_dir
+builtin unset __sphere_dir

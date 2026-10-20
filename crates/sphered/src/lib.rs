@@ -1,14 +1,17 @@
 //! sphered: the Sphere service. See docs/sphered.md.
 
 pub mod agent_proto;
+pub mod briefing;
 pub mod config;
 pub mod envpath;
+pub mod helpers;
 pub mod host_link;
 pub mod hub;
 pub mod manager;
 pub mod outside;
 pub mod peer;
 pub mod policy;
+pub mod protocols;
 pub mod server;
 pub mod sessions;
 pub mod store;
@@ -66,6 +69,7 @@ impl Daemon {
         std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600))?;
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let join = tokio::spawn(server::serve(mgr.clone(), listener, shutdown_rx));
+        mgr.start_protocols(protocols::TICK);
         tracing::info!(socket = %socket.display(), "sphered ready");
         Ok(Daemon {
             manager: mgr,

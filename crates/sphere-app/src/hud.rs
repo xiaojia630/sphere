@@ -61,6 +61,9 @@ pub fn setup_panels(
     let mut terms = Terms { demo, ..default() };
     if !demo {
         terms.connect(first);
+    } else if args.fixit.is_some() {
+        // `--fixit`: a tab that has just printed a failed cargo test, read by the same scanner as any other
+        terms.tabs.push(crate::fixit::demo_tab());
     } else {
         match Terminal::spawn(first.as_deref(), demo) {
             Ok(t) => terms.tabs.push(t),
@@ -690,7 +693,7 @@ mod tests {
     }
 
     fn args() -> Args {
-        Args { cmd: None, bench: None, shot: None, record: None, record_frames: 180, frames: 120, depth: false, orbit: false, apps: false, work: false, swarm: false, code: false, git: false, open_app: None, icon: false, aa: "smaa".into(), offscreen: false, collapsed: false, focus_term: false, msaa: true, size: (1600, 1000), dt: 0.05, demo: false, live: false, moment: false, elsewhere: false, calendar: false, takeover: None, theme: None, motion: None, goto: None, tasks: false }
+        Args { cmd: None, bench: None, shot: None, record: None, record_frames: 180, frames: 120, depth: false, orbit: false, apps: false, work: false, swarm: false, code: false, git: false, open_app: None, icon: false, aa: "smaa".into(), offscreen: false, collapsed: false, focus_term: false, msaa: true, size: (1600, 1000), dt: 0.05, demo: false, live: false, moment: false, elsewhere: false, calendar: false, takeover: None, memory: None, protocols: None, fixit: None, theme: None, motion: None, goto: None, tasks: false }
     }
 
     /// The readout only follows what changed (`Agents` and `Live` are no longer marked changed every frame), so the
@@ -710,7 +713,7 @@ mod tests {
         assert_eq!(words(&app).0, "STARTING");
         // the link comes up and an agent starts while the boot still runs
         app.world_mut().resource_mut::<Live>().link = Some(Link::Connected);
-        let working = Agent { name: "a".into(), state: AState::Working, p: 0.5, step: "x".into(), rate: 0.0, figure: None, chip: None };
+        let working = Agent { name: "a".into(), state: AState::Working, p: 0.5, step: "x".into(), rate: 0.0, figure: None, chip: None, protocol: false };
         app.world_mut().resource_mut::<Agents>().set_roster(Roster::of(&[working]));
         app.update();
         assert_eq!(words(&app).0, "STARTING");

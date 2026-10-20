@@ -74,6 +74,9 @@ pub struct RailTime(pub usize);
 pub struct RailTitle(pub usize);
 #[derive(Component)]
 pub struct RailDot(pub usize);
+/// The PROTOCOL tag of a rail row that is a protocol's run: it follows the time, and the colour square goes.
+#[derive(Component)]
+pub struct RailTag(pub usize);
 
 #[derive(Resource, Default)]
 pub struct Rolodex {
@@ -266,7 +269,11 @@ pub fn setup(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut atlas
         let tm = c.spawn((RailTime(i), Text::new(""), font(&f.mono, 11.5, 0.46), TextColor(dim), LineHeight::Px(16.0), TextLayout { justify: Justify::Right, linebreak: LineBreak::NoWrap }, Node { width: px(RAIL_TIME_W), flex_shrink: 0.0, ..default() })).id();
         let tt = c.spawn((RailTitle(i), Text::new(""), font(&f.ui500, 12.5, 0.6), TextColor(with_alpha(line, 0.85)), LineHeight::Px(16.0), TextLayout { linebreak: LineBreak::NoWrap, ..default() }, Node { flex_grow: 1.0, flex_shrink: 1.0, overflow: Overflow::clip(), ..default() })).id();
         let sq = c.spawn((RailDot(i), Node { width: px(6), height: px(6), ..default() }, BackgroundColor(fill))).id();
-        c.entity(row).add_children(&[tm, tt, sq]);
+        // a protocol's run has this tag after its time, and no colour square
+        let tag = c.spawn((RailTag(i), Node { display: Display::None, flex_shrink: 0.0, ..default() })).id();
+        let tag_text = c.spawn((Text::new("PROTOCOL"), font(&f.ui700, 9.0, 0.8), TextColor(with_alpha(line, 0.7)), LineHeight::Px(16.0))).id();
+        c.entity(tag).add_child(tag_text);
+        c.entity(row).add_children(&[tm, tag, tt, sq]);
         c.entity(b).add_child(row);
     }
     spawn_panel_quad(c, &mut meshes, &mut pmats, &ui, &PanelSpec { id: PanelId::Rail, w, h, home: anchor('r', 1546.0, 't', 236.0, w, h), home_scale: 1.0, side: -1.0, phase: 0.2, show_at: show_at(5), unframed: true });
@@ -371,23 +378,29 @@ pub fn update(
 const RAIL_ROW_W: f32 = 270.0;
 const RAIL_TIME_W: f32 = 82.0;
 
-/// The Next 24h rail: Calendar events when the feed changes and as the minute turns (times read NOW, then pass),
-/// else "Nothing scheduled" and why.
+/// The Next 24h rail: Calendar events and the protocols that run in the next day, when either changes and as the minute
+/// turns (times read NOW, then pass), else "Nothing scheduled" and why.
 #[allow(clippy::type_complexity)]
 pub fn draw_rail(
     cal: Res<crate::calendar::Calendar>,
-    mut seen: Local<(u64, i64)>,
-    mut nodes: ParamSet<(Query<(&RailRow, &mut Node)>, Query<&mut Node, With<RailEmpty>>, Query<&mut Node, With<RailHint>>)>,
+    svc: Res<crate::service::Service>,
+    mut seen: Local<(u64, u64, i64)>,
+    mut nodes: ParamSet<(Query<(&RailRow, &mut Node)>, Query<&mut Node, With<RailEmpty>>, Query<&mut Node, With<RailHint>>, Query<(&RailTag, &mut Node)>, Query<(&RailDot, &mut Node)>)>,
     mut texts: ParamSet<(Query<(&RailTime, &mut Text)>, Query<(&RailTitle, &mut Text)>, Query<&mut Text, With<RailEmpty>>, Query<&mut Text, With<RailHint>>)>,
     mut dots: Query<(&RailDot, &mut BackgroundColor)>,
 ) {
     let now = crate::core::unix_now();
     let (ver, feed) = cal.get();
-    if *seen == (ver + 1, now / 60) {
-        return;
-    }
-    *seen = (ver + 1, now / 60);
-    let r = crate::calendar::rail(&feed, now, crate::core::local_offset, crate::calendar::SLOTS);
+    let (protocols_rev, runs) = {
+        let s = svc.shared.lock().unwrap();
+        // the protocols are read only when they or the minute changed
+        if *seen == (ver + 1, s.protocols_rev + 1, now / 60) {
+            return;
+        }
+        (s.protocols_rev, crate::calendar::runs(&s.protocols, now))
+    };
+    *seen = (ver + 1, protocols_rev + 1, now / 60);
+    let r = crate::calendar::rail(&feed, &runs, now, crate::core::local_offset, crate::calendar::SLOTS);
     let show = |on: bool| if on { Display::Flex } else { Display::None };
     for (i, mut n) in &mut nodes.p0() {
         let d = show(i.0 < r.rows.len());
@@ -419,15 +432,28 @@ pub fn draw_rail(
             t.0 = v.into();
         }
     }
+    for (i, mut n) in &mut nodes.p3() {
+        let d = show(r.rows.get(i.0).is_some_and(|x| x.protocol));
+        if n.display != d {
+            n.display = d;
+        }
+    }
     let fill = role_color(Role::Fill);
     for (i, mut bg) in &mut dots {
-        // the calendar's own colour; the theme's fill when it has none; no square on the "+N more" row
+        // the calendar's own colour; the theme's fill when it has none; no square on the "+N more" row, nor on a
+        // protocol's (it has its tag, and the title takes the room)
         let c = match r.rows.get(i.0) {
-            Some(x) if x.time.is_empty() => Color::NONE,
+            Some(x) if x.time.is_empty() || x.protocol => Color::NONE,
             Some(x) => x.color.map(|[r, g, b]| Color::srgb(r, g, b)).unwrap_or(fill),
             None => Color::NONE,
         };
         bg.set_if_neq(BackgroundColor(c));
+    }
+    for (i, mut n) in &mut nodes.p4() {
+        let d = show(!r.rows.get(i.0).is_some_and(|x| x.protocol));
+        if n.display != d {
+            n.display = d;
+        }
     }
     for mut n in &mut nodes.p1() {
         let d = show(r.empty.is_some());

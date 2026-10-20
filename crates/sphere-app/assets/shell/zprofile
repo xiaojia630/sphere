@@ -1,0 +1,12 @@
+# Sphere's shell integration for zsh, 2 of 4. See zshenv.
+# Adapted from VS Code's shellIntegration-profile.zsh (MIT License, Copyright (c) Microsoft Corporation).
+
+__sphere_dir=$ZDOTDIR
+ZDOTDIR=${SPHERE_USER_ZDOTDIR-}
+[[ -n $ZDOTDIR ]] || builtin unset ZDOTDIR
+if [[ ${ZDOTDIR:-$HOME} != $__sphere_dir && -r ${ZDOTDIR:-$HOME}/.zprofile ]]; then
+	. "${ZDOTDIR:-$HOME}/.zprofile"
+fi
+SPHERE_USER_ZDOTDIR=${ZDOTDIR-}
+ZDOTDIR=$__sphere_dir
+builtin unset __sphere_dir

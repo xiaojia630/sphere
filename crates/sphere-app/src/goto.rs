@@ -545,6 +545,7 @@ pub fn setup(mut commands: Commands, root: Res<crate::hud::OverlayRoot>, f: Res<
             GoRoot,
             Interaction::None,
             Btn::Away,
+            BackgroundColor(Color::NONE),
             bevy::ui::FocusPolicy::Pass,
             Node { position_type: PositionType::Absolute, left: px(0), right: px(0), top: px(0), bottom: px(0), justify_content: JustifyContent::Center, align_items: AlignItems::FlexStart, padding: UiRect { top: percent(11), ..default() }, ..default() },
             GlobalZIndex(6),
@@ -599,6 +600,7 @@ pub fn draw(
     boxes: Query<(&ComputedNode, &UiGlobalTransform), With<GoBox>>,
     mut tfs: Query<&mut UiTransform, With<GoBox>>,
     mut carets: Query<&mut BackgroundColor, With<GoCaret>>,
+    mut dimmer: Query<&mut BackgroundColor, (With<GoRoot>, Without<GoCaret>)>,
     win: Query<&Window, With<bevy::window::PrimaryWindow>>,
     mut seen: Local<(u64, u64, u64, i64, usize)>,
     mut amt: Local<Option<Spring>>,
@@ -637,6 +639,9 @@ pub fn draw(
     for mut t in &mut tfs {
         t.translation = Val2::px(0.0, (1.0 - k) * 10.0);
         t.scale = Vec2::splat(lerp(0.97, 1.0, k));
+    }
+    for mut d in &mut dimmer {
+        d.set_if_neq(BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.5 * k)));
     }
     let on = g.open && (sim.t % 1.0) < 0.55;
     for mut c in &mut carets {
@@ -688,7 +693,7 @@ fn build_card(c: &mut Commands, root: Entity, f: &UiFonts, g: &Goto, now: i64) {
                 border: UiRect { left: px(3), right: px(1), top: px(1), bottom: px(1) },
                 ..default()
             },
-            BackgroundGradient(vec![Gradient::Linear(LinearGradient::to_bottom(vec![ColorStop::percent(Color::srgba(0.07, 0.09, 0.1, 0.97), 0.0), ColorStop::percent(Color::srgba(0.03, 0.04, 0.05, 0.985), 100.0)]))]),
+            BackgroundGradient(vec![Gradient::Linear(LinearGradient::to_bottom(vec![ColorStop::percent(Color::srgba(0.07, 0.09, 0.1, 1.0), 0.0), ColorStop::percent(Color::srgba(0.03, 0.04, 0.05, 1.0), 100.0)]))]),
             BorderColor { left: fill, right: with_alpha(line, 0.34), top: with_alpha(line, 0.34), bottom: with_alpha(line, 0.34) },
             UiTransform::default(),
         ))
@@ -920,15 +925,16 @@ pub fn place_chip(
     if let Some(r) = rect {
         let size = cn.size() * cn.inverse_scale_factor();
         let size = if size.y > 1.0 { size } else { Vec2::new(64.0, 24.0) };
-        // right-aligned with the panel's frame, just above it
-        let (l, t) = ((r.max.x - size.x - 6.0).round(), (r.min.y - size.y - 8.0).round());
+        // a tab on the panel's top edge, towards its right end
+        let (l, t) = ((r.max.x - size.x - 26.0).round(), (r.min.y - size.y + 3.0).round());
         if node.left != px(l) || node.top != px(t) {
             node.left = px(l);
             node.top = px(t);
         }
     }
     let hover = *inter == Interaction::Hovered || *inter == Interaction::Pressed;
-    border.set_if_neq(BorderColor::all(with_alpha(role_color(Role::Fill), if hover { 1.0 } else { 0.8 })));
+    let bc = with_alpha(role_color(Role::Fill), if hover { 1.0 } else { 0.8 });
+    border.set_if_neq(BorderColor { top: bc, left: bc, right: bc, bottom: Color::NONE });
     if show && *inter != *was {
         match inter {
             Interaction::Hovered => sound.play_q("hover", 60),

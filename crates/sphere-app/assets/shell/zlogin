@@ -1,0 +1,11 @@
+# Sphere's shell integration for zsh, 4 of 4. See zshenv. This is the last file zsh reads: from here ZDOTDIR is
+# yours again, for the shell and everything it starts.
+# Adapted from VS Code's shellIntegration-login.zsh (MIT License, Copyright (c) Microsoft Corporation).
+
+__sphere_dir=$ZDOTDIR
+ZDOTDIR=${SPHERE_USER_ZDOTDIR-}
+[[ -n $ZDOTDIR ]] || builtin unset ZDOTDIR
+if [[ ${ZDOTDIR:-$HOME} != $__sphere_dir && -r ${ZDOTDIR:-$HOME}/.zlogin ]]; then
+	. "${ZDOTDIR:-$HOME}/.zlogin"
+fi
+builtin unset SPHERE_USER_ZDOTDIR __sphere_dir

@@ -65,6 +65,8 @@ pub struct Agent {
     pub parent: Option<String>,
     /// finished and you haven't looked at it yet (a NEW mark)
     pub unseen: bool,
+    /// a protocol started the task: its label carries a PROTOCOL tag
+    pub protocol: bool,
 }
 
 impl Agent {
@@ -280,7 +282,7 @@ pub fn from_shared(s: &Shared, prev: &Model, now: i64) -> Model {
             State::Queued => 2,
             State::Done => 3,
         };
-        let agent = Agent { id: t.id.clone(), title: t.title.clone(), repo: 0, branch: t.branch.clone().unwrap_or_default(), state, p, step, cost: t.cost_usd, started_at: started, steps, files, editing, queue_pos: None, step_seq, parent: t.parent_task.clone(), unseen: t.unseen };
+        let agent = Agent { id: t.id.clone(), title: t.title.clone(), repo: 0, branch: t.branch.clone().unwrap_or_default(), state, p, step, cost: t.cost_usd, started_at: started, steps, files, editing, queue_pos: None, step_seq, parent: t.parent_task.clone(), unseen: t.unseen, protocol: t.protocol.is_some() };
         picks.push((rank, tie, agent, t.repo.clone()));
     }
     // helpers go behind every other agent, so they never push one out of the nine
@@ -580,6 +582,7 @@ fn demo_agent(d: &Def) -> Agent {
         queue_pos: None,
         parent: d.parent.map(str::to_string),
         unseen: d.unseen,
+        protocol: false,
     }
 }
 
@@ -1036,7 +1039,14 @@ fn sync(svc: Res<crate::service::Service>, args: Res<crate::Args>, sim: Res<crat
             return;
         }
         st.demo_t = Some(sim.t);
-        demo_at(sim.t)
+        let mut m = demo_at(sim.t);
+        // the look test (`--protocols tags`): two of the agents were started by a protocol
+        if args.protocols.as_deref() == Some("tags") {
+            for a in m.agents.iter_mut().filter(|a| matches!(a.id.as_str(), "checkout" | "react")) {
+                a.protocol = true;
+            }
+        }
+        m
     } else {
         let s = svc.shared.lock().unwrap();
         if !fresh && st.ver == Some(s.version) && real - st.at < 1.0 {

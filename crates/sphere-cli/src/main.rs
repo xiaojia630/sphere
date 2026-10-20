@@ -5,7 +5,9 @@ use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use render::Style;
 use sphere_client::{Client, ClientKind, StartParams, Update};
-use sphere_proto::{AnswerKind, EventBody};
+use sphere_proto::api::kind;
+use sphere_proto::protocol::LocalZone;
+use sphere_proto::{AnswerKind, EventBody, NoteSource};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -94,6 +96,25 @@ enum Command {
         #[arg(long)]
         prompt: Option<String>,
     },
+    /// Tell every agent started in this repository something, like "use pnpm, never npm".
+    Remember {
+        /// The note. Quotes are optional.
+        #[arg(required = true)]
+        text: Vec<String>,
+        /// Tell agents in every repository, not only this one.
+        #[arg(long)]
+        all: bool,
+    },
+    /// List the notes agents start with, by repo, with their ids.
+    Memory {
+        #[command(subcommand)]
+        action: Option<MemoryAction>,
+    },
+    /// Agents on your schedule: write a routine as one line and Sphere runs it as a task.
+    Protocol {
+        #[command(subcommand)]
+        command: ProtocolCommand,
+    },
     /// Check that everything Sphere needs is in place.
     Doctor {
         /// The agent command to check.
@@ -102,6 +123,38 @@ enum Command {
         #[arg(long)]
         state_dir: Option<PathBuf>,
     },
+}
+
+#[derive(Subcommand)]
+enum MemoryAction {
+    /// Remove a note: its id is the number in `sphere memory`.
+    Rm { id: u64 },
+}
+
+#[derive(Subcommand)]
+enum ProtocolCommand {
+    /// Write a protocol: "<schedule> [<repo>]: <what to do>", e.g. "every weekday 9:00 sphere: update the dependencies".
+    ///
+    /// Schedules: every day 9:00, daily 9:00, every weekday 9:00, every monday 9:00, every mon,wed,fri 18:30, every hour,
+    /// every 2 hours, every 30 minutes (at least 15), and once: at 18:00, tomorrow 9:00, tonight, in 2 hours, in 45 minutes.
+    Add {
+        /// The line, in quotes.
+        text: String,
+        /// The repo for a line that names none (default: the current folder).
+        #[arg(long)]
+        repo: Option<PathBuf>,
+    },
+    /// List the protocols, when they run next and how their last run went.
+    #[command(alias = "ls")]
+    List,
+    /// Delete a protocol. The tasks it started stay.
+    Rm { id: String },
+    /// Turn a protocol on.
+    On { id: String },
+    /// Turn a protocol off.
+    Off { id: String },
+    /// Run a protocol now, besides its schedule.
+    Run { id: String },
 }
 
 #[derive(Clone, Copy, clap::ValueEnum)]
@@ -185,6 +238,50 @@ async fn watch(
         }
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// The Unix time now.
+fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() as i64)
+}
+
+async fn protocol(client: &Client, command: ProtocolCommand) -> Result<()> {
+    let zone = LocalZone;
+    match command {
+        ProtocolCommand::Add { text, repo } => {
+            let repo = match repo {
+                Some(r) => r,
+                None => std::env::current_dir().context("cannot tell which folder this is")?,
+            };
+            let repo = repo.to_string_lossy().to_string();
+            let p = client.protocol_add(&text, Some(&repo)).await?;
+            println!("{}", render::protocol_saved(&p, unix_now(), &zone));
+        }
+        ProtocolCommand::List => {
+            let snap = client.snapshot().await?;
+            print_lines(render::protocol_table(&snap, unix_now(), &zone));
+        }
+        ProtocolCommand::Rm { id } => {
+            client.protocol_remove(&id).await?;
+            println!("removed {id}");
+        }
+        ProtocolCommand::On { id } => {
+            let p = client.protocol_set_enabled(&id, true).await?;
+            println!("{}", render::protocol_saved(&p, unix_now(), &zone));
+        }
+        ProtocolCommand::Off { id } => {
+            client.protocol_set_enabled(&id, false).await?;
+            println!("{id} is off");
+        }
+        ProtocolCommand::Run { id } => {
+            let task = client.protocol_run_now(&id).await?;
+            println!("started {task}");
+            println!("watch it with: sphere watch {task}");
+        }
+    }
+    Ok(())
 }
 
 fn find_sphered() -> PathBuf {
@@ -361,7 +458,75 @@ async fn run() -> Result<ExitCode> {
                 .await?;
             println!("started {id}");
         }
+        Command::Remember { text, all } => {
+            let cwd = std::env::current_dir().context("cannot tell which folder you are in")?;
+            let repo = (!all).then(|| cwd.to_string_lossy().to_string());
+            let added = client
+                .memory_add(repo.as_deref(), &text.join(" "), NoteSource::Cli)
+                .await
+                .map_err(|e| match e.kind() {
+                    Some(kind::BAD_REPO) => anyhow::anyhow!(
+                        "{} is not in a git repository: run this in one, or add --all",
+                        cwd.display()
+                    ),
+                    _ => e.into(),
+                })?;
+            println!("{}", render::remembered(&added));
+        }
+        Command::Memory { action: None } => {
+            print_lines(render::memory_table(
+                &client.memory_list(None).await?,
+                &style(),
+            ));
+        }
+        Command::Memory {
+            action: Some(MemoryAction::Rm { id }),
+        } => {
+            client.memory_remove(id).await?;
+            println!("removed note {id}");
+        }
+        Command::Protocol { command } => protocol(&client, command).await?,
         Command::Daemon { .. } | Command::Doctor { .. } => unreachable!(),
     }
     Ok(ExitCode::SUCCESS)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> Command {
+        let mut all = vec!["sphere"];
+        all.extend(args);
+        Cli::try_parse_from(all).unwrap().command
+    }
+
+    #[test]
+    fn remember_takes_the_note_with_or_without_quotes() {
+        let Command::Remember { text, all } = parse(&["remember", "use pnpm, never npm"]) else {
+            panic!("not remember")
+        };
+        assert_eq!((text.join(" "), all), ("use pnpm, never npm".into(), false));
+        let Command::Remember { text, all } = parse(&["remember", "--all", "use", "pnpm"]) else {
+            panic!("not remember")
+        };
+        assert_eq!((text.join(" "), all), ("use pnpm".into(), true));
+        assert!(Cli::try_parse_from(["sphere", "remember"]).is_err());
+    }
+
+    #[test]
+    fn memory_lists_and_removes_by_id() {
+        assert!(matches!(
+            parse(&["memory"]),
+            Command::Memory { action: None }
+        ));
+        assert!(matches!(
+            parse(&["memory", "rm", "7"]),
+            Command::Memory {
+                action: Some(MemoryAction::Rm { id: 7 })
+            }
+        ));
+        assert!(Cli::try_parse_from(["sphere", "memory", "rm"]).is_err());
+        assert!(Cli::try_parse_from(["sphere", "memory", "rm", "x"]).is_err());
+    }
 }

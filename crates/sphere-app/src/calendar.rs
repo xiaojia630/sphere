@@ -1,8 +1,10 @@
 //! The home's Next 24h rail: this Mac's Calendar events for the next day, through EventKit (macOS), read on a
-//! background thread every five minutes. Access is asked for once; with no access, no calendar, or in screenshots
-//! and demos (which never touch EventKit), the rail falls back to "Nothing scheduled". Event contents stay in
-//! memory: nothing here logs them.
+//! background thread every five minutes, and the protocols Sphere will run in that time (marked PROTOCOL), in time
+//! order. Access is asked for once; with no access, no calendar, or in screenshots and demos (which never touch
+//! EventKit), the rail shows the protocol runs alone, else "Nothing scheduled". Event contents stay in memory:
+//! nothing here logs them.
 use bevy::prelude::*;
+use sphere_proto::Protocol;
 use std::sync::{Arc, Mutex};
 
 /// How often the events are read again.
@@ -86,12 +88,34 @@ pub fn demo_events(now: i64) -> Vec<Event> {
     ]
 }
 
-/// One rail row: the time, the title, the calendar's colour.
+/// One rail row: the time, the title, the calendar's colour. A protocol run has no colour and the PROTOCOL tag.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Row {
     pub time: String,
     pub title: String,
     pub color: Option<[f32; 3]>,
+    pub protocol: bool,
+}
+
+/// A protocol that runs in the rail's window: when, and what it does where.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Run {
+    /// unix seconds
+    pub at: i64,
+    /// the protocol's short name (`Update the dependencies`)
+    pub name: String,
+    /// the folder of its repo
+    pub repo: String,
+}
+
+/// The next run of every protocol that is on and runs within the rail's window of `now`. A protocol that repeats
+/// appears once, at its next run.
+pub fn runs(protocols: &[Protocol], now: i64) -> Vec<Run> {
+    protocols
+        .iter()
+        .filter(|p| p.enabled)
+        .filter_map(|p| Some(Run { at: p.next_run.filter(|t| *t < now + WINDOW_SECS)?, name: p.name(), repo: p.repo_name().to_string() }))
+        .collect()
 }
 
 /// What the rail shows: rows, or an empty state and a hint under it.
@@ -102,43 +126,82 @@ pub struct Rail {
     pub hint: Option<&'static str>,
 }
 
-/// The fallback chain: calendar events in the next 24 h, else "Nothing scheduled" with a hint saying why. (Sphere
-/// has no scheduled agent runs yet, so there's no middle step.) `offset` is the local time zone's offset from UTC
+/// The fallback chain: calendar events and protocol runs in the next 24 h, in time order, else "Nothing scheduled"
+/// with a hint saying why (no calendar, no access, or a clear day). `offset` is the local time zone's offset from UTC
 /// at a time, in seconds.
-pub fn rail(feed: &Feed, now: i64, offset: impl Fn(i64) -> i64, slots: usize) -> Rail {
+pub fn rail(feed: &Feed, protocols: &[Run], now: i64, offset: impl Fn(i64) -> i64, slots: usize) -> Rail {
     let nothing = |hint| Rail { rows: vec![], empty: Some("NOTHING SCHEDULED"), hint: Some(hint) };
-    let evs = match feed {
-        Feed::Off => return nothing("No calendar connected"),
-        Feed::Asking => return nothing("Checking Calendar"),
-        Feed::Denied => return nothing("Allow Calendar in System Settings"),
+    let events: &[Event] = match feed {
         Feed::Events(e) => e,
+        _ => &[],
     };
-    let mut next: Vec<&Event> = evs.iter().filter(|e| e.end > now && e.start < now + WINDOW_SECS).collect();
+    let mut next: Vec<(i64, i64, Item)> = events
+        .iter()
+        .filter(|e| e.end > now && e.start < now + WINDOW_SECS)
+        // all-day and on-now first (they started earliest), then by start
+        .map(|e| (e.start.max(if e.all_day { i64::MIN } else { now }), e.end, Item::Event(e)))
+        .chain(protocols.iter().filter(|r| r.at > now - 60 && r.at < now + WINDOW_SECS).map(|r| (r.at, r.at, Item::Run(r))))
+        .collect();
     if next.is_empty() {
-        return nothing("Your next 24 hours are clear");
+        return nothing(match feed {
+            Feed::Off => "No calendar connected",
+            Feed::Asking => "Checking Calendar",
+            Feed::Denied => "Allow Calendar in System Settings",
+            Feed::Events(_) => "Your next 24 hours are clear",
+        });
     }
-    // all-day and on-now first (they started earliest), then by start
-    next.sort_by_key(|e| (e.start.max(if e.all_day { i64::MIN } else { now }), e.end));
+    next.sort_by_key(|(start, end, item)| (*start, *end, matches!(item, Item::Run(_))));
     let more = next.len().saturating_sub(slots);
     let shown = if more > 0 { slots.saturating_sub(1) } else { next.len() };
-    let mut rows: Vec<Row> = next[..shown].iter().map(|e| Row { time: when(e, now, &offset), title: clip(&e.title, TITLE_CHARS), color: swatch(e.color) }).collect();
+    let mut rows: Vec<Row> = next[..shown]
+        .iter()
+        .map(|(_, _, item)| match item {
+            Item::Event(e) => Row { time: when(e, now, &offset), title: clip(&e.title, TITLE_CHARS), color: swatch(e.color), protocol: false },
+            Item::Run(r) => Row { time: when_at(r.at, false, now, &offset), title: protocol_title(&r.name, &r.repo, PROTOCOL_CHARS), color: None, protocol: true },
+        })
+        .collect();
     if more > 0 {
-        rows.push(Row { time: String::new(), title: format!("+{} more", next.len() - shown), color: None });
+        rows.push(Row { time: String::new(), title: format!("+{} more", next.len() - shown), color: None, protocol: false });
     }
     Rail { rows, empty: None, hint: None }
 }
 
+/// What a rail row is made of.
+enum Item<'a> {
+    Event(&'a Event),
+    Run(&'a Run),
+}
+
+/// The longest protocol title: the PROTOCOL tag takes more room than the colour square it replaces.
+pub const PROTOCOL_CHARS: usize = 20;
+
+/// A protocol's title in the rail: its short name and the repo when both fit (`Update deps · sphere`), else the name
+/// alone, clipped.
+pub fn protocol_title(name: &str, repo: &str, max: usize) -> String {
+    let both = format!("{name} · {repo}");
+    if both.chars().count() <= max {
+        both
+    } else {
+        clip(name, max)
+    }
+}
+
 /// The row's time: ALL DAY, NOW for one under way, HH:MM today, TMRW HH:MM tomorrow (24-hour, like the clock).
 pub fn when(e: &Event, now: i64, offset: impl Fn(i64) -> i64) -> String {
+    when_at(e.start, e.all_day, now, offset)
+}
+
+/// The same for something that starts at `start` (unix seconds).
+pub fn when_at(start: i64, all_day: bool, now: i64, offset: impl Fn(i64) -> i64) -> String {
     let day = |t: i64| (t + offset(t)).div_euclid(86400);
-    let tomorrow = day(e.start) > day(now);
-    if e.all_day {
+    let tomorrow = day(start) > day(now);
+    if all_day {
         return if tomorrow { "TMRW".into() } else { "ALL DAY".into() };
     }
-    if e.start <= now {
+    if start <= now {
         return "NOW".into();
     }
-    let m = (e.start + offset(e.start)).rem_euclid(86400) / 60;
+    let m = (start + offset(start)).rem_euclid(86400) / 60;
     let hm = format!("{:02}:{:02}", m / 60, m % 60);
     if tomorrow {
         format!("TMRW {hm}")
@@ -284,7 +347,7 @@ mod tests {
         // all-day sorts first, ahead of one on now
         let mut a = ev("Holiday", today, today + 86400);
         a.all_day = true;
-        let r = rail(&Feed::Events(vec![ev("Standup", NOW - 60, NOW + 600), a]), NOW, UTC, SLOTS);
+        let r = rail(&Feed::Events(vec![ev("Standup", NOW - 60, NOW + 600), a]), &[], NOW, UTC, SLOTS);
         assert_eq!(r.rows.iter().map(|r| r.time.as_str()).collect::<Vec<_>>(), ["ALL DAY", "NOW"]);
     }
 
@@ -306,7 +369,7 @@ mod tests {
         assert_eq!(swatch(Some([-0.1, 1.2, 0.5])), Some([0.0, 1.0, 0.5]));
         assert_eq!(swatch(Some([f32::NAN, 0.0, 0.0])), None);
         assert_eq!(swatch(None), None);
-        let r = rail(&Feed::Events(vec![Event { color: Some([2.0, 0.5, f32::INFINITY]), ..ev("a", NOW + 60, NOW + 120) }]), NOW, UTC, SLOTS);
+        let r = rail(&Feed::Events(vec![Event { color: Some([2.0, 0.5, f32::INFINITY]), ..ev("a", NOW + 60, NOW + 120) }]), &[], NOW, UTC, SLOTS);
         assert_eq!(r.rows[0].color, None);
     }
 
@@ -319,22 +382,87 @@ mod tests {
             ev("Soon", NOW + 600, NOW + 1200),
             ev("On now", NOW - 600, NOW + 600),
         ];
-        let r = rail(&Feed::Events(evs), NOW, UTC, SLOTS);
+        let r = rail(&Feed::Events(evs), &[], NOW, UTC, SLOTS);
         assert_eq!(r.empty, None);
         assert_eq!(r.rows.iter().map(|r| r.title.as_str()).collect::<Vec<_>>(), ["On now", "Soon", "Later"]);
-        assert_eq!(r.rows[1], Row { time: "09:10".into(), title: "Soon".into(), color: Some([0.2, 0.4, 0.6]) });
+        assert_eq!(r.rows[1], Row { time: "09:10".into(), title: "Soon".into(), color: Some([0.2, 0.4, 0.6]), protocol: false });
     }
 
     #[test]
     fn overflow_folds_into_a_more_row() {
         let evs: Vec<Event> = (1..=6).map(|i| ev(&format!("E{i}"), NOW + i * 600, NOW + i * 600 + 300)).collect();
-        let r = rail(&Feed::Events(evs.clone()), NOW, UTC, 4);
+        let r = rail(&Feed::Events(evs.clone()), &[], NOW, UTC, 4);
         assert_eq!(r.rows.iter().map(|r| r.title.as_str()).collect::<Vec<_>>(), ["E1", "E2", "E3", "+3 more"]);
         assert_eq!(r.rows[3].time, "");
         // exactly enough room: no more row
-        let r = rail(&Feed::Events(evs[..4].to_vec()), NOW, UTC, 4);
+        let r = rail(&Feed::Events(evs[..4].to_vec()), &[], NOW, UTC, 4);
         assert_eq!(r.rows.len(), 4);
         assert!(r.rows.iter().all(|r| !r.title.starts_with('+')));
+    }
+
+    fn run(name: &str, repo: &str, at: i64) -> Run {
+        Run { at, name: name.into(), repo: repo.into() }
+    }
+
+    #[test]
+    fn protocol_runs_join_the_calendar_in_time_order() {
+        let evs = vec![ev("Standup", NOW + 3600, NOW + 5400), ev("Review", NOW + 6 * 3600, NOW + 7 * 3600)];
+        let runs = vec![run("Changelog", "web-app", NOW + 8 * 3600), run("Update deps", "sphere", NOW + 1800)];
+        let r = rail(&Feed::Events(evs), &runs, NOW, UTC, SLOTS);
+        assert_eq!(r.rows.iter().map(|r| r.title.as_str()).collect::<Vec<_>>(), ["Update deps · sphere", "Standup", "Review", "Changelog · web-app"]);
+        assert_eq!(r.rows.iter().map(|r| r.protocol).collect::<Vec<_>>(), [true, false, false, true]);
+        // a run has no calendar colour; its tag stands in for it
+        assert_eq!(r.rows[0], Row { time: "09:30".into(), title: "Update deps · sphere".into(), color: None, protocol: true });
+        assert_eq!(r.rows[3].time, "17:00");
+    }
+
+    #[test]
+    fn protocol_runs_fill_the_rail_without_a_calendar() {
+        for feed in [Feed::Off, Feed::Asking, Feed::Denied, Feed::Events(vec![])] {
+            let r = rail(&feed, &[run("Update deps", "sphere", NOW + 600)], NOW, UTC, SLOTS);
+            assert_eq!((r.empty, r.hint), (None, None), "{feed:?}");
+            assert_eq!(r.rows.len(), 1);
+        }
+    }
+
+    #[test]
+    fn a_run_about_to_start_reads_now_and_one_that_is_over_or_beyond_the_day_is_left_out() {
+        let runs = vec![run("due", "r", NOW - 20), run("missed", "r", NOW - 600), run("far", "r", NOW + 25 * 3600), run("edge", "r", NOW + 24 * 3600 - 1)];
+        let r = rail(&Feed::Off, &runs, NOW, UTC, SLOTS);
+        assert_eq!(r.rows.iter().map(|r| (r.time.as_str(), r.title.as_str())).collect::<Vec<_>>(), [("NOW", "due · r"), ("TMRW 08:59", "edge · r")]);
+    }
+
+    #[test]
+    fn runs_and_events_overflow_into_one_more_row() {
+        let runs: Vec<Run> = (1..=3).map(|i| run(&format!("R{i}"), "r", NOW + i * 600)).collect();
+        let evs: Vec<Event> = (4..=6).map(|i| ev(&format!("E{i}"), NOW + i * 600, NOW + i * 600 + 300)).collect();
+        let r = rail(&Feed::Events(evs), &runs, NOW, UTC, 4);
+        assert_eq!(r.rows.iter().map(|r| r.title.as_str()).collect::<Vec<_>>(), ["R1 · r", "R2 · r", "R3 · r", "+3 more"]);
+        assert!(!r.rows[3].protocol && r.rows[3].time.is_empty());
+    }
+
+    #[test]
+    fn a_protocol_runs_once_in_the_rail_at_its_next_run() {
+        let p = |id: &str, enabled: bool, next: Option<i64>| Protocol {
+            id: id.into(),
+            text: String::new(),
+            schedule: sphere_proto::protocol::Schedule::Every { minutes: 60, from: 0 },
+            repo: "/home/me/Projects/sphere".into(),
+            prompt: "update the dependencies, run the tests".into(),
+            enabled,
+            created_at: 0,
+            last_run: None,
+            next_run: next,
+        };
+        let list = vec![p("p1", true, Some(NOW + 600)), p("p2", false, Some(NOW + 600)), p("p3", true, Some(NOW + 30 * 3600)), p("p4", true, None)];
+        let got = runs(&list, NOW);
+        assert_eq!(got, vec![Run { at: NOW + 600, name: "Update the dependencies".into(), repo: "sphere".into() }]);
+    }
+
+    #[test]
+    fn a_title_keeps_the_repo_when_both_fit() {
+        assert_eq!(protocol_title("Update deps", "sphere", PROTOCOL_CHARS), "Update deps · sphere");
+        assert_eq!(protocol_title("Update the dependencies", "sphere", PROTOCOL_CHARS), "Update the dependen…", "the name alone, clipped");
     }
 
     #[test]
@@ -346,7 +474,7 @@ mod tests {
             (Feed::Events(vec![]), "Your next 24 hours are clear"),
             (Feed::Events(vec![ev("Yesterday", NOW - 86400, NOW - 80000)]), "Your next 24 hours are clear"),
         ] {
-            let r = rail(&feed, NOW, UTC, SLOTS);
+            let r = rail(&feed, &[], NOW, UTC, SLOTS);
             assert!(r.rows.is_empty(), "{feed:?}");
             assert_eq!(r.empty, Some("NOTHING SCHEDULED"));
             assert_eq!(r.hint, Some(hint));

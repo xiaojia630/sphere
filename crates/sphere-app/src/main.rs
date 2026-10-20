@@ -10,6 +10,7 @@ mod cmdbar;
 mod core;
 mod depthsort;
 mod filesapp;
+mod fixit;
 mod fonts;
 mod fx;
 mod goto;
@@ -24,6 +25,7 @@ mod glow;
 mod hud;
 mod lean;
 mod live;
+mod memory;
 mod moment;
 mod momentfx;
 mod mouse;
@@ -31,9 +33,11 @@ mod notifyact;
 mod orbit;
 mod opsdata;
 mod ports;
+mod protocols;
 mod prs;
 mod panel;
 mod service;
+mod shellint;
 mod sound;
 mod summon;
 mod swarm;
@@ -43,6 +47,7 @@ mod takeover;
 mod theme;
 mod restart;
 mod review;
+mod scan;
 mod stats;
 mod term;
 mod motion;
@@ -115,6 +120,15 @@ pub struct Args {
     pub calendar: bool,
     /// `--takeover card|armed|ambiguous|list|after`: the demo opens the take-over card, or plays a take-over
     pub takeover: Option<String>,
+    /// `--memory card|armed|chip`: the demo opens the card of notes, or sends a Change and leaves the remember chip up
+    pub memory: Option<String>,
+    /// `--protocols card|armed|empty|rail|tags|bar|mistake`: the demo has saved protocols; `card`, `armed` and `empty`
+    /// open the Protocols card, `rail` and `tags` show them on the home (the Next 24h rail, and the PROTOCOL tag on
+    /// agents), `bar` and `mistake` type a protocol line in the command bar
+    pub protocols: Option<String>,
+    /// `--fixit [strip|after]`: the demo's terminal tab shows a failed `cargo test` with Fix it's strip, or (after)
+    /// plays pressing FIX IT
+    pub fixit: Option<String>,
     /// `--theme <name>`: balanced, full, cyan, black, red
     pub theme: Option<theme::ThemeId>,
     pub motion: Option<motion::Motion>,
@@ -136,7 +150,7 @@ impl Args {
 }
 
 fn parse_args() -> Args {
-    let mut a = Args { cmd: None, bench: None, shot: None, record: None, record_frames: 180, frames: 120, depth: false, orbit: false, apps: false, work: false, swarm: false, code: false, git: false, open_app: None, icon: false, aa: std::env::var("SPHERE_AA").unwrap_or_else(|_| "smaa".into()), offscreen: false, collapsed: false, focus_term: false, msaa: true, size: (1600, 1000), dt: 1.0 / 20.0, demo: false, live: false, moment: false, elsewhere: false, calendar: false, takeover: None, theme: None, motion: None, goto: None, tasks: false };
+    let mut a = Args { cmd: None, bench: None, shot: None, record: None, record_frames: 180, frames: 120, depth: false, orbit: false, apps: false, work: false, swarm: false, code: false, git: false, open_app: None, icon: false, aa: std::env::var("SPHERE_AA").unwrap_or_else(|_| "smaa".into()), offscreen: false, collapsed: false, focus_term: false, msaa: true, size: (1600, 1000), dt: 1.0 / 20.0, demo: false, live: false, moment: false, elsewhere: false, calendar: false, takeover: None, memory: None, protocols: None, fixit: None, theme: None, motion: None, goto: None, tasks: false };
     let mut it = std::env::args().skip(1).peekable();
     while let Some(s) = it.next() {
         match s.as_str() {
@@ -179,6 +193,17 @@ fn parse_args() -> Args {
                 a.tasks = true;
             }
             "--tasks" => a.tasks = true,
+            "--memory" => {
+                a.memory = it.next();
+                // the chip is on the Agent moment card, which the demo shows with a sample request
+                a.moment |= a.memory.as_deref() == Some("chip");
+            }
+            "--protocols" => a.protocols = it.next(),
+            "--fixit" => {
+                a.fixit = Some(it.next_if(|v| !v.starts_with('-')).unwrap_or_else(|| "strip".into()));
+                a.demo = true;
+                a.focus_term = true;
+            }
             "--theme" => a.theme = it.next().and_then(|v| theme::ThemeId::from_key(&v)),
             "--motion" => a.motion = it.next().and_then(|v| motion::Motion::from_key(&v)),
             "--dt" => a.dt = it.next().and_then(|v| v.parse().ok()).unwrap_or(0.05),
@@ -191,7 +216,7 @@ fn parse_args() -> Args {
                 }
             }
             "-h" | "--help" => {
-                println!("sphere-app [--demo] [--live] [--moment] [--elsewhere] [--calendar] [--takeover card|armed|ambiguous|list|after] [--theme name] [--goto [filter]] [--tasks] [--motion fast|cinematic] [--cmd \"<command>\"] [--bench <seconds>] [--shot <png> [--frames N] [--depth] [--term]] [--size WxH] [--no-msaa]");
+                println!("sphere-app [--demo] [--live] [--moment] [--elsewhere] [--calendar] [--takeover card|armed|ambiguous|list|after] [--memory card|armed|chip] [--protocols card|armed|empty|rail|tags|bar|mistake] [--fixit strip|after] [--goto [filter]] [--tasks] [--theme name] [--motion fast|cinematic] [--cmd \"<command>\"] [--bench <seconds>] [--shot <png> [--frames N] [--depth] [--term]] [--size WxH] [--no-msaa]");
                 std::process::exit(0);
             }
             other => eprintln!("ignoring unknown argument {other}"),
@@ -226,6 +251,8 @@ fn main() {
         .insert_resource(if args.offline() { Agents::demo() } else { Agents::empty() })
         .insert_resource(if args.offline() && args.elsewhere { takeover::Outside::demo() } else { takeover::Outside::default() })
         .init_resource::<takeover::TakeOver>()
+        .init_resource::<protocols::Protocols>()
+        .init_resource::<fixit::FixIt>()
         .insert_resource(service::start(args.offline()))
         .insert_resource(sysstats::start(args.offline()))
         // this Mac's Calendar only in the windowed app: screenshots, benches and demos never ask for access
@@ -254,7 +281,8 @@ fn main() {
         .init_resource::<momentfx::MomentFx>()
         .init_resource::<hud::FrameStats>()
         .add_plugins(swarm::SwarmPlugin)
-        .add_systems(Startup, (sound::setup, setup_core, setup_cameras, hud::setup_panels, hud::setup_backdrop, hud::setup_overlay, cmdbar::setup, takeover::setup, goto::setup, visor::setup, fx::setup, homepanels::setup, orbit::setup, working::setup, (codeapp::setup, gitapp::setup, containers::setup, ports::setup, sysapp::setup, filesapp::setup).chain(), momentfx::setup, callouts::setup, mouse::setup, mouse::setup_reticle).chain())
+        .add_plugins(memory::MemoryPlugin)
+        .add_systems(Startup, (protocols::demo_setup, sound::setup, setup_core, setup_cameras, hud::setup_panels, hud::setup_backdrop, hud::setup_overlay, cmdbar::setup, takeover::setup, protocols::setup, (goto::setup, visor::setup, fx::setup).chain(), homepanels::setup, orbit::setup, working::setup, (codeapp::setup, gitapp::setup, containers::setup, ports::setup, sysapp::setup, filesapp::setup).chain(), momentfx::setup, callouts::setup, mouse::setup, mouse::setup_reticle).chain())
         .add_systems(First, (tick_sim, theme::animate))
         .add_systems(PreUpdate, hud::script)
         .add_systems(
@@ -262,10 +290,10 @@ fn main() {
             (
                 (keys, stage_view, camera_rig, update_core, spin_system, update_materials, panel::update_panels, hud::update_readout, hud::update_backdrop)
                     .chain(),
-                (takeover::sync, live::check_merged, live::sync, live::transitions, moment::update, summon::notify, summon::from_notifications, live::tick_toasts, panel::rebuild_agents_ui, hud::update_readout_text, hud::update_clock, panel::blink_system, homepanels::update, homepanels::draw_rail, homepanels::draw_rolodex, homepanels::draw_say).chain(),
-                (term::pump, cmdbar::keys, takeover::keys, moment::keys, term::read_keys, home::keys, orbit::keys, working::keys, (codeapp::keys, gitapp::keys, containers::keys, ports::keys, sysapp::keys, filesapp::keys).chain(), momentfx::keys, visor::buttons, takeover::buttons, mouse::update, takeover::commands, appframe::test_click, appframe::test_wheel, appframe::route_clicks, home::apply, apps::apply).chain(),
+                (takeover::sync, protocols::sync, live::check_merged, live::sync, live::transitions, moment::update, summon::notify, summon::from_notifications, live::tick_toasts, panel::rebuild_agents_ui, hud::update_readout_text, hud::update_clock, panel::blink_system, homepanels::update, homepanels::draw_rail, homepanels::draw_rolodex, homepanels::draw_say).chain(),
+                (term::pump, cmdbar::keys, (takeover::keys, protocols::keys).chain(), moment::keys, (term::read_keys, fixit::keys).chain(), home::keys, orbit::keys, working::keys, (codeapp::keys, gitapp::keys, containers::keys, ports::keys, sysapp::keys, filesapp::keys).chain(), momentfx::keys, visor::buttons, (takeover::buttons, protocols::buttons).chain(), mouse::update, (takeover::commands, protocols::commands).chain(), (fixit::script, fixit::apply).chain(), appframe::test_click, appframe::test_wheel, appframe::route_clicks, home::apply, apps::apply).chain(),
                 (working::update, working::place_panels, working::draw, (codeapp::update, codeapp::place, codeapp::draw, gitapp::update, gitapp::place, gitapp::draw, containers::update, containers::place, containers::draw, ports::update, ports::place, ports::draw, sysapp::update, sysapp::place, sysapp::draw, filesapp::update, filesapp::place, filesapp::draw).chain(), momentfx::flows, momentfx::draw, momentfx::draw_sats, callouts::update).chain(),
-                (orbit::update, mouse::draw_reticle, visor::draw_buttons, visor::ticker, visor::toasts, home::landed_sound, home::step_view, fx::update, term::draw, cmdbar::draw, takeover::script, takeover::draw, takeover::hover_look, moment::draw).chain(),
+                (orbit::update, mouse::draw_reticle, visor::draw_buttons, visor::ticker, visor::toasts, home::landed_sound, home::step_view, fx::update, term::draw, fixit::draw, cmdbar::draw, cmdbar::draw_preview, takeover::script, takeover::draw, takeover::hover_look, protocols::script, protocols::draw, protocols::hover_look, moment::draw).chain(),
                 (glyphs::fallback, hud::frame_stats, hud::bench, hud::shot, hud::record).chain(),
             )
                 .chain(),

@@ -18,6 +18,8 @@ pub struct Live {
     pub titles: Vec<(String, String)>,
     /// Helper tasks and the task that started each: (helper id, parent id).
     pub parents: Vec<(String, String)>,
+    /// The repo each task works in, by id (the checkout's root, as notes are kept by).
+    pub repos: Vec<(String, String)>,
     /// Seconds agents waited on you today over requests already closed (sphered's count, from the link's mirror).
     pub waited_closed_secs: u64,
     pub version: u64,
@@ -33,6 +35,11 @@ impl Live {
     pub fn parent_title(&self, task: &str) -> Option<&str> {
         let (_, p) = self.parents.iter().find(|(id, _)| id == task)?;
         Some(self.title(p))
+    }
+
+    /// The repo a task works in, when the task is known.
+    pub fn repo(&self, task: &str) -> Option<&str> {
+        self.repos.iter().find(|(id, _)| id == task).map(|(_, r)| r.as_str())
     }
 
     /// Seconds agents have waited on you today, as of `now` (unix seconds): the closed requests' total plus what each
@@ -144,7 +151,7 @@ fn row(t: &TaskView, merged: bool, parent: Option<&str>) -> Agent {
     if step.chars().count() > 44 {
         step = step.chars().take(43).collect::<String>() + "…";
     }
-    Agent { name, state, p: p.max(0.04), step, rate: 0.0, figure, chip }
+    Agent { name, state, p: p.max(0.04), step, rate: 0.0, figure, chip, protocol: t.protocol.is_some() }
 }
 
 /// How a task ranks on the panel: what needs you first, then working, then queued, then the finished. Helpers go
@@ -382,6 +389,9 @@ pub fn sync(svc: Res<Service>, mut live: ResMut<Live>, mut agents: ResMut<Agents
     for n in s.notes.drain(..) {
         toasts.push(n);
     }
+    for n in s.good.drain(..) {
+        toasts.push_ok(n);
+    }
     if live.link != s.link {
         if let Some(Link::Down(e)) = &s.link {
             toasts.push(e.clone());
@@ -415,6 +425,7 @@ pub fn sync(svc: Res<Service>, mut live: ResMut<Live>, mut agents: ResMut<Agents
         live.parents = parents;
         live.version += 1;
     }
+    let repos = (s.roster != seen.0).then(|| s.tasks.iter().map(|t| (t.id.clone(), t.repo.clone())).collect::<Vec<_>>());
     seen.0 = s.roster;
     let new_titles = titles.as_ref().is_some_and(|t| *t != live.titles);
     if new_requests {
@@ -422,6 +433,7 @@ pub fn sync(svc: Res<Service>, mut live: ResMut<Live>, mut agents: ResMut<Agents
     }
     if new_titles {
         live.titles = titles.unwrap_or_default();
+        live.repos = repos.unwrap_or_default();
     }
     if new_requests || new_titles {
         live.version += 1;
@@ -464,6 +476,7 @@ fn demo_request(live: &mut Live) {
     };
     live.requests = vec![rv(info, 4), rv(r2, 3), rv(r3, 2)];
     live.titles = vec![("t1".into(), "Fix flaky login test".into()), ("t2".into(), "Merge the login fix".into()), ("t3".into(), "Restart minio".into())];
+    live.repos = vec![("t1".into(), "/demo/web-app".into()), ("t2".into(), "/demo/web-app".into()), ("t3".into(), "/demo/api-server".into())];
     live.version += 1;
 }
 
@@ -749,7 +762,7 @@ mod tests {
     // ---- the systems, on a bare App
 
     fn args() -> crate::Args {
-        crate::Args { cmd: None, bench: None, shot: None, record: None, record_frames: 180, frames: 120, depth: false, orbit: false, apps: false, work: false, swarm: false, code: false, git: false, open_app: None, icon: false, aa: "smaa".into(), offscreen: false, collapsed: false, focus_term: false, msaa: true, size: (1600, 1000), dt: 0.05, demo: false, live: false, moment: false, elsewhere: false, calendar: false, takeover: None, theme: None, motion: None, goto: None, tasks: false }
+        crate::Args { cmd: None, bench: None, shot: None, record: None, record_frames: 180, frames: 120, depth: false, orbit: false, apps: false, work: false, swarm: false, code: false, git: false, open_app: None, icon: false, aa: "smaa".into(), offscreen: false, collapsed: false, focus_term: false, msaa: true, size: (1600, 1000), dt: 0.05, demo: false, live: false, moment: false, elsewhere: false, calendar: false, takeover: None, memory: None, protocols: None, fixit: None, theme: None, motion: None, goto: None, tasks: false }
     }
 
     fn app() -> App {
@@ -845,6 +858,9 @@ mod tests {
         });
         app.update();
         assert_eq!(app.world().resource::<Live>().titles, vec![("t1".to_string(), "Task t1".to_string())]);
+        // and the repo each one works in, which notes are kept by
+        let live = app.world().resource::<Live>();
+        assert_eq!((live.repo("t1"), live.repo("t9")), (Some("/r"), None));
         let runs0 = app.world().resource::<Agents>().runs_ver;
         // an edit the counters do not announce is not picked up: the passes skip the work (the link bumps them with every real change)
         put(&app, |s| {
