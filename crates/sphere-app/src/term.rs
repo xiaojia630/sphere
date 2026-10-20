@@ -226,8 +226,12 @@ impl Terminal {
             c.cwd(repo_dir());
             c
         } else {
+            let launch = crate::shellint::launch(&shell);
             let mut c = CommandBuilder::new(&shell);
-            c.arg("-l");
+            c.args(&launch.args);
+            for (k, v) in &launch.env {
+                c.env(k, v);
+            }
             c.cwd(std::env::var_os("HOME").unwrap_or_default());
             c
         };

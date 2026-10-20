@@ -117,6 +117,8 @@ They are all MIT or Apache-2.0.
 Sphere is built on [Bevy](https://bevy.org), [Alacritty](https://github.com/alacritty/alacritty)'s terminal core,
 [WezTerm](https://github.com/wezterm/wezterm)'s `portable-pty` and [rodio](https://github.com/RustAudio/rodio).
 It is set in Michroma, Rajdhani and JetBrains Mono (SIL OFL).
+The scripts that let the terminal see where a command starts and ends (`crates/sphere-app/assets/shell`) adapt
+[VS Code](https://github.com/microsoft/vscode)'s shell integration (MIT, Copyright (c) Microsoft Corporation).
 
 Sphere's voice is [Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M) by hexgrad (Apache-2.0) with its `bm_george`
 voice, run through [ONNX Runtime](https://onnxruntime.ai) (MIT) via [`ort`](https://github.com/pykeio/ort) (MIT/Apache-2.0).

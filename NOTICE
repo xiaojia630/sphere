@@ -11,6 +11,9 @@ It is built on and includes these libraries, under their own licenses (MIT and/o
   Cargo.lock.
   crates/sphere-app/src/uilayout.rs also copies part of bevy_ui 0.20.0's ui_layout_system (src/layout/mod.rs, MIT OR Apache-2.0).
 
+The shell integration that Sphere's terminal tabs load (crates/sphere-app/assets/shell) is adapted from the shell
+integration scripts of VS Code (MIT, Copyright (c) Microsoft Corporation); each script says so in its header.
+
 Sphere's voice (crates/sphere-voice):
   Kokoro-82M by hexgrad (Apache-2.0); crates/sphere-voice/assets/bm_george.f32 is its bm_george voice tensor.
   The int8 ONNX export of Kokoro from kokoro-onnx by thewh1teagle (MIT), downloaded at first use.

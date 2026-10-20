@@ -33,6 +33,7 @@ mod ports;
 mod prs;
 mod panel;
 mod service;
+mod shellint;
 mod sound;
 mod summon;
 mod swarm;
