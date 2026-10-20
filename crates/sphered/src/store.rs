@@ -70,14 +70,23 @@ impl Store {
         bodies: &[EventBody],
         offset: Option<&OffsetUpdate>,
     ) -> Result<Vec<Event>> {
+        self.append_to(bodies.iter().map(|b| (task, b)), offset)
+    }
+
+    /// Like [`Store::append`] for events that belong to different tasks, still all or none.
+    pub fn append_to<'a>(
+        &mut self,
+        items: impl IntoIterator<Item = (&'a str, &'a EventBody)>,
+        offset: Option<&OffsetUpdate>,
+    ) -> Result<Vec<Event>> {
         let tx = self.conn.transaction()?;
         let at = now_rfc3339();
-        let mut out = Vec::with_capacity(bodies.len());
+        let mut out = vec![];
         {
             let mut stmt = tx.prepare_cached(
                 "INSERT INTO events (task, at, kind, body) VALUES (?1, ?2, ?3, ?4)",
             )?;
-            for body in bodies {
+            for (task, body) in items {
                 let json = serde_json::to_string(body)?;
                 stmt.execute(params![task, at, body.kind_name(), json])?;
                 out.push(Event {
@@ -201,6 +210,17 @@ mod tests {
         assert_eq!(b[0].seq, 3);
         assert_eq!(s.last_seq().unwrap(), 3);
         assert_eq!(a[0].at.len(), 24);
+    }
+
+    #[test]
+    fn one_append_can_hold_events_of_several_tasks() {
+        let mut s = Store::open_in_memory().unwrap();
+        let (a, b) = (say("a"), say("b"));
+        let out = s.append_to([("t1", &a), ("", &b)], None).unwrap();
+        let seen: Vec<(u64, &str)> = out.iter().map(|e| (e.seq, e.task.as_str())).collect();
+        assert_eq!(seen, vec![(1, "t1"), (2, "")]);
+        assert_eq!(s.events_after(0, 100, Some("t1"), 10).unwrap().len(), 1);
+        assert_eq!(s.events_after(0, 100, None, 10).unwrap().len(), 2);
     }
 
     #[test]

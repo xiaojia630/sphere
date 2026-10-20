@@ -211,6 +211,27 @@ async fn dispatch(
                 mgr.answer(p).await?;
                 Ok(ok(api::Ack { ok: true })?)
             }
+            method::PROTOCOL_ADD => {
+                let p: api::ProtocolAddParams = parse(params)?;
+                authorize_protocol(mgr, conn).await?;
+                Ok(ok(mgr.protocol_add(p).await?)?)
+            }
+            method::PROTOCOL_LIST => Ok(ok(mgr.protocol_list())?),
+            method::PROTOCOL_SET_ENABLED => {
+                let p: api::ProtocolEnabledParams = parse(params)?;
+                authorize_protocol(mgr, conn).await?;
+                Ok(ok(mgr.protocol_set_enabled(&p.id, p.enabled).await?)?)
+            }
+            method::PROTOCOL_REMOVE => {
+                let p: api::ProtocolParams = parse(params)?;
+                authorize_protocol(mgr, conn).await?;
+                mgr.protocol_remove(&p.id).await?;
+                Ok(ok(api::Ack { ok: true })?)
+            }
+            method::PROTOCOL_RUN_NOW => {
+                let p: api::ProtocolParams = parse(params)?;
+                Ok(ok(mgr.protocol_run_now(&p.id).await?)?)
+            }
             other => Err(ApiError(RpcError {
                 code: code::METHOD_NOT_FOUND,
                 message: format!("unknown method `{other}`"),
@@ -228,6 +249,13 @@ impl From<RpcError> for ApiError {
     }
 }
 
+/// Is the caller a process an agent started? None when its process cannot be identified.
+async fn started_by_an_agent(mgr: &Arc<Manager>, conn: &Conn) -> Option<bool> {
+    let pid = conn.pid?;
+    let roots = mgr.agent_roots().await;
+    Some(peer::descends_from(pid, &roots))
+}
+
 /// Only you answer: not the assistant, and not anything an agent started.
 async fn authorize_answer(mgr: &Arc<Manager>, conn: &Conn) -> Result<(), ApiError> {
     let forbidden = |why: &str| ApiError(RpcError::app(kind::FORBIDDEN, why));
@@ -236,18 +264,32 @@ async fn authorize_answer(mgr: &Arc<Manager>, conn: &Conn) -> Result<(), ApiErro
             "the assistant cannot answer requests; only you can",
         ));
     }
-    match conn.pid {
-        Some(pid) => {
-            let roots = mgr.agent_roots().await;
-            if peer::descends_from(pid, &roots) {
-                return Err(forbidden(
-                    "requests cannot be answered from a process an agent started",
-                ));
-            }
+    match started_by_an_agent(mgr, conn).await {
+        Some(true) => {
+            return Err(forbidden(
+                "requests cannot be answered from a process an agent started",
+            ))
         }
+        Some(false) => {}
         None => tracing::warn!("could not identify the caller's process; allowing the answer"),
     }
     Ok(())
+}
+
+/// Protocols are set by you, or for you by the assistant, but not by anything an agent started: a schedule an agent
+/// wrote would outlive its task.
+async fn authorize_protocol(mgr: &Arc<Manager>, conn: &Conn) -> Result<(), ApiError> {
+    match started_by_an_agent(mgr, conn).await {
+        Some(true) => Err(ApiError(RpcError::app(
+            kind::FORBIDDEN,
+            "protocols cannot be changed from a process an agent started",
+        ))),
+        Some(false) => Ok(()),
+        None => {
+            tracing::warn!("could not identify the caller's process; allowing the change");
+            Ok(())
+        }
+    }
 }
 
 /// Replay stored events, then stream live ones. Ends when the client goes

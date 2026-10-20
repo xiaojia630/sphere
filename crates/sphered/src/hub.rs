@@ -34,6 +34,7 @@ pub struct Hub {
     inner: Mutex<Inner>,
     next_task: AtomicU64,
     next_request: AtomicU64,
+    next_protocol: AtomicU64,
     queue_cap: usize,
 }
 
@@ -69,6 +70,7 @@ impl Hub {
         Ok(Hub {
             next_task: AtomicU64::new(views.max_task()),
             next_request: AtomicU64::new(views.max_request()),
+            next_protocol: AtomicU64::new(views.max_protocol()),
             inner: Mutex::new(Inner {
                 store,
                 views,
@@ -84,6 +86,10 @@ impl Hub {
 
     pub fn new_request_id(&self) -> String {
         format!("r{}", self.next_request.fetch_add(1, Ordering::SeqCst) + 1)
+    }
+
+    pub fn new_protocol_id(&self) -> String {
+        format!("p{}", self.next_protocol.fetch_add(1, Ordering::SeqCst) + 1)
     }
 
     /// Read the views under the lock.
@@ -109,12 +115,29 @@ impl Hub {
     ) -> Result<Vec<Event>> {
         let mut g = self.inner.lock().unwrap();
         let events = g.store.append(task, &bodies, offset.as_ref())?;
-        let Inner { views, subs, .. } = &mut *g;
-        for ev in &events {
+        Self::deliver(&mut g, &events);
+        Ok(events)
+    }
+
+    /// Like [`Hub::commit`] for events that belong to different tasks (the task
+    /// is empty for one that belongs to none): all of them are stored, or none.
+    pub fn commit_many(&self, items: Vec<(String, EventBody)>) -> Result<Vec<Event>> {
+        let mut g = self.inner.lock().unwrap();
+        let events = g
+            .store
+            .append_to(items.iter().map(|(t, b)| (t.as_str(), b)), None)?;
+        Self::deliver(&mut g, &events);
+        Ok(events)
+    }
+
+    /// Fold stored events into the views and hand them to the subscribers.
+    fn deliver(g: &mut Inner, events: &[Event]) {
+        let Inner { views, subs, .. } = g;
+        for ev in events {
             views.apply(ev);
         }
         subs.retain(|s| {
-            for ev in &events {
+            for ev in events {
                 if s.task.as_deref().is_some_and(|t| t != ev.task) {
                     continue;
                 }
@@ -129,7 +152,6 @@ impl Hub {
             }
             true
         });
-        Ok(events)
     }
 
     pub fn publish(&self, task: &str, body: EventBody) -> Result<Event> {
@@ -222,6 +244,23 @@ mod tests {
             model: None,
             allow_rewrites: false,
             resume_session: None,
+            protocol: None,
+        }
+    }
+
+    fn saved(id: &str) -> EventBody {
+        EventBody::ProtocolSaved {
+            protocol: sphere_proto::Protocol {
+                id: id.into(),
+                text: "in 2 hours sphere: x".into(),
+                schedule: sphere_proto::protocol::Schedule::Once { at: 100 },
+                repo: "/r".into(),
+                prompt: "x".into(),
+                enabled: true,
+                created_at: 1,
+                last_run: None,
+                next_run: Some(100),
+            },
         }
     }
 
@@ -331,5 +370,54 @@ mod tests {
         assert_eq!(got.len(), 2);
         assert!(matches!(&got[0], Msg::Event(e) if e.task == "t2"));
         assert!(matches!(&got[1], Msg::Live(f) if f.task == "t2"));
+    }
+
+    #[test]
+    fn events_of_several_tasks_commit_together_and_reach_the_right_subscribers() {
+        let h = hub(16);
+        let (mut all, mut t1, mut t9) = (
+            h.subscribe(None),
+            h.subscribe(Some("t1".into())),
+            h.subscribe(Some("t9".into())),
+        );
+        let evs = h
+            .commit_many(vec![("t1".into(), created()), (String::new(), saved("p1"))])
+            .unwrap();
+        assert_eq!(
+            evs.iter()
+                .map(|e| (e.seq, e.task.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(1, "t1"), (2, "")]
+        );
+        assert!(h.view(|v| v.task("t1").is_some() && v.protocol("p1").is_some()));
+        assert_eq!(h.history(None, None, 10).unwrap().len(), 2);
+        let seqs = |sub: &mut Subscription| {
+            let mut got = vec![];
+            while let Ok(Msg::Event(e)) = sub.rx.try_recv() {
+                got.push(e.seq);
+            }
+            got
+        };
+        assert_eq!(seqs(&mut all), [1, 2]);
+        assert_eq!(seqs(&mut t1), [1]);
+        assert!(seqs(&mut t9).is_empty());
+    }
+
+    #[test]
+    fn protocol_ids_continue_after_a_restart_and_are_not_reused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.db");
+        {
+            let h = Hub::open(&path, 16).unwrap();
+            assert_eq!(h.new_protocol_id(), "p1");
+            assert_eq!(h.new_protocol_id(), "p2");
+            h.publish("", saved("p1")).unwrap();
+            h.publish("", saved("p2")).unwrap();
+            h.publish("", EventBody::ProtocolRemoved { id: "p2".into() })
+                .unwrap();
+        }
+        let h = Hub::open(&path, 16).unwrap();
+        assert_eq!(h.view(|v| v.protocols().len()), 1);
+        assert_eq!(h.new_protocol_id(), "p3");
     }
 }

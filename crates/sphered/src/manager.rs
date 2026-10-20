@@ -10,12 +10,14 @@ use crate::config::Config;
 use crate::host_link::HostLink;
 use crate::hub::Hub;
 use crate::policy::{self, Ctx, Policy, Verdict};
+use crate::protocols::{Clock, ProtocolRun, SystemClock};
 use crate::store::OffsetUpdate;
 use crate::{outside, sessions, workspace};
 use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
 use sphere_host::{ExitStatus, FollowItem, SpawnParams, Stream};
 use sphere_proto::api::{self, kind, RpcError};
+use sphere_proto::protocol::{LocalZone, Zone};
 use sphere_proto::version;
 use sphere_proto::{
     now_rfc3339, AnswerKind, EventBody, Excerpt, OutputRef, RequestInfo, RequestKind,
@@ -43,11 +45,11 @@ impl From<anyhow::Error> for ApiError {
     }
 }
 
-fn api_err(kind: &str, message: impl Into<String>) -> ApiError {
+pub(crate) fn api_err(kind: &str, message: impl Into<String>) -> ApiError {
     ApiError(RpcError::app(kind, message))
 }
 
-type ApiResult<T> = Result<T, ApiError>;
+pub(crate) type ApiResult<T> = Result<T, ApiError>;
 
 const MODES: &[&str] = &["default", "acceptEdits", "plan", "dontAsk"];
 
@@ -97,6 +99,13 @@ pub struct Manager {
     ctl_seq: AtomicU64,
     info: Mutex<Info>,
     outside: tokio::sync::Mutex<Outside>,
+    /// What protocols read the time from: the system's clock and zone, or a test's.
+    pub(crate) clock: Arc<dyn Clock>,
+    pub(crate) zone: Arc<dyn Zone + Send + Sync>,
+    /// Held while a protocol is changed or started, so a tick and an API call never act on the same state.
+    pub(crate) protocol_lock: tokio::sync::Mutex<()>,
+    /// The loop that starts protocols as they come due.
+    pub(crate) scheduler: Mutex<Option<AbortHandle>>,
 }
 
 /// Sessions running outside Sphere: the last scan and when it ran, and what
@@ -379,6 +388,16 @@ async fn wait_exit(rx: &mut watch::Receiver<bool>, dur: Duration) -> bool {
 
 impl Manager {
     pub fn new(cfg: Arc<Config>, hub: Arc<Hub>) -> Arc<Manager> {
+        Self::with_time(cfg, hub, Arc::new(SystemClock), Arc::new(LocalZone))
+    }
+
+    /// A manager that reads the time for protocols from `clock` and `zone`.
+    pub fn with_time(
+        cfg: Arc<Config>,
+        hub: Arc<Hub>,
+        clock: Arc<dyn Clock>,
+        zone: Arc<dyn Zone + Send + Sync>,
+    ) -> Arc<Manager> {
         Arc::new(Manager {
             host: HostLink::new(cfg.clone()),
             cfg,
@@ -389,6 +408,10 @@ impl Manager {
             ctl_seq: AtomicU64::new(0),
             info: Mutex::new(Info::default()),
             outside: tokio::sync::Mutex::new(Outside::default()),
+            clock,
+            zone,
+            protocol_lock: tokio::sync::Mutex::new(()),
+            scheduler: Mutex::new(None),
         })
     }
 
@@ -491,6 +514,9 @@ impl Manager {
             }
         }
         if let Some(h) = &rt.cap_wait {
+            h.abort();
+        }
+        if let Some(h) = self.scheduler.lock().unwrap().take() {
             h.abort();
         }
     }
@@ -1219,6 +1245,19 @@ impl Manager {
         resume_session: Option<String>,
         extra: Vec<EventBody>,
     ) -> ApiResult<api::StartResult> {
+        self.start_task_for(p, resume_session, extra, None).await
+    }
+
+    /// Starts a task like `task.start`. `protocol` is the protocol that starts it on its schedule: the task carries
+    /// its id, and the protocol is saved in the same step as the task is created (so a crash between the two can
+    /// neither lose the run nor repeat it).
+    pub(crate) async fn start_task_for(
+        self: &Arc<Self>,
+        p: api::StartParams,
+        resume_session: Option<String>,
+        extra: Vec<EventBody>,
+        protocol: Option<ProtocolRun>,
+    ) -> ApiResult<api::StartResult> {
         if p.prompt.trim().is_empty() && resume_session.is_none() {
             return Err(ApiError(RpcError {
                 code: api::code::INVALID_PARAMS,
@@ -1270,9 +1309,19 @@ impl Manager {
             model: p.model,
             allow_rewrites: p.allow_rewrites,
             resume_session,
+            protocol: protocol.as_ref().map(|r| r.save.id.clone()),
         }];
         bodies.extend(extra);
-        self.hub.commit(&id, bodies, None).map_err(ApiError::from)?;
+        let committed = match protocol {
+            None => self.hub.commit(&id, bodies, None).map(drop),
+            Some(run) => {
+                let mut items: Vec<(String, EventBody)> =
+                    bodies.into_iter().map(|b| (id.clone(), b)).collect();
+                items.push((String::new(), run.saved_after_starting(&id)));
+                self.hub.commit_many(items).map(drop)
+            }
+        };
+        committed.map_err(ApiError::from)?;
         self.pump();
         Ok(api::StartResult { task: id })
     }
@@ -1623,6 +1672,7 @@ impl Manager {
             daily_cap_usd: self.cfg.daily_cap_usd,
             max_concurrent: Some(self.cfg.max_concurrent),
             waited_today_secs: v.waited_on(&day),
+            protocols: v.protocols().into_iter().cloned().collect(),
         })
     }
 
@@ -2016,6 +2066,7 @@ mod tests {
                 model: None,
                 allow_rewrites: false,
                 resume_session: None,
+                protocol: None,
             },
         });
         v.task("t1").unwrap().clone()
@@ -2469,6 +2520,7 @@ mod tests {
                     model: None,
                     allow_rewrites: false,
                     resume_session: None,
+                    protocol: None,
                 },
             )
             .unwrap();

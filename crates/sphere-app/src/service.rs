@@ -698,7 +698,7 @@ mod tests {
     }
 
     fn created(seq: u64, task: &str) -> Event {
-        event(seq, task, EventBody::TaskCreated { title: format!("Task {task}"), prompt: "p".into(), repo: "/r".into(), in_place: false, budget_usd: 1.0, mode: None, model: None, allow_rewrites: false, resume_session: None })
+        event(seq, task, EventBody::TaskCreated { title: format!("Task {task}"), prompt: "p".into(), repo: "/r".into(), in_place: false, budget_usd: 1.0, mode: None, model: None, allow_rewrites: false, resume_session: None, protocol: None })
     }
 
     fn started(seq: u64, task: &str) -> Event {
@@ -741,7 +741,7 @@ mod tests {
     }
 
     fn empty_snapshot() -> Snapshot {
-        Snapshot { seq: 0, tasks: vec![], requests: vec![], cost_today_usd: 0.0, daily_cap_usd: None, max_concurrent: Some(3), waited_today_secs: 0 }
+        Snapshot { seq: 0, tasks: vec![], requests: vec![], cost_today_usd: 0.0, daily_cap_usd: None, max_concurrent: Some(3), waited_today_secs: 0, protocols: vec![] }
     }
 
     /// A mirror next to the server's own views: both fed the same events.
@@ -819,7 +819,7 @@ mod tests {
         for e in [created(1, "t1"), started(2, "t1"), step(3, "t1", "a"), ask(4, "t1", "r1"), created(5, "t2")] {
             server.apply(&e);
         }
-        let snap = Snapshot { seq: server.seq, tasks: server.tasks().into_iter().cloned().collect(), requests: server.open_requests().into_iter().cloned().collect(), cost_today_usd: 1.25, daily_cap_usd: None, max_concurrent: Some(2), waited_today_secs: 90 };
+        let snap = Snapshot { seq: server.seq, tasks: server.tasks().into_iter().cloned().collect(), requests: server.open_requests().into_iter().cloned().collect(), cost_today_usd: 1.25, daily_cap_usd: None, max_concurrent: Some(2), waited_today_secs: 90, protocols: vec![] };
         let mut s = Shared::default();
         let mut mirror = Mirror::connect(snap, &mut s);
         assert_eq!((s.tasks.len(), s.requests.len(), s.cost_today_usd, s.max_concurrent, s.waited_today_secs), (2, 1, 1.25, Some(2), 90));
@@ -1048,7 +1048,7 @@ mod tests {
         for e in events {
             v.apply(e);
         }
-        Snapshot { seq: v.seq, tasks: v.tasks().into_iter().cloned().collect(), requests: v.open_requests().into_iter().cloned().collect(), cost_today_usd: 0.0, daily_cap_usd: None, max_concurrent: Some(3), waited_today_secs: 0 }
+        Snapshot { seq: v.seq, tasks: v.tasks().into_iter().cloned().collect(), requests: v.open_requests().into_iter().cloned().collect(), cost_today_usd: 0.0, daily_cap_usd: None, max_concurrent: Some(3), waited_today_secs: 0, protocols: vec![] }
     }
 
     /// A sphered at event 3 (one task that works), and the two events it sends next: a question, then a second task.

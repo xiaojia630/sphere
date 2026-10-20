@@ -1,6 +1,7 @@
 //! The sphered API: JSON-RPC 2.0 over newline-delimited JSON on a Unix socket.
 
 use crate::event::{Event, FileStat, TaskState};
+use crate::protocol::Protocol;
 use crate::request::{AnswerKind, RequestStatus};
 use crate::views::{RequestView, TaskView};
 use serde::{Deserialize, Serialize};
@@ -26,6 +27,11 @@ pub mod method {
     pub const SESSION_OUTSIDE: &str = "session.outside";
     pub const SESSION_TAKE_OVER: &str = "session.take_over";
     pub const REQUEST_ANSWER: &str = "request.answer";
+    pub const PROTOCOL_ADD: &str = "protocol.add";
+    pub const PROTOCOL_LIST: &str = "protocol.list";
+    pub const PROTOCOL_SET_ENABLED: &str = "protocol.set_enabled";
+    pub const PROTOCOL_REMOVE: &str = "protocol.remove";
+    pub const PROTOCOL_RUN_NOW: &str = "protocol.run_now";
 }
 
 /// Notification methods the server pushes on a subscribed connection.
@@ -58,6 +64,8 @@ pub mod kind {
     pub const DAILY_CAP: &str = "daily_cap";
     pub const BAD_REPO: &str = "bad_repo";
     pub const AGENT_ERROR: &str = "agent_error";
+    /// A protocol line that does not read as a schedule; the message says what to type instead.
+    pub const BAD_SCHEDULE: &str = "bad_schedule";
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -149,6 +157,9 @@ pub struct Snapshot {
     /// waiting aren't included: clients add `now - opened_at` for those. 0 from an older sphered.
     #[serde(default)]
     pub waited_today_secs: u64,
+    /// The saved protocols, oldest first. Empty from an older sphered.
+    #[serde(default)]
+    pub protocols: Vec<Protocol>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -230,6 +241,33 @@ pub struct StartParams {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StartResult {
     pub task: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProtocolAddParams {
+    /// The line as typed: `every weekday 9:00 sphere: update the dependencies`.
+    pub text: String,
+    /// The repo for a line that names none (a folder; the last one used).
+    #[serde(default)]
+    pub repo: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProtocolList {
+    /// Oldest first.
+    pub protocols: Vec<Protocol>,
+}
+
+/// Which protocol, for `protocol.remove` and `protocol.run_now`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProtocolParams {
+    pub id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProtocolEnabledParams {
+    pub id: String,
+    pub enabled: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -424,6 +462,13 @@ mod tests {
             r#"{"seq":7,"tasks":[],"requests":[],"cost_today_usd":1.5,"waited_today_secs":95}"#;
         let s: Snapshot = serde_json::from_str(new).unwrap();
         assert_eq!(s.waited_today_secs, 95);
+    }
+
+    #[test]
+    fn a_snapshot_from_an_older_sphered_has_no_protocols() {
+        let old = r#"{"seq":7,"tasks":[],"requests":[],"cost_today_usd":1.5}"#;
+        let s: Snapshot = serde_json::from_str(old).unwrap();
+        assert!(s.protocols.is_empty());
     }
 
     #[test]
