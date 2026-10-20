@@ -93,12 +93,14 @@ impl Scanner {
     }
 
     /// A command is running (its start mark came, its end has not).
-    pub fn running(&self) -> bool {
+    #[cfg(test)]
+    fn running(&self) -> bool {
         self.run.is_some()
     }
 
     /// The directory the shell last reported.
-    pub fn cwd(&self) -> &str {
+    #[cfg(test)]
+    fn cwd(&self) -> &str {
         &self.cwd
     }
 
@@ -107,11 +109,23 @@ impl Scanner {
         let mut ev = Vec::new();
         let mut i = 0;
         while i < bytes.len() {
-            // outside a command only escape sequences matter: skip the text between them
-            if self.mode == Mode::Ground && self.run.is_none() {
-                match bytes[i..].iter().position(|&b| b == 0x1b) {
-                    Some(p) => i += p,
-                    None => break,
+            if self.mode == Mode::Ground {
+                match self.run.as_mut() {
+                    // outside a command only escape sequences matter: skip the text between them
+                    None => match bytes[i..].iter().position(|&b| b == 0x1b) {
+                        Some(p) => i += p,
+                        None => break,
+                    },
+                    // in one, a stretch of plain printable text goes in at once
+                    Some(run) if !run.alt && self.u_need == 0 => {
+                        let n = bytes[i..].iter().take_while(|b| (0x20..0x7f).contains(*b)).count();
+                        if n > 0 {
+                            run.text.put_ascii(&bytes[i..i + n]);
+                            i += n;
+                            continue;
+                        }
+                    }
+                    Some(_) => {}
                 }
             }
             self.step(bytes[i], now, &mut ev);
@@ -432,9 +446,23 @@ impl Text {
         self.col += 1;
     }
 
+    /// Printable ASCII, `put` for each byte, but at once when it all goes at the end of the line.
+    fn put_ascii(&mut self, bytes: &[u8]) {
+        if self.col == self.cur.len() {
+            let take = bytes.len().min(LINE_MAX.saturating_sub(self.col));
+            self.cur.extend(bytes[..take].iter().map(|&b| b as char));
+            self.col += take;
+        } else {
+            for &b in bytes {
+                self.put(b as char);
+            }
+        }
+    }
+
+    /// The line so far, without the spaces at its end.
     fn line(&self) -> String {
-        let s: String = self.cur.iter().collect();
-        s.trim_end_matches(' ').to_string()
+        let end = self.cur.iter().rposition(|&c| c != ' ').map_or(0, |p| p + 1);
+        self.cur[..end].iter().collect()
     }
 
     fn newline(&mut self) {
@@ -615,7 +643,7 @@ mod tests {
         assert!(run.text.lines.len() <= KEEP_LINES && run.text.bytes <= KEEP_BYTES + 100);
         // one enormous line is cut as well
         sc.feed("y".repeat(3_000_000).as_bytes(), now);
-        assert!(sc.run.as_ref().unwrap().text.cur.len() <= LINE_MAX);
+        assert_eq!(sc.run.as_ref().unwrap().text.cur.len(), LINE_MAX);
     }
 
     #[test]
