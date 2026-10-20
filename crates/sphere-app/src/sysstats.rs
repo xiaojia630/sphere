@@ -390,7 +390,8 @@ mod tests {
 
     #[test]
     fn changes_that_never_stop_are_counted_at_the_cap() {
-        let pace = Pace { quiet: Duration::from_millis(150), cap: Duration::from_millis(500), ..FAST };
+        // quiet is far longer than the gaps, so only the cap can end it, even when a busy machine wakes the feeder late
+        let pace = Pace { quiet: Duration::from_millis(500), cap: Duration::from_secs(1), ..FAST };
         let (tx, rx) = sync_channel(1);
         tx.send(()).unwrap();
         // a change every 50 ms for up to 3 s
@@ -404,7 +405,7 @@ mod tests {
         });
         let t = Instant::now();
         assert!(settle(&rx, &pace));
-        assert!(t.elapsed() >= Duration::from_millis(490) && t.elapsed() < Duration::from_secs(2), "settled after {:?}", t.elapsed());
+        assert!(t.elapsed() >= Duration::from_millis(990) && t.elapsed() < Duration::from_secs(3), "settled after {:?}", t.elapsed());
         drop(rx);
         feeder.join().unwrap();
     }
