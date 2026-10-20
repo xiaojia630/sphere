@@ -534,6 +534,11 @@ mod tests {
         assert_eq!(t.list.last().map(|x| x.2), Some(ToastKind::Ok));
     }
 
+    /// A timestamp `secs` before now, so a test's tasks stay inside RECENT_SECS whatever the date.
+    fn ago(secs: u64) -> String {
+        sphere_proto::rfc3339_from_unix_ms((crate::core::unix_now() as u64 - secs) * 1000)
+    }
+
     fn task(id: &str, state: TaskState, at: &str) -> TaskView {
         serde_json::from_value(serde_json::json!({
             "id": id, "title": format!("Task {id}"), "prompt": "", "state": state, "status": "Done: finished",
@@ -763,7 +768,7 @@ mod tests {
     fn a_resource_is_marked_changed_only_when_its_content_changed() {
         let mut app = app();
         put(&app, |s| {
-            s.tasks = vec![task("t1", TaskState::Working, "2026-10-19T00:01:00Z"), task("t2", TaskState::Done, "2026-10-19T00:02:00Z")];
+            s.tasks = vec![task("t1", TaskState::Working, &ago(120)), task("t2", TaskState::Done, &ago(60))];
             (s.roster, s.states, s.spans) = (1, 1, 1);
             s.link = Some(Link::Connected);
         });
