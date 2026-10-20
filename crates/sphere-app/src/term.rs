@@ -924,7 +924,7 @@ mod tests {
     }
 
     fn failure() -> Failure {
-        Failure { command: "make".into(), repo: "/work/sphere".into(), subdir: String::new(), exit: 2, duration: Duration::from_secs(1), output_tail: "boom".into(), cut: false }
+        Failure { command: "make".into(), repo: "/work/sphere".into(), subdir: String::new(), exit: 2, duration: Duration::from_secs(1), output_tail: "boom".into(), cut: false, dirty: false }
     }
 
     #[test]
