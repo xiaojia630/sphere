@@ -38,6 +38,8 @@ enum Drag {
 pub struct MouseState {
     pub hit: Option<Hit>,
     pub pos: Option<Vec2>,
+    /// where the pointer is on the Terminal panel (panel px) while it is over it: Fix it's buttons light up
+    pub term_at: Option<Vec2>,
     down_at: Option<(Vec2, f32)>,
     drag: Drag,
     last_pos: Vec2,
@@ -168,6 +170,7 @@ pub fn update(
     let Ok(cam) = cams.single() else { return };
     let Some(pos) = w.cursor_position() else {
         ms.pos = None;
+        ms.term_at = None;
         return;
     };
     ms.pos = Some(pos);
@@ -187,6 +190,10 @@ pub fn update(
         sound.play("hover");
     }
     ms.hit = Some(hit);
+    ms.term_at = match hit {
+        Hit::Panel(e, PanelId::Terminal) => panel_point(cam, &panels.p0(), e, pos),
+        _ => None,
+    };
 
     // ---- wheel
     let mut dy = 0.0;
@@ -442,7 +449,11 @@ fn single_click(hit: Hit, at: Option<Vec2>, rolo: &mut crate::homepanels::Rolode
             open.app(rolo.sel, toasts);
             sound.play_q("click", 90);
         }
-        Hit::Panel(_, PanelId::Terminal) => open.app(0, toasts),
+        // the strip of a failed command takes its buttons' clicks (`fixit::apply` finds which), else this focuses the terminal
+        Hit::Panel(_, PanelId::Terminal) => match at {
+            Some(a) => open.term_click = Some(a),
+            None => open.app(0, toasts),
+        },
         // a row of "elsewhere" opens its card (`takeover::commands` finds which), anywhere else the Working view
         Hit::Panel(_, PanelId::Agents) => match at {
             Some(a) => open.agents_click = Some(a),
@@ -651,6 +662,30 @@ mod tests {
         assert_eq!(ring_action(crate::core::AGENTS), Some(RingAction::Agents));
         assert_eq!(ring_action(crate::core::VOICE), None);
         assert_eq!(ring_action(5), None);
+    }
+
+    #[test]
+    fn a_click_on_the_terminal_panel_hands_its_point_to_fix_it_and_else_focuses_the_terminal() {
+        let click = |at: Option<Vec2>| {
+            let mut open = crate::apps::Open::default();
+            single_click(
+                Hit::Panel(Entity::PLACEHOLDER, PanelId::Terminal),
+                at,
+                &mut crate::homepanels::Rolodex::default(),
+                &mut open,
+                &mut crate::sound::Sound::default(),
+                &mut crate::live::Toasts::default(),
+                &mut crate::working::Working::default(),
+                "",
+            );
+            open
+        };
+        // where on the panel it was clicked is for `fixit::apply` to look at: the strip's buttons, or the terminal
+        let open = click(Some(Vec2::new(300.0, 360.0)));
+        assert_eq!((open.term_click, open.pending()), (Some(Vec2::new(300.0, 360.0)), None));
+        // with no place to go by it focuses the terminal as it always did
+        let open = click(None);
+        assert_eq!((open.term_click, open.pending()), (None, Some(0)));
     }
 
     #[test]

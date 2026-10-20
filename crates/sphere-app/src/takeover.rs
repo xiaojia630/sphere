@@ -961,7 +961,7 @@ fn demo_task(svc: &Service) -> (String, String) {
     let t: TaskView = serde_json::from_value(serde_json::json!({
         "id": "t-takeover", "title": "Migrate billing webhooks to v2", "prompt": "", "state": "working", "status": "Running the webhook tests",
         "repo": "/demo/api-server", "in_place": true, "budget_usd": 5.0, "cost_usd": 0.84,
-        "started_at": "2026-10-19T09:20:00Z", "updated_at": "2026-10-19T09:44:00Z", "steps": 5,
+        "started_at": "2026-10-19T09:20:00Z", "updated_at": "2026-10-19T09:44:00Z", "steps": 5, "briefed": 3,
     }))
     .expect("demo task");
     let ev = |body| Event { seq: 0, task: "t-takeover".into(), at: "2026-10-19T09:44:00Z".into(), body };

@@ -1,3 +1,4 @@
+use crate::protocol::Protocol;
 use crate::request::{AnswerKind, RequestInfo};
 use serde::{Deserialize, Serialize};
 use time::format_description::FormatItem;
@@ -38,6 +39,9 @@ pub enum EventBody {
         /// Set when the task brings in an existing Claude session.
         #[serde(default)]
         resume_session: Option<String>,
+        /// The protocol that started the task, when one did.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        protocol: Option<String>,
     },
     WorkspaceReady {
         workdir: String,
@@ -49,6 +53,9 @@ pub enum EventBody {
         child: String,
         pid: u32,
         resumed: bool,
+        /// How many of the user's notes this process was told when it started.
+        #[serde(default)]
+        briefed: u32,
     },
     AgentExited {
         #[serde(default)]
@@ -165,6 +172,21 @@ pub enum EventBody {
         /// Where it ran: `herdr`, `Terminal`, `Claude background`, ...
         from: String,
     },
+    /// A note was added or removed. It belongs to no task and holds no text: the notes are in the
+    /// snapshot and `memory.list`, and this tells a client to read them again.
+    MemoryChanged {
+        /// How many notes there are now, in all.
+        #[serde(default)]
+        notes: u32,
+    },
+    /// A protocol was written, changed or ran (task is empty). It replaces what was saved under its id.
+    ProtocolSaved {
+        protocol: Protocol,
+    },
+    /// A protocol was deleted (task is empty).
+    ProtocolRemoved {
+        id: String,
+    },
 }
 
 impl EventBody {
@@ -195,6 +217,9 @@ impl EventBody {
             EventBody::Failed { .. } => "failed",
             EventBody::Warning { .. } => "warning",
             EventBody::TakenOver { .. } => "taken_over",
+            EventBody::MemoryChanged { .. } => "memory_changed",
+            EventBody::ProtocolSaved { .. } => "protocol_saved",
+            EventBody::ProtocolRemoved { .. } => "protocol_removed",
         }
     }
 }
@@ -376,6 +401,16 @@ mod tests {
     }
 
     #[test]
+    fn an_agent_started_from_before_notes_was_briefed_with_none() {
+        let raw = r#"{"seq":4,"task":"t1","at":"x","kind":"agent_started","child":"c1","pid":9,"resumed":true}"#;
+        let ev: Event = serde_json::from_str(raw).unwrap();
+        assert!(matches!(
+            ev.body,
+            EventBody::AgentStarted { briefed: 0, .. }
+        ));
+    }
+
+    #[test]
     fn unix_ms_formats() {
         assert_eq!(rfc3339_from_unix_ms(0), "1970-01-01T00:00:00.000Z");
         assert_eq!(
@@ -420,10 +455,46 @@ mod tests {
             EventBody::SessionId {
                 session_id: "s".into(),
             },
+            EventBody::MemoryChanged { notes: 3 },
+            EventBody::AgentStarted {
+                child: "c".into(),
+                pid: 1,
+                resumed: false,
+                briefed: 2,
+            },
+            EventBody::ProtocolRemoved { id: "p1".into() },
+            EventBody::ProtocolSaved {
+                protocol: crate::protocol::Protocol {
+                    id: "p1".into(),
+                    text: "in 2 hours sphere: x".into(),
+                    schedule: crate::protocol::Schedule::Once { at: 9 },
+                    repo: "/r".into(),
+                    prompt: "x".into(),
+                    enabled: true,
+                    created_at: 1,
+                    last_run: None,
+                    next_run: Some(9),
+                },
+            },
         ];
         for b in bodies {
             let v = serde_json::to_value(&b).unwrap();
             assert_eq!(v["kind"], b.kind_name());
+            let back: EventBody = serde_json::from_value(v).unwrap();
+            assert_eq!(back, b);
         }
+    }
+
+    #[test]
+    fn a_task_made_before_protocols_has_none() {
+        let raw = r#"{"seq":1,"task":"t1","at":"x","kind":"task_created","title":"t","prompt":"p","repo":"/r","budget_usd":1.0}"#;
+        let ev: Event = serde_json::from_str(raw).unwrap();
+        assert!(matches!(
+            ev.body,
+            EventBody::TaskCreated { protocol: None, .. }
+        ));
+        // And a task that no protocol started doesn't carry the field.
+        let v = serde_json::to_value(&ev).unwrap();
+        assert!(v.get("protocol").is_none());
     }
 }

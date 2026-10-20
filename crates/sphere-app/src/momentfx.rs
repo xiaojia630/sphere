@@ -291,7 +291,7 @@ pub fn keys(
 ) {
     let mods = keys.any_pressed([KeyCode::SuperLeft, KeyCode::SuperRight, KeyCode::ControlLeft, KeyCode::ControlRight, KeyCode::AltLeft, KeyCode::AltRight]);
     for e in ev.read() {
-        if e.state != bevy::input::ButtonState::Pressed || mods || focus.cmd || focus.terminal || e.repeat || m.editing || e.key_code != KeyCode::KeyN || swarm.open {
+        if e.state != bevy::input::ButtonState::Pressed || mods || focus.cmd || focus.terminal || e.repeat || m.editing || m.offer.is_some() || e.key_code != KeyCode::KeyN || swarm.open {
             continue;
         }
         if m.shown {

@@ -3,8 +3,9 @@
 //! description of it. Enter answers yes, E changes (type, Enter sends), L is later, Esc puts the card away
 //! until something new arrives, and the arrows step through the others. A permission that comes with a rule
 //! to remember also answers on A (yes, and the rule is saved), and when other agents ask the same, Shift+Enter
-//! says yes to all of them at once. Only these keys answer: the service takes answers from the app and the CLI,
-//! never from an agent.
+//! says yes to all of them at once. Right after a Change is sent the card stays a few seconds with a chip, R, that keeps
+//! the change as a note for the task's repo (see `memory`). Only these keys answer: the service takes answers from the
+//! app and the CLI, never from an agent.
 use crate::appframe::{AppClicks, Click};
 use crate::fonts::UiFonts;
 use crate::live::{Live, Toasts};
@@ -16,13 +17,30 @@ use bevy::input::ButtonState;
 use bevy::prelude::*;
 use bevy::text::LineHeight;
 use serde_json::Value;
-use sphere_proto::{AnswerKind, RequestKind, RequestStatus, RequestView};
+use sphere_proto::{AnswerKind, NoteSource, RequestKind, RequestStatus, RequestView};
 
 pub const CARD_W: f32 = 600.0;
 /// Tall enough for the fullest card: a long summary and command, the same-ask line and the Always / Allow all row.
 pub const CARD_H: f32 = 512.0;
 /// The card's id in `AppClicks` (its quad carries an `AppPart` with it, so the app-pane click layer reaches it).
 pub const CLICK_APP: u8 = 200;
+/// How long the chip that offers to remember a change stays, in seconds.
+pub const OFFER_SECS: f32 = 5.0;
+
+/// Right after a Change is sent: the card stays with a chip that keeps what was said as a note for the task's repo. R
+/// (or a click on the chip) keeps it; any other key or click, or the time running out, lets it go.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Offer {
+    /// the request the change was for, as the card showed it, and its task's title
+    pub request: RequestView,
+    pub title: String,
+    /// the task's repo
+    pub repo: String,
+    /// what was sent
+    pub text: String,
+    /// seconds left
+    pub left: f32,
+}
 
 #[derive(Resource, Default)]
 pub struct Moment {
@@ -59,12 +77,14 @@ pub struct Moment {
     /// how many other agents' requests ask the same as the card drawn last (the answered card keeps its line and button
     /// while it folds)
     same: usize,
+    /// a Change was just sent: the chip that offers to keep it as a note is up
+    pub offer: Option<Offer>,
 }
 
 impl Moment {
     /// An answered card is still leaving, or everything is answered and the view is closing.
     pub fn busy(&self) -> bool {
-        self.holding.is_some() || self.fold.is_some() || self.later.is_some() || self.all_done.is_some()
+        self.holding.is_some() || self.fold.is_some() || self.later.is_some() || self.all_done.is_some() || self.offer.is_some()
     }
 
     /// The task whose request is on the card now.
@@ -201,7 +221,7 @@ pub fn update(live: Res<Live>, mut m: ResMut<Moment>, mut seen: Local<u64>, mut 
     let fresh = live.requests.iter().any(|r| pending(r, &m) && !m.dismissed.contains(&r.info.id));
     // a request that arrives while the swarm shows an agent's focus panel only toasts (the card waits for N)
     let held = swarm.open && matches!(swarm.mode, crate::swarm::Mode::Focus(_));
-    let shown = !w.is_empty() && (m.shown || (fresh && !held));
+    let shown = m.offer.is_some() || (!w.is_empty() && (m.shown || (fresh && !held)));
     if shown != m.shown && m.holding.is_none() && m.all_done.is_none() {
         m.shown = shown;
         if shown {
@@ -235,6 +255,30 @@ pub fn keys(
 ) {
     // clicks on the card's buttons and option rows; they do what the same key does, and only on a card that is up and waiting
     let clicked = clicks.take(CLICK_APP);
+    // a mod key held with the key: Cmd+A (select all) and the like are not the card's
+    let mods = keys.any_pressed([KeyCode::SuperLeft, KeyCode::SuperRight, KeyCode::ControlLeft, KeyCode::ControlRight, KeyCode::AltLeft, KeyCode::AltRight]);
+    // The chip that offers to keep a change is up: R (or a click on the chip) keeps it as a note, anything else lets it go
+    // and goes no further: the next request is not on screen, so a key is not an answer to it.
+    if m.offer.is_some() {
+        let mut keep = clicked.iter().any(|c| matches!(c, Click::Key(KeyCode::KeyR)));
+        let mut done = !clicked.is_empty();
+        for e in ev.read() {
+            if e.state == ButtonState::Pressed && !e.repeat && !focus.cmd && !focus.terminal {
+                keep |= e.key_code == KeyCode::KeyR && !mods;
+                done = true;
+            }
+        }
+        if keep {
+            if let Some(o) = &m.offer {
+                crate::memory::save(&svc, &mut toasts, Some(&o.repo), &o.text, NoteSource::Change);
+            }
+            sound.play_with("confirm", 0.7, 0.0);
+        }
+        if done {
+            end_offer(&mut m, &live, &mut sound);
+        }
+        return;
+    }
     if !clicked.is_empty() && (m.fold.is_some() || m.later.is_some()) {
         m.skip = true;
     }
@@ -249,7 +293,7 @@ pub fn keys(
                     let text = std::mem::take(&mut m.text);
                     m.editing = false;
                     if !text.trim().is_empty() {
-                        answer(&mut m, &svc, &id, if question { AnswerKind::Yes } else { AnswerKind::Change }, Some(text.trim().to_string()));
+                        submit(&mut m, &svc, &live, &req, text.trim());
                         sound.play_with("confirm", 0.7, 0.0);
                     }
                 }
@@ -288,13 +332,17 @@ pub fn keys(
                 _ => {}
             }
             m.version += 1;
+            // the chip is up: the clicks that came with this one were for the card that has just been answered
+            if m.offer.is_some() {
+                break;
+            }
         }
     }
     let shift = keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]);
-    // A saves a rule: never on a held key, and never as Cmd+A (select all) or the like
-    let mods = keys.any_pressed([KeyCode::SuperLeft, KeyCode::SuperRight, KeyCode::ControlLeft, KeyCode::ControlRight, KeyCode::AltLeft, KeyCode::AltRight]);
+    // (A saves a rule: never on a held key, and never with a mod key held, `mods`)
     for e in ev.read() {
-        if e.state != ButtonState::Pressed || !m.shown || focus.cmd || focus.terminal {
+        // keys that came with the one that sent a change were typed before the chip could be seen
+        if e.state != ButtonState::Pressed || !m.shown || focus.cmd || focus.terminal || m.offer.is_some() {
             continue;
         }
         if m.fold.is_some() || m.later.is_some() {
@@ -317,9 +365,7 @@ pub fn keys(
                     let text = std::mem::take(&mut m.text);
                     m.editing = false;
                     if !text.trim().is_empty() {
-                        // A question's typed answer is a yes carrying the answer; anything else is a change.
-                        let kind = if req.info.kind == RequestKind::Question { AnswerKind::Yes } else { AnswerKind::Change };
-                        answer(&mut m, &svc, &id, kind, Some(text.trim().to_string()));
+                        submit(&mut m, &svc, &live, &req, text.trim());
                         sound.play_with("confirm", 0.7, 0.0);
                     }
                 }
@@ -394,6 +440,72 @@ pub fn keys(
 
 fn answer(m: &mut Moment, svc: &Service, id: &str, kind: AnswerKind, text: Option<String>) {
     answer_with(m, svc, id, kind, text, false);
+}
+
+/// Sends what was typed on the card. A question's typed answer is a yes carrying the answer; anything else is a change.
+fn submit(m: &mut Moment, svc: &Service, live: &Live, req: &RequestView, text: &str) {
+    if req.info.kind == RequestKind::Question {
+        answer(m, svc, &req.info.id, AnswerKind::Yes, Some(text.to_string()));
+    } else {
+        send_change(m, svc, live, req, text);
+    }
+}
+
+/// A change to `req`. The card then stays a few seconds with a chip that offers to keep it as a note for the task's
+/// repo (when the app knows it): what you had to correct once, every agent there is told from the start.
+fn send_change(m: &mut Moment, svc: &Service, live: &Live, req: &RequestView, text: &str) {
+    answer(m, svc, &req.info.id, AnswerKind::Change, Some(text.to_string()));
+    let Some(repo) = live.repo(&req.info.task) else { return };
+    m.offer = Some(Offer { request: req.clone(), title: live.title(&req.info.task).to_string(), repo: repo.to_string(), text: text.to_string(), left: OFFER_SECS });
+}
+
+/// What E, `text` and Enter do on the card now showing (the look test, and tests): sends the change and raises the chip.
+pub fn change(m: &mut Moment, svc: &Service, live: &Live, text: &str) {
+    let Some(req) = waiting(live, m).get(m.index).map(|r| (*r).clone()) else { return };
+    m.editing = false;
+    m.text.clear();
+    submit(m, svc, live, &req, text);
+    m.version += 1;
+}
+
+/// The chip is done with (the change was kept, passed over, or the time ran out): the card goes on to what waits, or goes away.
+fn end_offer(m: &mut Moment, live: &Live, sound: &mut crate::sound::Sound) {
+    m.offer = None;
+    if pending_count(live, m) == 0 {
+        m.shown = false;
+        sound.play_with("collapse", 0.7, 0.0);
+    } else {
+        m.index = 0;
+        m.rise_seq += 1;
+        sound.play_with("open", 0.8, 0.0);
+    }
+    m.version += 1;
+}
+
+/// Counts the chip down by `dt` seconds. True when its time is up.
+fn tick_offer(m: &mut Moment, dt: f32) -> bool {
+    match m.offer.as_mut() {
+        Some(o) => {
+            o.left -= dt;
+            o.left <= 0.0
+        }
+        None => false,
+    }
+}
+
+/// Keeps the chip up (the look test's screenshot waits for seconds).
+pub fn hold_offer(m: &mut Moment) {
+    if let Some(o) = m.offer.as_mut().filter(|o| o.left < OFFER_SECS) {
+        o.left = OFFER_SECS;
+    }
+}
+
+/// Counts the chip down; when it runs out the card goes on.
+pub fn offer_clock(sim: Res<crate::core::Sim>, mut m: ResMut<Moment>, live: Res<Live>, mut sound: ResMut<crate::sound::Sound>) {
+    // (looked at first: asking for `&mut` would mark the card changed every frame)
+    if m.offer.is_some() && tick_offer(&mut m, sim.dt) {
+        end_offer(&mut m, &live, &mut sound);
+    }
 }
 
 /// A yes that also saves the rule the agent suggested; the toast names the rule.
@@ -536,7 +648,13 @@ pub fn draw(mut commands: Commands, mut m: ResMut<Moment>, live: Res<Live>, root
     commands.entity(root.0).despawn_children();
     // while folding, the answered card stays
     if let Some((r, title)) = m.holding.clone() {
-        let body = build(&mut commands, &f, &r, &title, &m, 1, m.same);
+        let body = build(&mut commands, &f, &r, &title, &m, 1, m.same, None);
+        commands.entity(root.0).add_child(body);
+        return;
+    }
+    // a change was just sent: the card stays with the chip that offers to keep it
+    if let Some(o) = m.offer.clone() {
+        let body = build(&mut commands, &f, &o.request, &o.title, &m, 1, 0, Some(&o));
         commands.entity(root.0).add_child(body);
         return;
     }
@@ -545,7 +663,7 @@ pub fn draw(mut commands: Commands, mut m: ResMut<Moment>, live: Res<Live>, root
     let title = live.title(&r.info.task).to_string();
     let n = w.len();
     let same = same_ask_others(&live, &m, &r).len();
-    let body = build(&mut commands, &f, &r, &title, &m, n, same);
+    let body = build(&mut commands, &f, &r, &title, &m, n, same, None);
     commands.entity(root.0).add_child(body);
     let m = m.bypass_change_detection();
     m.current = Some((r, title));
@@ -593,8 +711,10 @@ fn more_ways(c: &mut Commands, f: &UiFonts, rule: Option<String>, same: usize) -
     row
 }
 
-/// `n`: how many requests wait; `same`: how many other agents' requests ask the same as `r`.
-fn build(c: &mut Commands, f: &UiFonts, r: &RequestView, title: &str, m: &Moment, n: usize, same: usize) -> Entity {
+/// `n`: how many requests wait; `same`: how many other agents' requests ask the same as `r`; `offer`: the change just
+/// sent on `r`, whose chip the card carries instead of its actions.
+#[allow(clippy::too_many_arguments)]
+fn build(c: &mut Commands, f: &UiFonts, r: &RequestView, title: &str, m: &Moment, n: usize, same: usize, offer: Option<&Offer>) -> Entity {
     let line = role_color(Role::Line);
     let hot = role_color(Role::Hot);
     let acc = role_color(Role::Acc);
@@ -623,7 +743,7 @@ fn build(c: &mut Commands, f: &UiFonts, r: &RequestView, title: &str, m: &Moment
         .id();
     let dot = c.spawn((Node { width: px(5), height: px(5), ..default() }, BackgroundColor(Color::BLACK))).id();
     let nowrap = TextLayout { linebreak: LineBreak::NoWrap, ..default() };
-    let ct = c.spawn((Text::new("NEEDS YOU"), font(&f.ui700, 10.5, 2.31), TextColor(Color::BLACK), LineHeight::Px(10.5), nowrap)).id();
+    let ct = c.spawn((Text::new(if offer.is_some() { "CHANGE SENT" } else { "NEEDS YOU" }), font(&f.ui700, 10.5, 2.31), TextColor(Color::BLACK), LineHeight::Px(10.5), nowrap)).id();
     c.entity(chip).add_children(&[dot, ct]);
     let mut tt = title.to_uppercase();
     if tt.chars().count() > 22 {
@@ -708,6 +828,15 @@ fn build(c: &mut Commands, f: &UiFonts, r: &RequestView, title: &str, m: &Moment
         c.entity(body).add_child(you);
     }
 
+    // what you sent
+    if let Some(o) = offer {
+        let you = c.spawn(Node { flex_direction: FlexDirection::Row, column_gap: px(6), margin: UiRect { top: px(10), ..default() }, ..default() }).id();
+        let yl = c.spawn((Text::new("YOU"), font(&f.ui700, 9.5, 3.04), TextColor(mute), LineHeight::Px(22.0), Node { width: px(32), ..default() })).id();
+        let yt = c.spawn((Text::new(format!("\u{201C}{}\u{201D}", clip(&o.text, 120))), font(&f.ui500, 16.0, 0.16), TextColor(hot), LineHeight::Px(22.0))).id();
+        c.entity(you).add_children(&[yl, yt]);
+        c.entity(body).add_child(you);
+    }
+
     // why: the evidence
     let why = c.spawn(Node { flex_direction: FlexDirection::Row, flex_wrap: FlexWrap::Wrap, column_gap: px(6), row_gap: px(6), align_items: AlignItems::Center, margin: UiRect { top: px(14), ..default() }, ..default() }).id();
     let wl = c.spawn((Text::new("WHY"), font(&f.ui700, 9.5, 3.04), TextColor(mute), LineHeight::Px(9.5), Node { width: px(32), ..default() })).id();
@@ -731,9 +860,12 @@ fn build(c: &mut Commands, f: &UiFonts, r: &RequestView, title: &str, m: &Moment
     let sp = c.spawn(Node { flex_grow: 1.0, ..default() }).id();
     c.entity(body).add_child(sp);
 
-    // other ways to say yes
+    // keeping the change sent, or other ways to say yes
     let rule = always_rule(r);
-    if !m.editing && (rule.is_some() || same > 0) {
+    if let Some(o) = offer {
+        let keep = remember_chip(c, f, &o.repo);
+        c.entity(body).add_child(keep);
+    } else if !m.editing && (rule.is_some() || same > 0) {
         let more = more_ways(c, f, rule, same);
         c.entity(body).add_child(more);
     }
@@ -760,7 +892,9 @@ fn build(c: &mut Commands, f: &UiFonts, r: &RequestView, title: &str, m: &Moment
         c.entity(b).add_child(t);
         b
     };
-    let mut row = if m.editing {
+    let mut row = if offer.is_some() {
+        vec![btn(c, "Done", false, true, Click::Key(KeyCode::Escape))]
+    } else if m.editing {
         vec![btn(c, "Send", true, false, Click::Key(KeyCode::Enter)), btn(c, "Cancel", false, true, Click::Key(KeyCode::Escape))]
     } else {
         vec![btn(c, yes_label(r), true, false, Click::Key(KeyCode::Enter)), btn(c, "Change", false, false, Click::Key(KeyCode::KeyE)), btn(c, "Not now", false, true, Click::Key(KeyCode::KeyL))]
@@ -769,7 +903,7 @@ fn build(c: &mut Commands, f: &UiFonts, r: &RequestView, title: &str, m: &Moment
         .spawn((Node { margin: UiRect { left: auto(), ..default() }, padding: UiRect { left: px(7), right: px(7), top: px(5), bottom: px(4) }, border: UiRect::all(px(1)), ..default() }, BorderColor::all(g3)))
         .id();
     let kt = c
-        .spawn((Text::new(if m.editing { "ENTER · ESC" } else { "ENTER · E · L · ESC" }), font(&f.ui700, 9.5, 1.9), TextColor(mute), LineHeight::Px(9.5)))
+        .spawn((Text::new(if offer.is_some() { "R · ANY KEY" } else if m.editing { "ENTER · ESC" } else { "ENTER · E · L · ESC" }), font(&f.ui700, 9.5, 1.9), TextColor(mute), LineHeight::Px(9.5)))
         .id();
     c.entity(keys).add_child(kt);
     row.push(keys);
@@ -778,11 +912,32 @@ fn build(c: &mut Commands, f: &UiFonts, r: &RequestView, title: &str, m: &Moment
 
     // foot
     let foot = c.spawn(Node { flex_direction: FlexDirection::Row, justify_content: JustifyContent::SpaceBetween, margin: UiRect { top: px(14), ..default() }, ..default() }).id();
-    let count = c.spawn((Text::new(format!("{} of {}", m.index + 1, n)), font(&f.mono, 11.0, 0.66), TextColor(hot), LineHeight::Px(11.0))).id();
-    let nav = c.spawn((Text::new(if n > 1 { "← →  for the others" } else { "" }), font(&f.mono, 10.0, 0.5), TextColor(mute), LineHeight::Px(10.0))).id();
+    let count = c.spawn((Text::new(if offer.is_some() { String::new() } else { format!("{} of {}", m.index + 1, n) }), font(&f.mono, 11.0, 0.66), TextColor(hot), LineHeight::Px(11.0))).id();
+    let nav = c.spawn((Text::new(if n > 1 && offer.is_none() { "← →  for the others" } else { "" }), font(&f.mono, 10.0, 0.5), TextColor(mute), LineHeight::Px(10.0))).id();
     c.entity(foot).add_children(&[count, nav]);
     c.entity(body).add_child(foot);
     body
+}
+
+/// The chip that keeps the change just sent as a note for the task's repo: `REMEMBER FOR SPHERE  R`.
+fn remember_chip(c: &mut Commands, f: &UiFonts, repo: &str) -> Entity {
+    let line = role_color(Role::Line);
+    let hot = role_color(Role::Hot);
+    let nowrap = TextLayout { linebreak: LineBreak::NoWrap, ..default() };
+    let row = c.spawn(Node { flex_direction: FlexDirection::Row, align_items: AlignItems::Center, column_gap: px(10), margin: UiRect { top: px(8), bottom: px(12), ..default() }, ..default() }).id();
+    let chip = c
+        .spawn((
+            Node { flex_direction: FlexDirection::Row, align_items: AlignItems::Center, column_gap: px(8), flex_shrink: 0.0, padding: UiRect { left: px(14), right: px(12), top: px(8), bottom: px(7) }, border: UiRect::all(px(1)), ..default() },
+            BorderColor::all(with_alpha(line, 0.34)),
+            Click::Key(KeyCode::KeyR),
+        ))
+        .id();
+    let name = clip(sphere_proto::memory::repo_name(repo), 24).to_uppercase();
+    let t = c.spawn((Text::new(format!("REMEMBER FOR {name}")), font(&f.ui700, 11.5, 2.76), TextColor(hot), LineHeight::Px(12.5), nowrap)).id();
+    let k = c.spawn((Text::new("R"), font(&f.mono_bold, 9.5, 0.0), TextColor(with_alpha(line, 0.62)), LineHeight::Px(11.0), nowrap)).id();
+    c.entity(chip).add_children(&[t, k]);
+    c.entity(row).add_child(chip);
+    row
 }
 
 #[cfg(test)]
@@ -1236,5 +1391,241 @@ mod tests {
         app.update();
         assert_eq!(sent(&mut rx), yes(&["r1"], true));
         assert_eq!(app.world().resource::<Toasts>().list.len(), 1);
+    }
+
+    // ---- the chip that offers to keep a change as a note
+
+    /// What was sent to the service so far, in order.
+    #[derive(Debug, PartialEq)]
+    enum Sent {
+        Answer(String, AnswerKind),
+        Remember(Option<String>, String, NoteSource),
+    }
+
+    fn all_sent(rx: &mut UnboundedReceiver<Cmd>) -> Vec<Sent> {
+        let mut out = Vec::new();
+        while let Ok(c) = rx.try_recv() {
+            match c {
+                Cmd::Answer { request, answer, .. } => out.push(Sent::Answer(request, answer)),
+                Cmd::Remember { repo, text, source } => out.push(Sent::Remember(repo, text, source)),
+                _ => {}
+            }
+        }
+        out
+    }
+
+    /// Two requests, from t1 (which works in /code/sphere) and t2 (in /code/other).
+    fn two_tasks() -> Live {
+        let mut live = Live::default();
+        live.requests = vec![npm("r1", "t1", "left-pad"), npm("r2", "t2", "lodash")];
+        live.titles = vec![("t1".into(), "Install it".into()), ("t2".into(), "Install more".into())];
+        live.repos = vec![("t1".into(), "/code/sphere".into()), ("t2".into(), "/code/other".into())];
+        live
+    }
+
+    /// E, the words, Enter: a change typed on the card.
+    fn type_change(app: &mut App, text: &str) {
+        press(app, Key::Character("e".into()), KeyCode::KeyE);
+        app.world_mut().resource_mut::<Moment>().text = text.into();
+        press(app, Key::Enter, KeyCode::Enter);
+    }
+
+    fn r_key() -> Key {
+        Key::Character("r".into())
+    }
+
+    fn offer_of(app: &App) -> Option<&Offer> {
+        app.world().resource::<Moment>().offer.as_ref()
+    }
+
+    #[test]
+    fn a_change_sent_leaves_the_card_up_with_a_chip_that_offers_to_remember_it() {
+        let (mut app, mut rx) = drawn(two_tasks());
+        app.update();
+        type_change(&mut app, "Use pnpm, not npm");
+        assert_eq!(all_sent(&mut rx), [Sent::Answer("r1".into(), AnswerKind::Change)]);
+        let o = offer_of(&app).expect("the chip is up");
+        assert_eq!((o.repo.as_str(), o.text.as_str(), o.left, o.request.info.id.as_str()), ("/code/sphere", "Use pnpm, not npm", OFFER_SECS, "r1"));
+        let m = app.world().resource::<Moment>();
+        assert!(m.shown && m.busy(), "the card stays, and counts as busy: nothing else swaps it");
+        // the card says what it did and what R does, with the keys for it
+        app.update();
+        let said = texts(&mut app);
+        assert!(says(&said, "CHANGE SENT") && !says(&said, "NEEDS YOU"), "{said:?}");
+        assert!(says(&said, "REMEMBER FOR SPHERE") && says(&said, "R") && says(&said, "R · ANY KEY"), "{said:?}");
+        assert!(says(&said, "\u{201C}Use pnpm, not npm\u{201D}"), "{said:?}");
+        // the actions are gone: the request is answered
+        assert!(!says(&said, "RUN") && !says(&said, "CHANGE") && says(&said, "DONE"), "{said:?}");
+    }
+
+    #[test]
+    fn r_keeps_the_change_as_a_note_for_the_tasks_repo_and_the_card_goes_on() {
+        let (mut app, mut rx) = card(two_tasks());
+        type_change(&mut app, "Use pnpm, not npm");
+        all_sent(&mut rx);
+        press(&mut app, r_key(), KeyCode::KeyR);
+        assert_eq!(all_sent(&mut rx), [Sent::Remember(Some("/code/sphere".into()), "Use pnpm, not npm".into(), NoteSource::Change)]);
+        let m = app.world().resource::<Moment>();
+        assert!(m.offer.is_none());
+        // the other task's request still waits: the card goes on to it, from the top
+        assert!(m.shown && m.index == 0);
+    }
+
+    #[test]
+    fn any_other_key_lets_the_chip_go_and_is_not_an_answer_to_the_next_card() {
+        let (mut app, mut rx) = card(two_tasks());
+        type_change(&mut app, "Use pnpm, not npm");
+        all_sent(&mut rx);
+        // Enter would have said yes to r2, which has not been on screen: it only lets the chip go
+        press(&mut app, Key::Enter, KeyCode::Enter);
+        assert!(all_sent(&mut rx).is_empty());
+        assert!(offer_of(&app).is_none() && app.world().resource::<Moment>().shown);
+        press(&mut app, Key::Enter, KeyCode::Enter);
+        assert_eq!(all_sent(&mut rx), [Sent::Answer("r2".into(), AnswerKind::Yes)]);
+    }
+
+    /// One request, from t1: nothing else waits.
+    fn one_task() -> Live {
+        let mut live = two_tasks();
+        live.requests.truncate(1);
+        live
+    }
+
+    #[test]
+    fn with_nothing_else_waiting_the_card_goes_when_the_chip_does() {
+        for letting_go in [KeyCode::Escape, KeyCode::Space, KeyCode::KeyN] {
+            let (mut app, mut rx) = card(one_task());
+            type_change(&mut app, "Use pnpm, not npm");
+            all_sent(&mut rx);
+            press(&mut app, Key::Character("x".into()), letting_go);
+            assert!(all_sent(&mut rx).is_empty(), "{letting_go:?} keeps nothing");
+            let m = app.world().resource::<Moment>();
+            assert!(m.offer.is_none() && !m.shown, "{letting_go:?}");
+        }
+        // R keeps it, and the card goes too
+        let (mut app, mut rx) = card(one_task());
+        type_change(&mut app, "Use pnpm, not npm");
+        all_sent(&mut rx);
+        press(&mut app, r_key(), KeyCode::KeyR);
+        assert_eq!(all_sent(&mut rx).len(), 1);
+        assert!(!app.world().resource::<Moment>().shown);
+    }
+
+    #[test]
+    fn the_chip_runs_out_by_itself() {
+        let mut m = Moment { offer: Some(Offer { request: npm("r1", "t1", "x"), title: "t".into(), repo: "/r".into(), text: "x".into(), left: OFFER_SECS }), ..default() };
+        assert!(!tick_offer(&mut m, OFFER_SECS - 0.1));
+        assert!(tick_offer(&mut m, 0.2));
+        assert!(!tick_offer(&mut Moment::default(), 99.0), "no chip, nothing runs out");
+        // on the clock: the card goes with it
+        let (mut app, mut rx) = card(one_task());
+        app.insert_resource(crate::core::Sim { dt: 2.0, t: 0.0, boot_t: 99.0, fixed_dt: None, frozen: false }).add_systems(Update, offer_clock.after(keys));
+        type_change(&mut app, "Use pnpm, not npm");
+        assert!(offer_of(&app).is_some_and(|o| o.left > 2.9), "two seconds are spent already, by the frame that sent it");
+        app.update();
+        assert!(offer_of(&app).is_some());
+        app.update();
+        assert!(offer_of(&app).is_none() && !app.world().resource::<Moment>().shown);
+        assert_eq!(all_sent(&mut rx), [Sent::Answer("r1".into(), AnswerKind::Change)], "a chip that ran out keeps nothing");
+    }
+
+    #[test]
+    fn a_task_whose_repo_is_not_known_has_nothing_to_remember_for() {
+        let mut live = two_tasks();
+        live.repos.clear();
+        let (mut app, mut rx) = card(live);
+        type_change(&mut app, "Use pnpm, not npm");
+        assert_eq!(all_sent(&mut rx), [Sent::Answer("r1".into(), AnswerKind::Change)]);
+        assert!(offer_of(&app).is_none() && !app.world().resource::<Moment>().busy());
+    }
+
+    #[test]
+    fn a_questions_typed_answer_is_not_offered() {
+        let mut live = two_tasks();
+        live.requests[0].info.kind = RequestKind::Question;
+        let (mut app, mut rx) = card(live);
+        type_change(&mut app, "pnpm");
+        assert_eq!(all_sent(&mut rx), [Sent::Answer("r1".into(), AnswerKind::Yes)]);
+        assert!(offer_of(&app).is_none());
+    }
+
+    #[test]
+    fn the_chip_and_its_done_button_answer_to_clicks() {
+        let (mut app, mut rx) = card(two_tasks());
+        type_change(&mut app, "Use pnpm, not npm");
+        all_sent(&mut rx);
+        app.world_mut().resource_mut::<AppClicks>().push(CLICK_APP, Click::Key(KeyCode::KeyR));
+        app.update();
+        assert_eq!(all_sent(&mut rx), [Sent::Remember(Some("/code/sphere".into()), "Use pnpm, not npm".into(), NoteSource::Change)]);
+        assert!(offer_of(&app).is_none());
+        // Done (Esc) lets it go and keeps nothing
+        let (mut app, mut rx) = card(two_tasks());
+        type_change(&mut app, "Use pnpm, not npm");
+        all_sent(&mut rx);
+        app.world_mut().resource_mut::<AppClicks>().push(CLICK_APP, Click::Key(KeyCode::Escape));
+        app.update();
+        assert!(all_sent(&mut rx).is_empty() && offer_of(&app).is_none());
+    }
+
+    #[test]
+    fn a_click_that_sends_the_change_does_not_click_the_next_card_too() {
+        let (mut app, mut rx) = card(two_tasks());
+        app.world_mut().resource_mut::<Moment>().editing = true;
+        app.world_mut().resource_mut::<Moment>().text = "Use pnpm, not npm".into();
+        // Send, and a second click on the same spot in the same frame (a double click)
+        app.world_mut().resource_mut::<AppClicks>().push(CLICK_APP, Click::Key(KeyCode::Enter));
+        app.world_mut().resource_mut::<AppClicks>().push(CLICK_APP, Click::Key(KeyCode::Enter));
+        app.update();
+        assert_eq!(all_sent(&mut rx), [Sent::Answer("r1".into(), AnswerKind::Change)], "r2 was not answered unseen");
+    }
+
+    #[test]
+    fn a_mod_key_a_held_key_or_the_bar_do_not_decide_for_the_chip() {
+        // Cmd+R is a reload or the like: it lets the chip go, it does not keep anything
+        let (mut app, mut rx) = card(two_tasks());
+        type_change(&mut app, "Use pnpm, not npm");
+        all_sent(&mut rx);
+        hold(&mut app, KeyCode::SuperLeft);
+        press(&mut app, r_key(), KeyCode::KeyR);
+        assert!(all_sent(&mut rx).is_empty() && offer_of(&app).is_none());
+        // a held key (the Enter that sent the change, still repeating) leaves the chip alone
+        let (mut app, mut rx) = card(two_tasks());
+        type_change(&mut app, "Use pnpm, not npm");
+        press_key(&mut app, Key::Enter, KeyCode::Enter, true);
+        assert!(offer_of(&app).is_some());
+        // so do the keys the command bar is taking
+        app.world_mut().resource_mut::<Focus>().cmd = true;
+        press(&mut app, r_key(), KeyCode::KeyR);
+        assert!(offer_of(&app).is_some());
+        assert_eq!(all_sent(&mut rx).len(), 1, "only the change itself");
+    }
+
+    #[test]
+    fn the_card_stays_up_for_the_chip_when_the_request_it_answered_closes() {
+        let (mut app, _rx) = card(one_task());
+        app.init_resource::<crate::swarm::Swarm>().add_systems(Update, update.before(keys));
+        type_change(&mut app, "Use pnpm, not npm");
+        // sphered confirms: the request is closed and gone from the list
+        {
+            let mut live = app.world_mut().resource_mut::<Live>();
+            live.requests.clear();
+            live.version += 1;
+        }
+        app.update();
+        assert!(app.world().resource::<Moment>().shown, "the chip is still to be seen");
+        press(&mut app, Key::Character("x".into()), KeyCode::KeyX);
+        assert!(!app.world().resource::<Moment>().shown);
+    }
+
+    #[test]
+    fn the_look_test_sends_a_change_the_way_the_keys_do() {
+        let (mut app, mut rx) = card(two_tasks());
+        app.world_mut().resource_scope(|world, mut m: Mut<Moment>| change(&mut m, world.resource::<Service>(), world.resource::<Live>(), "Use pnpm instead of npm"));
+        assert_eq!(all_sent(&mut rx), [Sent::Answer("r1".into(), AnswerKind::Change)]);
+        assert_eq!(offer_of(&app).map(|o| o.text.as_str()), Some("Use pnpm instead of npm"));
+        // and it can be held while a screenshot waits
+        app.world_mut().resource_mut::<Moment>().offer.as_mut().unwrap().left = 0.5;
+        hold_offer(&mut app.world_mut().resource_mut::<Moment>());
+        assert_eq!(offer_of(&app).map(|o| o.left), Some(OFFER_SECS));
     }
 }

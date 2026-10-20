@@ -23,6 +23,7 @@ use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use std::{
     io::{Read, Write},
     sync::{mpsc, Arc, Mutex},
+    time::Instant,
 };
 
 pub const COLS: usize = 66;
@@ -107,7 +108,31 @@ struct Inner {
     child: Option<Box<dyn portable_pty::Child + Send + Sync>>,
     /// a shell held by sphere-host (it outlives the app)
     host: Option<crate::hostterm::Handle>,
+    /// reads what the tab prints for the commands that start and end in it (the emulator still gets every byte),
+    /// believing only the marks that carry the nonce of the tab's shell
+    scan: crate::scan::Scanner,
+    /// bytes of old output the host is still replaying into this re-attached tab: its commands ended long ago,
+    /// so they get no Fix it
+    replay: u64,
+    /// the look test's tab: its directory is its repo, no need to ask git
+    in_repo: bool,
+    /// answers from the threads that check where a failed command ran (`Terminal::fix`)
+    checked_tx: mpsc::Sender<crate::fixit::Checked>,
+    checked_rx: mpsc::Receiver<crate::fixit::Checked>,
+    /// a scripted tab keeps the sender of its bytes, so the tab doesn't look like its shell exited
+    _script: Option<mpsc::Sender<Vec<u8>>>,
 }
+
+impl Inner {
+    /// `nonce`: what the marks of the tab's shell carry; none when it has no shell integration.
+    fn new(term: Term<Listener>, rx: mpsc::Receiver<Vec<u8>>, writer: Arc<Mutex<Box<dyn Write + Send>>>, nonce: Option<&str>) -> Self {
+        let (checked_tx, checked_rx) = mpsc::channel();
+        Self { term, parser: Processor::new(), rx, writer, _master: None, child: None, host: None, scan: crate::scan::Scanner::new(nonce), replay: 0, in_repo: false, checked_tx, checked_rx, _script: None }
+    }
+}
+
+/// The nonce that a scripted tab believes, and that the look test's output carries.
+pub const SCRIPT_NONCE: &str = "5ce91f07a3b2486dbf0a17c4e8d36529";
 
 pub struct Terminal {
     inner: Mutex<Inner>,
@@ -117,6 +142,11 @@ pub struct Terminal {
     pub back_to: Option<usize>,
     /// The program's name for the header (`zsh`, `bash`).
     pub name: String,
+    /// The newest command that failed in this tab inside a git work tree, which Fix it offers a fix for. It goes
+    /// when the next command starts, or when it is dismissed or used.
+    pub fix: Option<crate::fixit::Failure>,
+    /// Counts the commands that started in this tab, and the dismissals: an answer about an older failure is stale.
+    pub fix_seq: u64,
 }
 
 /// The terminal tabs. Shells live in the app for now: sphered has no terminal API yet, so they end when the
@@ -216,6 +246,7 @@ impl Terminal {
             .openpty(PtySize { rows: ROWS as u16, cols: COLS as u16, pixel_width: 0, pixel_height: 0 })
             .map_err(|e| e.to_string())?;
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
+        let mut nonce = None;
         let mut cmd = if look {
             let mut c = CommandBuilder::new("bash");
             c.args(["--norc", "--noprofile", "-i"]);
@@ -226,14 +257,22 @@ impl Terminal {
             c.cwd(repo_dir());
             c
         } else {
+            let launch = crate::shellint::launch(&shell);
             let mut c = CommandBuilder::new(&shell);
-            c.arg("-l");
+            c.args(&launch.args);
+            for (k, v) in &launch.env {
+                c.env(k, v);
+            }
+            nonce = launch.nonce;
             c.cwd(std::env::var_os("HOME").unwrap_or_default());
             c
         };
         let name = if look { "bash".to_string() } else { std::path::Path::new(&shell).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default() };
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
+        for (k, v) in crate::shellint::locale_env() {
+            cmd.env(k, v);
+        }
         let child = pair.slave.spawn_command(cmd).map_err(|e| e.to_string())?;
         drop(pair.slave);
         let mut reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;
@@ -264,13 +303,37 @@ impl Terminal {
                 let _ = w.flush();
             });
         }
-        Ok(Self {
-            inner: Mutex::new(Inner { term, parser: Processor::new(), rx, writer, _master: Some(pair.master), child: Some(child), host: None }),
-            dirty: true,
-            exited: false,
-            back_to: None,
-            name,
-        })
+        let mut inner = Inner::new(term, rx, writer, nonce.as_deref());
+        inner._master = Some(pair.master);
+        inner.child = Some(child);
+        Ok(Self::with(inner, name))
+    }
+
+    fn with(inner: Inner, name: String) -> Self {
+        Self { inner: Mutex::new(inner), dirty: true, exited: false, back_to: None, name, fix: None, fix_seq: 0 }
+    }
+
+    /// A tab with no shell: it prints what is sent through the returned sender, and takes its directory for the
+    /// repo when `in_repo`. The look test and the tests use it; the marks it believes carry `SCRIPT_NONCE`.
+    pub fn scripted(in_repo: bool) -> (Self, mpsc::Sender<Vec<u8>>) {
+        Self::scripted_with(in_repo, Some(SCRIPT_NONCE))
+    }
+
+    /// `scripted` that believes the marks with `nonce` (none: those of a tab without the shell integration).
+    pub fn scripted_with(in_repo: bool, nonce: Option<&str>) -> (Self, mpsc::Sender<Vec<u8>>) {
+        let (tx, rx) = mpsc::channel();
+        let writer: Arc<Mutex<Box<dyn Write + Send>>> = Arc::new(Mutex::new(Box::new(std::io::sink())));
+        let term = Term::new(Config::default(), &Size, Listener { writer: writer.clone() });
+        let mut inner = Inner::new(term, rx, writer, nonce);
+        inner.in_repo = in_repo;
+        inner._script = Some(tx.clone());
+        (Self::with(inner, "bash".to_string()), tx)
+    }
+
+    /// Takes the failure away (the strip goes), whatever is still being looked up for it too.
+    pub fn dismiss_fix(&mut self) -> Option<crate::fixit::Failure> {
+        self.fix_seq += 1;
+        self.fix.take()
     }
 
     pub fn kill(&self) {
@@ -294,13 +357,10 @@ impl Terminal {
         let name = std::path::Path::new(attach.map(|c| c.cmd.as_str()).unwrap_or(&shell)).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
         let writer: Arc<Mutex<Box<dyn Write + Send>>> = Arc::new(Mutex::new(Box::new(w)));
         let term = Term::new(Config::default(), &Size, Listener { writer: writer.clone() });
-        Some(Self {
-            inner: Mutex::new(Inner { term, parser: Processor::new(), rx, writer, _master: None, child: None, host: Some(h) }),
-            dirty: true,
-            exited: false,
-            back_to: None,
-            name,
-        })
+        let mut inner = Inner::new(term, rx, writer, h.nonce.as_deref());
+        inner.host = Some(h);
+        inner.replay = attach.map(crate::hostterm::replay_len).unwrap_or(0);
+        Some(Self::with(inner, name))
     }
 
     pub fn send(&self, bytes: &[u8]) {
@@ -333,6 +393,11 @@ pub fn pump(mut terms: ResMut<Terms>) {
 }
 
 fn pump_one(t: &mut Terminal) {
+    pump_at(t, Instant::now());
+}
+
+/// Reads what the tab has printed, as `pump_one`, with `now` as the time its commands start and end at.
+pub fn pump_at(t: &mut Terminal, now: Instant) {
     let mut got = false;
     let mut gone = false;
     {
@@ -343,6 +408,21 @@ fn pump_one(t: &mut Terminal) {
         while budget > 0 {
             match i.rx.try_recv() {
                 Ok(b) => {
+                    // the scanner reads the bytes on their way to the emulator; the old output of a re-attached
+                    // tab is read too (a command may still be running in it) but ends no command for Fix it
+                    let old = (i.replay as usize).min(b.len());
+                    i.replay -= old as u64;
+                    i.scan.feed(&b[..old], now);
+                    for ev in i.scan.feed(&b[old..], now) {
+                        match ev {
+                            crate::scan::Event::Started => {
+                                t.fix = None;
+                                t.fix_seq += 1;
+                            }
+                            crate::scan::Event::Finished(done) if crate::fixit::wants_fix(done.exit, &done.command) => crate::fixit::check(done, t.fix_seq, i.in_repo, i.checked_tx.clone()),
+                            crate::scan::Event::Finished(_) => {}
+                        }
+                    }
                     i.parser.advance(&mut i.term, &b);
                     budget = budget.saturating_sub(b.len());
                     got = true;
@@ -352,6 +432,12 @@ fn pump_one(t: &mut Terminal) {
                     gone = true;
                     break;
                 }
+            }
+        }
+        // a failure that was looked up meanwhile: it shows unless another command has started since
+        while let Ok(c) = i.checked_rx.try_recv() {
+            if c.seq == t.fix_seq {
+                t.fix = c.failure;
             }
         }
     }
@@ -370,6 +456,12 @@ pub struct TermUi {
     pub rows: Vec<Entity>,
     pub hashes: Vec<u64>,
     pub status: Entity,
+    /// the lines, in a window that cuts what Fix it lifts out of the strip's way
+    pub grid: Entity,
+    /// Fix it's strip at the bottom of the panel
+    pub strip: crate::fixit::Strip,
+    /// the line the cursor was on when the lines were last drawn
+    pub cursor_row: usize,
     pub version: u64,
     pub last_focus: bool,
     pub last_blink: bool,
@@ -422,8 +514,12 @@ pub fn build_term_ui(commands: &mut Commands, root: Entity, f: &UiFonts) -> Term
         ))
         .id();
     commands.entity(hdr).add_children(&[sq, t1, status]);
-    let grid = commands.spawn(Node { flex_direction: FlexDirection::Column, ..default() }).id();
-    commands.entity(body).add_child(grid);
+    // the lines sit in a window the height of the screen; Fix it moves them up inside it (`grid.top`) when its strip
+    // would cover the cursor's line
+    let window = commands.spawn(Node { height: px(ROWS as f32 * LINE_H), flex_shrink: 0.0, overflow: Overflow::clip(), ..default() }).id();
+    commands.entity(body).add_child(window);
+    let grid = commands.spawn(Node { position_type: PositionType::Absolute, left: px(0), right: px(0), top: px(0), flex_direction: FlexDirection::Column, ..default() }).id();
+    commands.entity(window).add_child(grid);
     let mut rows = Vec::new();
     for r in 0..ROWS {
         let e = commands
@@ -440,7 +536,8 @@ pub fn build_term_ui(commands: &mut Commands, root: Entity, f: &UiFonts) -> Term
         commands.entity(grid).add_child(e);
         rows.push(e);
     }
-    TermUi { rows, hashes: vec![u64::MAX; ROWS], status, version: u64::MAX, last_focus: false, last_blink: true }
+    let strip = crate::fixit::build_strip(commands, body, f);
+    TermUi { rows, hashes: vec![u64::MAX; ROWS], status, grid, strip, cursor_row: 0, version: u64::MAX, last_focus: false, last_blink: true }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -492,6 +589,7 @@ pub fn draw(
     let term = &guard.term;
     let content = term.renderable_content();
     let cursor = content.cursor.point;
+    ui.cursor_row = (cursor.line.0.max(0) as usize).min(ROWS - 1);
     let cursor_visible = content.mode.contains(TermMode::SHOW_CURSOR);
     // gather visible cells
     let mut cells: Vec<Vec<(char, Style)>> = vec![vec![(' ', Style { fg: rgba(def_fg), bg: None, bold: false }); COLS]; ROWS];
@@ -767,5 +865,236 @@ pub fn read_keys(
                 t.send(&b);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fixit::{base64, Failure};
+    use std::{path::Path, time::Duration};
+
+    fn osc(body: &str) -> String {
+        format!("\x1b]{body}\x07")
+    }
+
+    /// The start of a command as the shell integration prints it: its line, then the mark that its output starts.
+    fn start(cmd: &str) -> String {
+        format!("{}{}", osc(&format!("7700;cmd;{};{SCRIPT_NONCE}", base64(cmd))), osc(&format!("133;C;sphere={SCRIPT_NONCE}")))
+    }
+
+    /// The mark that a prompt is drawn.
+    fn prompt() -> String {
+        osc(&format!("133;A;sphere={SCRIPT_NONCE}"))
+    }
+
+    /// The end of a command: the directory, the exit status, the next prompt.
+    fn end(cwd: &str, exit: i32) -> String {
+        format!("{}{}{}", osc(&format!("7;file://host{cwd}")), osc(&format!("133;D;{exit};sphere={SCRIPT_NONCE}")), prompt())
+    }
+
+    fn session(cmd: &str, cwd: &str, output: &str, exit: i32) -> Vec<u8> {
+        format!("{}{output}{}", start(cmd), end(cwd, exit)).into_bytes()
+    }
+
+    /// Pumps the tab until `done`: the thread that looks where a command ran answers a moment later.
+    fn pump_until(t: &mut Terminal, what: &str, done: impl Fn(&Terminal) -> bool) {
+        let give_up = Instant::now() + Duration::from_secs(20);
+        loop {
+            pump_one(t);
+            if done(t) {
+                return;
+            }
+            assert!(Instant::now() < give_up, "gave up waiting for {what}");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// Pumps the tab, then once more after the lookup would have answered.
+    fn pump_and_wait(t: &mut Terminal) {
+        pump_one(t);
+        std::thread::sleep(Duration::from_millis(150));
+        pump_one(t);
+    }
+
+    fn screen(t: &Terminal) -> String {
+        let g = t.inner.lock().unwrap();
+        let grid = g.term.grid();
+        (0..ROWS).map(|r| (0..COLS).map(|c| grid[Point::new(Line(r as i32), Column(c))].c).collect::<String>().trim_end().to_string()).collect::<Vec<_>>().join("\n")
+    }
+
+    fn failure() -> Failure {
+        Failure { command: "make".into(), repo: "/work/sphere".into(), subdir: String::new(), exit: 2, duration: Duration::from_secs(1), output_tail: "boom".into(), cut: false, dirty: false }
+    }
+
+    #[test]
+    fn a_failed_command_in_the_repo_is_kept_for_fix_it() {
+        let (mut t, tx) = Terminal::scripted(true);
+        tx.send(session("cargo test", "/work/sphere", "running 1 test\r\ntest a ... FAILED\r\n", 101)).unwrap();
+        pump_until(&mut t, "the failure", |t| t.fix.is_some());
+        let f = t.fix.as_ref().unwrap();
+        assert_eq!((f.command.as_str(), f.exit, f.repo.as_path(), f.subdir.as_str()), ("cargo test", 101, Path::new("/work/sphere"), ""));
+        assert_eq!(f.output_tail, "running 1 test\ntest a ... FAILED");
+    }
+
+    #[test]
+    fn the_next_command_takes_the_failure_away() {
+        let (mut t, tx) = Terminal::scripted(true);
+        tx.send(session("make", "/work/sphere", "boom\r\n", 2)).unwrap();
+        pump_until(&mut t, "the failure", |t| t.fix.is_some());
+        // an empty Enter at the prompt starts nothing: the strip stays
+        tx.send(prompt().into_bytes()).unwrap();
+        pump_one(&mut t);
+        assert!(t.fix.is_some());
+        tx.send(start("ls").into_bytes()).unwrap();
+        pump_one(&mut t);
+        assert!(t.fix.is_none());
+    }
+
+    #[test]
+    fn stopping_a_command_or_succeeding_is_not_a_failure() {
+        let (mut t, tx) = Terminal::scripted(true);
+        for exit in [0, 130, 131, 146, 148] {
+            tx.send(session("sleep 100", "/work/sphere", "", exit)).unwrap();
+            pump_and_wait(&mut t);
+            assert!(t.fix.is_none(), "exit {exit}");
+        }
+        // and a real failure after them still shows
+        tx.send(session("make", "/work/sphere", "boom\r\n", 2)).unwrap();
+        pump_until(&mut t, "the failure", |t| t.fix.is_some());
+    }
+
+    #[test]
+    fn only_the_newest_failure_shows() {
+        let (mut t, tx) = Terminal::scripted(true);
+        let mut both = session("make", "/work/sphere", "first\r\n", 2);
+        both.extend(session("cargo build", "/work/sphere", "second\r\n", 101));
+        tx.send(both).unwrap();
+        pump_until(&mut t, "the failure", |t| t.fix.is_some());
+        pump_and_wait(&mut t);
+        let f = t.fix.as_ref().unwrap();
+        assert_eq!((f.command.as_str(), f.exit, f.output_tail.as_str()), ("cargo build", 101, "second"));
+    }
+
+    #[test]
+    fn a_failure_still_being_looked_up_when_the_next_command_starts_never_shows() {
+        let (mut t, tx) = Terminal::scripted(true);
+        // the lookup of the first failure is answered after the second command has started
+        let mut both = session("make", "/work/sphere", "boom\r\n", 2);
+        both.extend(start("ls").into_bytes());
+        tx.send(both).unwrap();
+        pump_and_wait(&mut t);
+        assert!(t.fix.is_none());
+    }
+
+    #[test]
+    fn a_failure_in_a_git_work_tree_knows_its_repo_and_where_in_it() {
+        let root = std::fs::canonicalize(std::env::temp_dir()).unwrap().join(format!("sphere-term-fix-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("crates/x")).unwrap();
+        assert!(std::process::Command::new("git").arg("-C").arg(&root).args(["init", "-q"]).status().is_ok_and(|s| s.success()));
+        let (mut t, tx) = Terminal::scripted(false);
+        tx.send(session("cargo test", &root.join("crates/x").to_string_lossy(), "boom\r\n", 101)).unwrap();
+        pump_until(&mut t, "the failure", |t| t.fix.is_some());
+        let f = t.fix.as_ref().unwrap();
+        assert_eq!((f.repo.as_path(), f.subdir.as_str()), (root.as_path(), "crates/x"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_failure_that_ran_nowhere_is_not_offered() {
+        // no directory was reported, or it is gone: there is no repo to start an agent in
+        let (mut t, tx) = Terminal::scripted(false);
+        tx.send(format!("{}boom\r\n{}{}", start("make"), osc(&format!("133;D;2;sphere={SCRIPT_NONCE}")), prompt()).into_bytes()).unwrap();
+        pump_and_wait(&mut t);
+        assert!(t.fix.is_none());
+        tx.send(session("make", "/nowhere/at/all", "boom\r\n", 2)).unwrap();
+        pump_and_wait(&mut t);
+        assert!(t.fix.is_none());
+    }
+
+    #[test]
+    fn old_output_replayed_into_a_reattached_tab_gets_no_fix_it() {
+        let (mut t, tx) = Terminal::scripted(true);
+        let old = session("make", "/work/sphere", "old failure\r\n", 2);
+        t.inner.lock().unwrap().replay = old.len() as u64;
+        tx.send(old).unwrap();
+        pump_and_wait(&mut t);
+        assert!(t.fix.is_none(), "an old failure is not offered");
+        assert_eq!(t.inner.lock().unwrap().replay, 0);
+        tx.send(session("make", "/work/sphere", "new failure\r\n", 2)).unwrap();
+        pump_until(&mut t, "the new failure", |t| t.fix.is_some());
+        assert_eq!(t.fix.as_ref().unwrap().output_tail, "new failure");
+    }
+
+    #[test]
+    fn a_command_that_was_running_when_the_app_came_back_can_still_fail() {
+        // its start is in the replay and its end is live, in the same chunk or the next
+        let old = format!("{}half of the output\r\n", start("make")).into_bytes();
+        let live = format!("the other half\r\n{}", end("/work/sphere", 1)).into_bytes();
+        for in_one_chunk in [false, true] {
+            let (mut t, tx) = Terminal::scripted(true);
+            t.inner.lock().unwrap().replay = old.len() as u64;
+            if in_one_chunk {
+                tx.send([old.clone(), live.clone()].concat()).unwrap();
+            } else {
+                tx.send(old.clone()).unwrap();
+                tx.send(live.clone()).unwrap();
+            }
+            pump_until(&mut t, "the failure", |t| t.fix.is_some());
+            assert_eq!(t.fix.as_ref().unwrap().output_tail, "half of the output\nthe other half", "one chunk: {in_one_chunk}");
+        }
+    }
+
+    #[test]
+    fn the_emulator_still_gets_every_byte() {
+        let (mut t, tx) = Terminal::scripted(true);
+        tx.send(crate::fixit::demo_bytes()).unwrap();
+        pump_until(&mut t, "the failure", |t| t.fix.is_some());
+        let s = screen(&t);
+        assert!(s.contains("error: test failed, to rerun pass `-p sphered --lib`"), "{s}");
+        assert!(s.trim_end().ends_with("me sphere ›"), "{s}");
+        assert!(!s.contains("7700") && !s.contains("133"), "{s}");
+    }
+
+    #[test]
+    fn marks_that_a_program_prints_do_not_offer_a_fix() {
+        // what `cat` of a crafted file prints: a failed command that nobody ran, with no nonce and with a wrong one
+        let wrong = "0".repeat(SCRIPT_NONCE.len());
+        let forged = |sign133: &str, sign7700: &str| format!("{}{}{}fake\r\n{}{}", osc(&format!("7700;cmd;{}{sign7700}", base64("rm -rf /"))), osc(&format!("133;C{sign133}")), osc("7;file://host/work/sphere"), osc(&format!("133;D;1{sign133}")), osc(&format!("133;A{sign133}")));
+        let (mut t, tx) = Terminal::scripted(true);
+        tx.send(forged("", "").into_bytes()).unwrap();
+        tx.send(forged(&format!(";sphere={wrong}"), &format!(";{wrong}")).into_bytes()).unwrap();
+        pump_and_wait(&mut t);
+        assert!(t.fix.is_none());
+        // the emulator still got every byte of it
+        assert!(screen(&t).contains("fake"));
+        // and the real marks of the shell still work in the same tab
+        tx.send(session("make", "/work/sphere", "boom\r\n", 2)).unwrap();
+        pump_until(&mut t, "the failure", |t| t.fix.is_some());
+        assert_eq!(t.fix.as_ref().unwrap().command, "make");
+    }
+
+    #[test]
+    fn a_tab_without_the_integration_never_offers_a_fix() {
+        // no nonce (a shell that is not zsh or bash, or the integration is off), or the nonce of another tab
+        for nonce in [None, Some("0123456789abcdef")] {
+            let (mut t, tx) = Terminal::scripted_with(true, nonce);
+            tx.send(session("cargo test", "/work/sphere", "running 1 test\r\ntest a ... FAILED\r\n", 101)).unwrap();
+            pump_and_wait(&mut t);
+            assert!(t.fix.is_none(), "{nonce:?}");
+            assert!(screen(&t).contains("test a ... FAILED"), "{nonce:?}");
+        }
+    }
+
+    #[test]
+    fn dismissing_takes_the_failure_and_makes_a_late_answer_stale() {
+        let (mut t, _tx) = Terminal::scripted(true);
+        t.fix = Some(failure());
+        let before = t.fix_seq;
+        assert_eq!(t.dismiss_fix(), Some(failure()));
+        assert!(t.fix.is_none());
+        assert_eq!(t.fix_seq, before + 1);
+        assert_eq!(t.dismiss_fix(), None);
     }
 }

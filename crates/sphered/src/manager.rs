@@ -10,12 +10,15 @@ use crate::config::Config;
 use crate::host_link::HostLink;
 use crate::hub::Hub;
 use crate::policy::{self, Ctx, Policy, Verdict};
-use crate::store::OffsetUpdate;
-use crate::{outside, sessions, workspace};
+use crate::protocols::{Clock, ProtocolRun, SystemClock};
+use crate::store::{NoteAdd, OffsetUpdate};
+use crate::{briefing, outside, sessions, workspace};
 use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
 use sphere_host::{ExitStatus, FollowItem, SpawnParams, Stream};
 use sphere_proto::api::{self, kind, RpcError};
+use sphere_proto::memory::NOTES_MAX;
+use sphere_proto::protocol::{LocalZone, Zone};
 use sphere_proto::version;
 use sphere_proto::{
     now_rfc3339, AnswerKind, EventBody, Excerpt, OutputRef, RequestInfo, RequestKind,
@@ -43,11 +46,11 @@ impl From<anyhow::Error> for ApiError {
     }
 }
 
-fn api_err(kind: &str, message: impl Into<String>) -> ApiError {
+pub(crate) fn api_err(kind: &str, message: impl Into<String>) -> ApiError {
     ApiError(RpcError::app(kind, message))
 }
 
-type ApiResult<T> = Result<T, ApiError>;
+pub(crate) type ApiResult<T> = Result<T, ApiError>;
 
 const MODES: &[&str] = &["default", "acceptEdits", "plan", "dontAsk"];
 
@@ -97,6 +100,13 @@ pub struct Manager {
     ctl_seq: AtomicU64,
     info: Mutex<Info>,
     outside: tokio::sync::Mutex<Outside>,
+    /// What protocols read the time from: the system's clock and zone, or a test's.
+    pub(crate) clock: Arc<dyn Clock>,
+    pub(crate) zone: Arc<dyn Zone + Send + Sync>,
+    /// Held while a protocol is changed or started, so a tick and an API call never act on the same state.
+    pub(crate) protocol_lock: tokio::sync::Mutex<()>,
+    /// The loop that starts protocols as they come due.
+    pub(crate) scheduler: Mutex<Option<AbortHandle>>,
 }
 
 /// Sessions running outside Sphere: the last scan and when it ran, and what
@@ -379,6 +389,16 @@ async fn wait_exit(rx: &mut watch::Receiver<bool>, dur: Duration) -> bool {
 
 impl Manager {
     pub fn new(cfg: Arc<Config>, hub: Arc<Hub>) -> Arc<Manager> {
+        Self::with_time(cfg, hub, Arc::new(SystemClock), Arc::new(LocalZone))
+    }
+
+    /// A manager that reads the time for protocols from `clock` and `zone`.
+    pub fn with_time(
+        cfg: Arc<Config>,
+        hub: Arc<Hub>,
+        clock: Arc<dyn Clock>,
+        zone: Arc<dyn Zone + Send + Sync>,
+    ) -> Arc<Manager> {
         Arc::new(Manager {
             host: HostLink::new(cfg.clone()),
             cfg,
@@ -389,6 +409,10 @@ impl Manager {
             ctl_seq: AtomicU64::new(0),
             info: Mutex::new(Info::default()),
             outside: tokio::sync::Mutex::new(Outside::default()),
+            clock,
+            zone,
+            protocol_lock: tokio::sync::Mutex::new(()),
+            scheduler: Mutex::new(None),
         })
     }
 
@@ -491,6 +515,9 @@ impl Manager {
             }
         }
         if let Some(h) = &rt.cap_wait {
+            h.abort();
+        }
+        if let Some(h) = self.scheduler.lock().unwrap().take() {
             h.abort();
         }
     }
@@ -644,12 +671,19 @@ impl Manager {
             (None, Some(_)) if !first => Some("continue".to_string()),
             (None, _) => Some(view.prompt.clone()).filter(|p| !p.trim().is_empty()),
         };
+        // The user's notes for this repo go into the agent's system prompt, on a resume as on a first start.
+        let notes = self.hub.notes().unwrap_or_else(|e| {
+            tracing::warn!(%task, "could not read the notes, starting without them: {e:#}");
+            vec![]
+        });
+        let briefing = briefing::briefing(&notes, &view.repo);
         let gen = proto::build_args(&proto::AgentArgs {
             settings: &settings_path.to_string_lossy(),
             budget_usd: view.budget_usd,
             mode: view.mode.as_deref().unwrap_or("acceptEdits"),
             model: view.model.as_deref(),
             resume: resume.as_deref(),
+            briefing: briefing.as_ref().map(|b| b.text.as_str()),
         });
         let mut args = self.cfg.agent_args.clone();
         args.extend(gen);
@@ -693,6 +727,7 @@ impl Manager {
                 child: spawned.id.clone(),
                 pid: spawned.pid,
                 resumed: resume.is_some(),
+                briefed: briefing.map_or(0, |b| b.notes),
             }],
             Some(OffsetUpdate {
                 child: spawned.id.clone(),
@@ -1219,6 +1254,19 @@ impl Manager {
         resume_session: Option<String>,
         extra: Vec<EventBody>,
     ) -> ApiResult<api::StartResult> {
+        self.start_task_for(p, resume_session, extra, None).await
+    }
+
+    /// Starts a task like `task.start`. `protocol` is the protocol that starts it on its schedule: the task carries
+    /// its id, and the protocol is saved in the same step as the task is created (so a crash between the two can
+    /// neither lose the run nor repeat it).
+    pub(crate) async fn start_task_for(
+        self: &Arc<Self>,
+        p: api::StartParams,
+        resume_session: Option<String>,
+        extra: Vec<EventBody>,
+        protocol: Option<ProtocolRun>,
+    ) -> ApiResult<api::StartResult> {
         if p.prompt.trim().is_empty() && resume_session.is_none() {
             return Err(ApiError(RpcError {
                 code: api::code::INVALID_PARAMS,
@@ -1270,9 +1318,19 @@ impl Manager {
             model: p.model,
             allow_rewrites: p.allow_rewrites,
             resume_session,
+            protocol: protocol.as_ref().map(|r| r.save.id.clone()),
         }];
         bodies.extend(extra);
-        self.hub.commit(&id, bodies, None).map_err(ApiError::from)?;
+        let committed = match protocol {
+            None => self.hub.commit(&id, bodies, None).map(drop),
+            Some(run) => {
+                let mut items: Vec<(String, EventBody)> =
+                    bodies.into_iter().map(|b| (id.clone(), b)).collect();
+                items.push((String::new(), run.saved_after_starting(&id)));
+                self.hub.commit_many(items).map(drop)
+            }
+        };
+        committed.map_err(ApiError::from)?;
         self.pump();
         Ok(api::StartResult { task: id })
     }
@@ -1615,7 +1673,7 @@ impl Manager {
 
     pub fn snapshot(&self) -> api::Snapshot {
         let day = today();
-        self.hub.view(|v| api::Snapshot {
+        self.hub.view_with_notes(|v, memory| api::Snapshot {
             seq: v.seq,
             tasks: v.tasks().into_iter().cloned().collect(),
             requests: v.open_requests().into_iter().cloned().collect(),
@@ -1623,7 +1681,87 @@ impl Manager {
             daily_cap_usd: self.cfg.daily_cap_usd,
             max_concurrent: Some(self.cfg.max_concurrent),
             waited_today_secs: v.waited_on(&day),
+            memory,
+            protocols: v.protocols().into_iter().cloned().collect(),
         })
+    }
+
+    // ---- the user's notes ----------------------------------------------------------
+
+    /// The key a repo's notes are kept under: the root of its checkout, as a task's `repo` is.
+    async fn note_scope(repo: &str) -> Result<String> {
+        let repo = PathBuf::from(repo);
+        let top = tokio::task::spawn_blocking(move || workspace::repo_toplevel(&repo)).await??;
+        Ok(top.to_string_lossy().to_string())
+    }
+
+    pub async fn memory_list(&self, p: api::MemoryListParams) -> ApiResult<api::MemoryList> {
+        let mut notes = self.hub.notes().map_err(ApiError::from)?;
+        if let Some(repo) = p.repo {
+            // a folder inside the repo will do; one that is gone is taken as it is
+            let scope = Self::note_scope(&repo).await.unwrap_or(repo);
+            notes.retain(|n| n.applies_to(&scope));
+        }
+        Ok(api::MemoryList { notes })
+    }
+
+    pub async fn memory_add(&self, p: api::MemoryAddParams) -> ApiResult<api::MemoryAdded> {
+        let invalid = |message: &str| {
+            ApiError(RpcError {
+                code: api::code::INVALID_PARAMS,
+                message: message.into(),
+                data: None,
+            })
+        };
+        let repo = match (p.repo.as_deref(), p.all) {
+            (Some(_), true) => {
+                return Err(invalid(
+                    "a note is for one repo or for all of them, not both",
+                ))
+            }
+            (None, false) => {
+                return Err(invalid(
+                    "say which repo the note is for, or that it is for all",
+                ))
+            }
+            (Some(repo), false) => Some(
+                Self::note_scope(repo)
+                    .await
+                    .map_err(|e| api_err(kind::BAD_REPO, format!("{e:#}")))?,
+            ),
+            (None, true) => None,
+        };
+        let (note, added) = match self
+            .hub
+            .add_note(repo.as_deref(), &p.text, p.source)
+            .map_err(ApiError::from)?
+        {
+            NoteAdd::Added(note) => (note, true),
+            NoteAdd::Already(note) => (note, false),
+            NoteAdd::Empty => return Err(invalid("the note is empty")),
+            NoteAdd::Full => {
+                return Err(api_err(
+                    kind::MEMORY_FULL,
+                    format!("there are {NOTES_MAX} notes already; remove some first"),
+                ))
+            }
+        };
+        let count = self
+            .hub
+            .notes()
+            .map_err(ApiError::from)?
+            .iter()
+            .filter(|n| n.repo == note.repo)
+            .count();
+        Ok(api::MemoryAdded { note, added, count })
+    }
+
+    pub fn memory_remove(&self, id: u64) -> ApiResult<()> {
+        if self.hub.remove_note(id).map_err(ApiError::from)? {
+            Ok(())
+        } else {
+            Err(api_err(kind::NOT_FOUND, format!("no such note: {id}")))
+        }
     }
 
     pub async fn status(&self) -> api::Status {
@@ -2016,6 +2154,7 @@ mod tests {
                 model: None,
                 allow_rewrites: false,
                 resume_session: None,
+                protocol: None,
             },
         });
         v.task("t1").unwrap().clone()
@@ -2469,6 +2608,7 @@ mod tests {
                     model: None,
                     allow_rewrites: false,
                     resume_session: None,
+                    protocol: None,
                 },
             )
             .unwrap();

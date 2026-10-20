@@ -6,7 +6,7 @@ use serde::Serialize;
 use serde_json::Value;
 use sphere_proto::api::Snapshot;
 use sphere_proto::api::{self, kind, method, notify, RpcError, RpcMessage};
-use sphere_proto::Event;
+use sphere_proto::{Event, Note, NoteSource};
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -20,6 +20,7 @@ pub use sphere_proto::api::{
     AnswerParams, BringInParams, ClientKind, HistoryParams, LiveFrame, SessionInfo, StartParams,
     Status,
 };
+pub use sphere_proto::Protocol;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -314,6 +315,102 @@ impl Client {
     pub async fn bring_in(&self, p: BringInParams) -> Result<String> {
         Ok(self
             .call::<api::StartResult>(method::SESSION_BRING_IN, p)
+            .await?
+            .task)
+    }
+
+    // ---- notes ---------------------------------------------------------------------
+
+    /// The user's notes, newest first. With `repo`, only the ones an agent working there is told.
+    pub async fn memory_list(&self, repo: Option<&str>) -> Result<Vec<Note>> {
+        let list: api::MemoryList = self
+            .call(
+                method::MEMORY_LIST,
+                api::MemoryListParams {
+                    repo: repo.map(str::to_string),
+                },
+            )
+            .await?;
+        Ok(list.notes)
+    }
+
+    /// Keep a note for `repo` (a folder inside it will do), or for every repo with `None`.
+    pub async fn memory_add(
+        &self,
+        repo: Option<&str>,
+        text: &str,
+        source: NoteSource,
+    ) -> Result<api::MemoryAdded> {
+        self.call(
+            method::MEMORY_ADD,
+            api::MemoryAddParams {
+                repo: repo.map(str::to_string),
+                all: repo.is_none(),
+                text: text.into(),
+                source,
+            },
+        )
+        .await
+    }
+
+    pub async fn memory_remove(&self, id: u64) -> Result<()> {
+        let _: api::Ack = self
+            .call(method::MEMORY_REMOVE, api::MemoryRemoveParams { id })
+            .await?;
+        Ok(())
+    }
+
+    // ---- protocols -----------------------------------------------------------------
+
+    /// Write a protocol from a line such as `every weekday 9:00 sphere: update the dependencies`.
+    /// `repo` is the folder for a line that names none. Returns the protocol with its next run.
+    pub async fn protocol_add(&self, text: &str, repo: Option<&str>) -> Result<Protocol> {
+        self.call(
+            method::PROTOCOL_ADD,
+            api::ProtocolAddParams {
+                text: text.into(),
+                repo: repo.map(Into::into),
+            },
+        )
+        .await
+    }
+
+    /// The saved protocols, oldest first.
+    pub async fn protocol_list(&self) -> Result<Vec<Protocol>> {
+        Ok(self
+            .call::<api::ProtocolList>(method::PROTOCOL_LIST, serde_json::json!({}))
+            .await?
+            .protocols)
+    }
+
+    pub async fn protocol_set_enabled(&self, id: &str, enabled: bool) -> Result<Protocol> {
+        self.call(
+            method::PROTOCOL_SET_ENABLED,
+            api::ProtocolEnabledParams {
+                id: id.into(),
+                enabled,
+            },
+        )
+        .await
+    }
+
+    pub async fn protocol_remove(&self, id: &str) -> Result<()> {
+        let _: api::Ack = self
+            .call(
+                method::PROTOCOL_REMOVE,
+                api::ProtocolParams { id: id.into() },
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// Run it now, besides its schedule. Returns the task.
+    pub async fn protocol_run_now(&self, id: &str) -> Result<String> {
+        Ok(self
+            .call::<api::StartResult>(
+                method::PROTOCOL_RUN_NOW,
+                api::ProtocolParams { id: id.into() },
+            )
             .await?
             .task)
     }

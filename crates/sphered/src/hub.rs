@@ -2,10 +2,10 @@
 //! Durable events are stored before anyone hears of them; live frames are only
 //! broadcast, and may be dropped under load.
 
-use crate::store::{OffsetUpdate, Store};
+use crate::store::{NoteAdd, OffsetUpdate, Store};
 use anyhow::Result;
 use sphere_proto::api::LiveFrame;
-use sphere_proto::{Event, EventBody, Views};
+use sphere_proto::{Event, EventBody, Note, NoteSource, Views};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -34,6 +34,7 @@ pub struct Hub {
     inner: Mutex<Inner>,
     next_task: AtomicU64,
     next_request: AtomicU64,
+    next_protocol: AtomicU64,
     queue_cap: usize,
 }
 
@@ -69,6 +70,7 @@ impl Hub {
         Ok(Hub {
             next_task: AtomicU64::new(views.max_task()),
             next_request: AtomicU64::new(views.max_request()),
+            next_protocol: AtomicU64::new(views.max_protocol()),
             inner: Mutex::new(Inner {
                 store,
                 views,
@@ -84,6 +86,10 @@ impl Hub {
 
     pub fn new_request_id(&self) -> String {
         format!("r{}", self.next_request.fetch_add(1, Ordering::SeqCst) + 1)
+    }
+
+    pub fn new_protocol_id(&self) -> String {
+        format!("p{}", self.next_protocol.fetch_add(1, Ordering::SeqCst) + 1)
     }
 
     /// Read the views under the lock.
@@ -108,13 +114,39 @@ impl Hub {
         offset: Option<OffsetUpdate>,
     ) -> Result<Vec<Event>> {
         let mut g = self.inner.lock().unwrap();
+        Self::commit_in(&mut g, task, bodies, offset)
+    }
+
+    fn commit_in(
+        g: &mut Inner,
+        task: &str,
+        bodies: Vec<EventBody>,
+        offset: Option<OffsetUpdate>,
+    ) -> Result<Vec<Event>> {
         let events = g.store.append(task, &bodies, offset.as_ref())?;
-        let Inner { views, subs, .. } = &mut *g;
-        for ev in &events {
+        Self::deliver(g, &events);
+        Ok(events)
+    }
+
+    /// Like [`Hub::commit`] for events that belong to different tasks (the task
+    /// is empty for one that belongs to none): all of them are stored, or none.
+    pub fn commit_many(&self, items: Vec<(String, EventBody)>) -> Result<Vec<Event>> {
+        let mut g = self.inner.lock().unwrap();
+        let events = g
+            .store
+            .append_to(items.iter().map(|(t, b)| (t.as_str(), b)), None)?;
+        Self::deliver(&mut g, &events);
+        Ok(events)
+    }
+
+    /// Fold stored events into the views and hand them to the subscribers.
+    fn deliver(g: &mut Inner, events: &[Event]) {
+        let Inner { views, subs, .. } = g;
+        for ev in events {
             views.apply(ev);
         }
         subs.retain(|s| {
-            for ev in &events {
+            for ev in events {
                 if s.task.as_deref().is_some_and(|t| t != ev.task) {
                     continue;
                 }
@@ -129,11 +161,55 @@ impl Hub {
             }
             true
         });
-        Ok(events)
     }
 
     pub fn publish(&self, task: &str, body: EventBody) -> Result<Event> {
         Ok(self.commit(task, vec![body], None)?.remove(0))
+    }
+
+    // ---- the user's notes ----------------------------------------------------------
+
+    /// Keep a note (see [`Store::add_note`]). The subscribers hear of a new one with a `MemoryChanged` event.
+    pub fn add_note(&self, repo: Option<&str>, text: &str, source: NoteSource) -> Result<NoteAdd> {
+        let mut g = self.inner.lock().unwrap();
+        let added = g.store.add_note(repo, text, source)?;
+        if matches!(added, NoteAdd::Added(_)) {
+            Self::announce_notes(&mut g)?;
+        }
+        Ok(added)
+    }
+
+    /// Delete a note. False when there is none with that id.
+    pub fn remove_note(&self, id: u64) -> Result<bool> {
+        let mut g = self.inner.lock().unwrap();
+        let removed = g.store.remove_note(id)?;
+        if removed {
+            Self::announce_notes(&mut g)?;
+        }
+        Ok(removed)
+    }
+
+    /// Every note, newest first.
+    pub fn notes(&self) -> Result<Vec<Note>> {
+        self.inner.lock().unwrap().store.notes()
+    }
+
+    /// Read the views and the notes together, so a snapshot's `seq` and its notes are from the same moment: a
+    /// client that subscribes after `seq` hears of every later change.
+    pub fn view_with_notes<R>(&self, f: impl FnOnce(&Views, Vec<Note>) -> R) -> R {
+        let g = self.inner.lock().unwrap();
+        let notes = g.store.notes().unwrap_or_else(|e| {
+            tracing::warn!("could not read the notes: {e:#}");
+            vec![]
+        });
+        f(&g.views, notes)
+    }
+
+    /// Tell everyone the notes changed. The event holds no text, only how many notes there are.
+    fn announce_notes(g: &mut Inner) -> Result<()> {
+        let notes = g.store.note_count()? as u32;
+        Self::commit_in(g, "", vec![EventBody::MemoryChanged { notes }], None)?;
+        Ok(())
     }
 
     /// Broadcast a live frame to subscribers. Never stored; dropped when a
@@ -222,6 +298,23 @@ mod tests {
             model: None,
             allow_rewrites: false,
             resume_session: None,
+            protocol: None,
+        }
+    }
+
+    fn saved(id: &str) -> EventBody {
+        EventBody::ProtocolSaved {
+            protocol: sphere_proto::Protocol {
+                id: id.into(),
+                text: "in 2 hours sphere: x".into(),
+                schedule: sphere_proto::protocol::Schedule::Once { at: 100 },
+                repo: "/r".into(),
+                prompt: "x".into(),
+                enabled: true,
+                created_at: 1,
+                last_run: None,
+                next_run: Some(100),
+            },
         }
     }
 
@@ -317,6 +410,60 @@ mod tests {
     }
 
     #[test]
+    fn a_new_or_removed_note_is_announced_once_and_a_repeat_is_not() {
+        let h = hub(16);
+        let mut all = h.subscribe(None);
+        let mut one_task = h.subscribe(Some("t1".into()));
+        let changed = |sub: &mut Subscription| match sub.rx.try_recv() {
+            Ok(Msg::Event(e)) => {
+                assert_eq!(e.task, "", "a note belongs to no task");
+                Some(e.body)
+            }
+            Ok(other) => panic!("{other:?}"),
+            Err(_) => None,
+        };
+        let NoteAdd::Added(note) = h
+            .add_note(Some("/r"), "use pnpm", NoteSource::Typed)
+            .unwrap()
+        else {
+            panic!("not added")
+        };
+        assert_eq!(
+            changed(&mut all),
+            Some(EventBody::MemoryChanged { notes: 1 })
+        );
+        let again = h
+            .add_note(Some("/r"), "use pnpm", NoteSource::Change)
+            .unwrap();
+        assert!(matches!(again, NoteAdd::Already(_)));
+        assert_eq!(changed(&mut all), None, "nothing changed, nothing to tell");
+        assert!(h.remove_note(note.id).unwrap());
+        assert_eq!(
+            changed(&mut all),
+            Some(EventBody::MemoryChanged { notes: 0 })
+        );
+        assert!(!h.remove_note(note.id).unwrap());
+        assert_eq!(changed(&mut all), None);
+        assert_eq!(changed(&mut one_task), None, "a task's watcher is not told");
+        // the changes are durable: a client that was away replays them
+        assert_eq!(h.replay_page(0, 10, None, 10).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn a_snapshot_reads_its_seq_and_its_notes_together() {
+        let h = hub(16);
+        h.publish("t1", created()).unwrap();
+        h.add_note(None, "for everyone", NoteSource::Cli).unwrap();
+        let (seq, notes) = h.view_with_notes(|v, notes| (v.seq, notes));
+        assert_eq!(seq, 2, "the task, then the note's announcement");
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].text, "for everyone");
+        // after the seq it names, everything else is a later event
+        h.remove_note(notes[0].id).unwrap();
+        assert_eq!(h.replay_page(seq, 10, None, 10).unwrap().len(), 1);
+    }
+
+    #[test]
     fn task_filtered_subscribers_only_hear_their_task() {
         let h = hub(16);
         let mut sub = h.subscribe(Some("t2".into()));
@@ -331,5 +478,54 @@ mod tests {
         assert_eq!(got.len(), 2);
         assert!(matches!(&got[0], Msg::Event(e) if e.task == "t2"));
         assert!(matches!(&got[1], Msg::Live(f) if f.task == "t2"));
+    }
+
+    #[test]
+    fn events_of_several_tasks_commit_together_and_reach_the_right_subscribers() {
+        let h = hub(16);
+        let (mut all, mut t1, mut t9) = (
+            h.subscribe(None),
+            h.subscribe(Some("t1".into())),
+            h.subscribe(Some("t9".into())),
+        );
+        let evs = h
+            .commit_many(vec![("t1".into(), created()), (String::new(), saved("p1"))])
+            .unwrap();
+        assert_eq!(
+            evs.iter()
+                .map(|e| (e.seq, e.task.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(1, "t1"), (2, "")]
+        );
+        assert!(h.view(|v| v.task("t1").is_some() && v.protocol("p1").is_some()));
+        assert_eq!(h.history(None, None, 10).unwrap().len(), 2);
+        let seqs = |sub: &mut Subscription| {
+            let mut got = vec![];
+            while let Ok(Msg::Event(e)) = sub.rx.try_recv() {
+                got.push(e.seq);
+            }
+            got
+        };
+        assert_eq!(seqs(&mut all), [1, 2]);
+        assert_eq!(seqs(&mut t1), [1]);
+        assert!(seqs(&mut t9).is_empty());
+    }
+
+    #[test]
+    fn protocol_ids_continue_after_a_restart_and_are_not_reused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.db");
+        {
+            let h = Hub::open(&path, 16).unwrap();
+            assert_eq!(h.new_protocol_id(), "p1");
+            assert_eq!(h.new_protocol_id(), "p2");
+            h.publish("", saved("p1")).unwrap();
+            h.publish("", saved("p2")).unwrap();
+            h.publish("", EventBody::ProtocolRemoved { id: "p2".into() })
+                .unwrap();
+        }
+        let h = Hub::open(&path, 16).unwrap();
+        assert_eq!(h.view(|v| v.protocols().len()), 1);
+        assert_eq!(h.new_protocol_id(), "p3");
     }
 }

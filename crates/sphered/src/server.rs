@@ -207,9 +207,42 @@ async fn dispatch(
             method::SESSION_BRING_IN => Ok(ok(mgr.bring_in(parse(params)?).await?)?),
             method::REQUEST_ANSWER => {
                 let p: api::AnswerParams = parse(params)?;
-                authorize_answer(mgr, conn).await?;
+                authorize_user(mgr, conn, "answer requests").await?;
                 mgr.answer(p).await?;
                 Ok(ok(api::Ack { ok: true })?)
+            }
+            method::MEMORY_LIST => Ok(ok(mgr.memory_list(parse(params)?).await?)?),
+            method::MEMORY_ADD => {
+                let p: api::MemoryAddParams = parse(params)?;
+                authorize_user(mgr, conn, "change your notes").await?;
+                Ok(ok(mgr.memory_add(p).await?)?)
+            }
+            method::MEMORY_REMOVE => {
+                let p: api::MemoryRemoveParams = parse(params)?;
+                authorize_user(mgr, conn, "change your notes").await?;
+                mgr.memory_remove(p.id)?;
+                Ok(ok(api::Ack { ok: true })?)
+            }
+            method::PROTOCOL_ADD => {
+                let p: api::ProtocolAddParams = parse(params)?;
+                authorize_user(mgr, conn, "change your protocols").await?;
+                Ok(ok(mgr.protocol_add(p).await?)?)
+            }
+            method::PROTOCOL_LIST => Ok(ok(mgr.protocol_list())?),
+            method::PROTOCOL_SET_ENABLED => {
+                let p: api::ProtocolEnabledParams = parse(params)?;
+                authorize_user(mgr, conn, "change your protocols").await?;
+                Ok(ok(mgr.protocol_set_enabled(&p.id, p.enabled).await?)?)
+            }
+            method::PROTOCOL_REMOVE => {
+                let p: api::ProtocolParams = parse(params)?;
+                authorize_user(mgr, conn, "change your protocols").await?;
+                mgr.protocol_remove(&p.id).await?;
+                Ok(ok(api::Ack { ok: true })?)
+            }
+            method::PROTOCOL_RUN_NOW => {
+                let p: api::ProtocolParams = parse(params)?;
+                Ok(ok(mgr.protocol_run_now(&p.id).await?)?)
             }
             other => Err(ApiError(RpcError {
                 code: code::METHOD_NOT_FOUND,
@@ -228,24 +261,25 @@ impl From<RpcError> for ApiError {
     }
 }
 
-/// Only you answer: not the assistant, and not anything an agent started.
-async fn authorize_answer(mgr: &Arc<Manager>, conn: &Conn) -> Result<(), ApiError> {
-    let forbidden = |why: &str| ApiError(RpcError::app(kind::FORBIDDEN, why));
+/// Only you decide what `what` names (answer requests, change your notes or your protocols): not the assistant, and
+/// not anything an agent started. A note or a schedule an agent wrote would outlive its task.
+async fn authorize_user(mgr: &Arc<Manager>, conn: &Conn, what: &str) -> Result<(), ApiError> {
+    let forbidden = |why: String| ApiError(RpcError::app(kind::FORBIDDEN, why));
     if conn.kind == ClientKind::Assistant {
-        return Err(forbidden(
-            "the assistant cannot answer requests; only you can",
-        ));
+        return Err(forbidden(format!(
+            "the assistant cannot {what}; only you can"
+        )));
     }
     match conn.pid {
         Some(pid) => {
             let roots = mgr.agent_roots().await;
             if peer::descends_from(pid, &roots) {
-                return Err(forbidden(
-                    "requests cannot be answered from a process an agent started",
-                ));
+                return Err(forbidden(format!(
+                    "a process an agent started cannot {what}"
+                )));
             }
         }
-        None => tracing::warn!("could not identify the caller's process; allowing the answer"),
+        None => tracing::warn!("could not identify the caller's process; allowing it to {what}"),
     }
     Ok(())
 }
