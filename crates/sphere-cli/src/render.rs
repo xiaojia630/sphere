@@ -3,6 +3,7 @@
 
 use serde_json::Value;
 use sphere_proto::api::Snapshot;
+use sphere_proto::protocol::{span_words, when_words, Protocol, Zone};
 use sphere_proto::{
     AnswerKind, Event, EventBody, RequestInfo, RequestKind, RequestStatus, TaskView,
 };
@@ -195,10 +196,17 @@ pub fn event_lines(e: &Event, st: &Style) -> Vec<String> {
     let one = |s: String| vec![format!("{tag} {s}")];
     match &e.body {
         EventBody::TaskCreated {
-            title, budget_usd, ..
+            title,
+            budget_usd,
+            protocol,
+            ..
         } => one(format!(
-            "task created: {title} (budget {})",
-            money(*budget_usd)
+            "task created: {title} (budget {}{})",
+            money(*budget_usd),
+            protocol
+                .as_ref()
+                .map(|p| format!(", started by protocol {p}"))
+                .unwrap_or_default()
         )),
         EventBody::WorkspaceReady {
             workdir, branch, ..
@@ -351,7 +359,81 @@ pub fn event_lines(e: &Event, st: &Style) -> Vec<String> {
         }
         EventBody::Warning { message } => one(format!("warning: {message}")),
         EventBody::TakenOver { from } => one(format!("taken over from {from}")),
+        EventBody::ProtocolSaved { protocol: p } => {
+            let last = p.last_run.as_ref();
+            let left_out = last.and_then(|l| l.skipped.as_ref().or(l.error.as_ref()));
+            one(format!(
+                "protocol {} {}: {}{}",
+                p.id,
+                if p.enabled { "on" } else { "off" },
+                clip(&p.text, 100),
+                left_out
+                    .map(|why| format!(" (a run was left out: {why})"))
+                    .unwrap_or_default()
+            ))
+        }
+        EventBody::ProtocolRemoved { id } => one(format!("protocol {id} removed")),
     }
+}
+
+/// What `sphere protocol add` says once the line is saved.
+pub fn protocol_saved(p: &Protocol, now: i64, zone: &dyn Zone) -> String {
+    let next = match p.next_run {
+        Some(t) if !p.schedule.is_one_shot() => format!(" · next {}", when_words(t, now, zone)),
+        _ => String::new(),
+    };
+    format!(
+        "saved {}: {}{next} · {}",
+        p.id,
+        p.schedule.describe(now, zone),
+        p.repo_name()
+    )
+}
+
+/// `sphere protocol list`: each protocol with when it runs, when it runs next and how its last run went.
+pub fn protocol_table(snap: &Snapshot, now: i64, zone: &dyn Zone) -> Vec<String> {
+    if snap.protocols.is_empty() {
+        return vec![
+            "no protocols; write one with: sphere protocol add \"every weekday 9:00 sphere: update the dependencies\""
+                .into(),
+        ];
+    }
+    let mut out = vec![format!(
+        "{:<4} {:<4} {:<26} {:<22} {}",
+        "ID", "ON", "SCHEDULE", "NEXT", "REPO"
+    )];
+    let state_of = |id: &str| snap.tasks.iter().find(|t| t.id == id).map(|t| t.state);
+    for p in &snap.protocols {
+        let next = match p.next_run {
+            Some(t) => format!("in {} · {}", span_words(t - now), when_words(t, now, zone)),
+            None => "-".to_string(),
+        };
+        out.push(format!(
+            "{:<4} {:<4} {:<26} {:<22} {}",
+            p.id,
+            if p.enabled { "on" } else { "off" },
+            p.schedule.describe(now, zone),
+            next,
+            p.repo_name()
+        ));
+        out.push(format!("     {}", clip(&p.prompt.replace('\n', " "), 100)));
+        let ago = p
+            .last_run
+            .as_ref()
+            .map(|l| format!(" · {} ago", span_words(now - l.at)))
+            .unwrap_or_default();
+        let task = p
+            .last_run
+            .as_ref()
+            .and_then(|l| l.task.as_ref())
+            .map(|t| format!(" ({t})"))
+            .unwrap_or_default();
+        out.push(format!(
+            "     last: {}{task}{ago}",
+            p.outcome(state_of).words()
+        ));
+    }
+    out
 }
 
 /// `sphere ls`.
@@ -393,7 +475,7 @@ pub fn ls_table(snap: &Snapshot) -> Vec<String> {
 
 fn task_row(t: &TaskView) -> String {
     format!(
-        "{:<5} {:<10} {:>7}  {:<28} {}",
+        "{:<5} {:<10} {:>7}  {:<28} {}{}",
         t.id,
         t.state.as_str(),
         est(t.cost_usd),
@@ -403,7 +485,11 @@ fn task_row(t: &TaskView) -> String {
                 .unwrap_or(if t.in_place { "(in place)" } else { "-" }),
             28
         ),
-        clip(&t.title, 60)
+        clip(&t.title, 60),
+        t.protocol
+            .as_ref()
+            .map(|p| format!("  (protocol {p})"))
+            .unwrap_or_default()
     )
 }
 
@@ -603,6 +689,199 @@ mod tests {
             &st,
         );
         assert_eq!(warn, vec!["[-] warning: careful"]);
+    }
+
+    fn protocol(id: &str, text: &str, next_run: Option<i64>) -> Protocol {
+        use sphere_proto::protocol::{Schedule, Weekday};
+        Protocol {
+            id: id.into(),
+            text: text.into(),
+            schedule: Schedule::Weekly {
+                days: Weekday::WEEKDAYS.to_vec(),
+                hour: 9,
+                minute: 0,
+            },
+            repo: "/home/me/Projects/sphere".into(),
+            prompt: "update the dependencies,\nrun the tests and fix what breaks".into(),
+            enabled: next_run.is_some(),
+            created_at: 0,
+            last_run: None,
+            next_run,
+        }
+    }
+
+    fn snapshot(protocols: Vec<Protocol>, tasks: Vec<TaskView>) -> Snapshot {
+        Snapshot {
+            seq: 1,
+            tasks,
+            requests: vec![],
+            cost_today_usd: 0.0,
+            daily_cap_usd: None,
+            max_concurrent: None,
+            waited_today_secs: 0,
+            protocols,
+        }
+    }
+
+    fn task(id: &str, state: sphere_proto::TaskState, protocol: Option<&str>) -> TaskView {
+        let mut v = sphere_proto::Views::default();
+        v.apply(&Event {
+            seq: 1,
+            task: id.into(),
+            at: "2026-03-04T05:06:07.000Z".into(),
+            body: EventBody::TaskCreated {
+                title: "Update the dependencies".into(),
+                prompt: "p".into(),
+                repo: "/r".into(),
+                in_place: false,
+                budget_usd: 1.0,
+                mode: None,
+                model: None,
+                allow_rewrites: false,
+                resume_session: None,
+                protocol: protocol.map(str::to_string),
+            },
+        });
+        let mut t = v.task(id).unwrap().clone();
+        t.state = state;
+        t
+    }
+
+    /// 2026-03-04 12:00 UTC, a Wednesday.
+    const NOW: i64 = 1_772_625_600;
+
+    #[test]
+    fn the_protocol_table_says_when_each_runs_and_how_the_last_went() {
+        use sphere_proto::protocol::{FixedZone, LastRun};
+        use sphere_proto::TaskState;
+        let mut ran = protocol("p1", "every weekday 9:00 sphere: x", Some(NOW + 3 * 3600));
+        ran.last_run = Some(LastRun {
+            at: NOW - 2 * 3600,
+            task: Some("t4".into()),
+            skipped: None,
+            error: None,
+        });
+        let mut left_out = protocol("p2", "every weekday 9:00 sphere: x", None);
+        left_out.last_run = Some(LastRun {
+            at: NOW - 600,
+            task: None,
+            skipped: Some("still running".into()),
+            error: None,
+        });
+        let fresh = protocol("p3", "every weekday 9:00 sphere: x", Some(NOW + 30 * 3600));
+        let snap = snapshot(
+            vec![ran, left_out, fresh],
+            vec![task("t4", TaskState::NeedsYou, Some("p1"))],
+        );
+        let lines = protocol_table(&snap, NOW, &FixedZone(0));
+        assert_eq!(
+            lines,
+            vec![
+                "ID   ON   SCHEDULE                   NEXT                   REPO",
+                "p1   on   every weekday 09:00        in 3 h · 15:00         sphere",
+                "     update the dependencies, run the tests and fix what breaks",
+                "     last: needs you (t4) · 2 h ago",
+                "p2   off  every weekday 09:00        -                      sphere",
+                "     update the dependencies, run the tests and fix what breaks",
+                "     last: skipped: still running · 10 min ago",
+                "p3   on   every weekday 09:00        in 1 d · Thu 18:00     sphere",
+                "     update the dependencies, run the tests and fix what breaks",
+                "     last: not run yet",
+            ]
+        );
+        let none = protocol_table(&snapshot(vec![], vec![]), NOW, &FixedZone(0));
+        assert_eq!(none.len(), 1);
+        assert!(none[0].starts_with("no protocols; write one with: sphere protocol add"));
+    }
+
+    #[test]
+    fn saving_a_protocol_says_what_it_is_and_when_it_runs_next() {
+        use sphere_proto::protocol::{FixedZone, Schedule};
+        let p = protocol("p7", "every weekday 9:00 sphere: x", Some(NOW + 21 * 3600));
+        assert_eq!(
+            protocol_saved(&p, NOW, &FixedZone(0)),
+            "saved p7: every weekday 09:00 · next Thu 09:00 · sphere"
+        );
+        let mut once = p;
+        once.schedule = Schedule::Once { at: NOW + 3600 };
+        once.next_run = Some(NOW + 3600);
+        assert_eq!(
+            protocol_saved(&once, NOW, &FixedZone(0)),
+            "saved p7: once · 13:00 · sphere"
+        );
+    }
+
+    #[test]
+    fn protocol_events_and_their_tasks_are_marked() {
+        let st = plain();
+        let mut p = protocol("p1", "every weekday 9:00 sphere: x", Some(5));
+        let saved = event_lines(
+            &ev(
+                "",
+                EventBody::ProtocolSaved {
+                    protocol: p.clone(),
+                },
+            ),
+            &st,
+        );
+        assert_eq!(
+            saved,
+            vec!["[-] protocol p1 on: every weekday 9:00 sphere: x"]
+        );
+        p.enabled = false;
+        p.last_run = Some(sphere_proto::protocol::LastRun {
+            at: 1,
+            task: None,
+            skipped: Some("daily cap".into()),
+            error: None,
+        });
+        let saved = event_lines(&ev("", EventBody::ProtocolSaved { protocol: p }), &st);
+        assert_eq!(
+            saved,
+            vec![
+                "[-] protocol p1 off: every weekday 9:00 sphere: x (a run was left out: daily cap)"
+            ]
+        );
+        let gone = event_lines(&ev("", EventBody::ProtocolRemoved { id: "p1".into() }), &st);
+        assert_eq!(gone, vec!["[-] protocol p1 removed"]);
+        let created = |protocol: Option<&str>| {
+            event_lines(
+                &ev(
+                    "t4",
+                    EventBody::TaskCreated {
+                        title: "Update".into(),
+                        prompt: "p".into(),
+                        repo: "/r".into(),
+                        in_place: false,
+                        budget_usd: 5.0,
+                        mode: None,
+                        model: None,
+                        allow_rewrites: false,
+                        resume_session: None,
+                        protocol: protocol.map(str::to_string),
+                    },
+                ),
+                &st,
+            )
+        };
+        assert_eq!(
+            created(None),
+            vec!["[t4] task created: Update (budget $5.00)"]
+        );
+        assert_eq!(
+            created(Some("p1")),
+            vec!["[t4] task created: Update (budget $5.00, started by protocol p1)"]
+        );
+        // `sphere ls` shows it beside the title.
+        let ls = ls_table(&snapshot(
+            vec![],
+            vec![task("t4", sphere_proto::TaskState::Done, Some("p1"))],
+        ));
+        assert!(
+            ls[1].ends_with("Update the dependencies  (protocol p1)"),
+            "{}",
+            ls[1]
+        );
     }
 
     #[test]

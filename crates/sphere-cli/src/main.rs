@@ -5,6 +5,7 @@ use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use render::Style;
 use sphere_client::{Client, ClientKind, StartParams, Update};
+use sphere_proto::protocol::LocalZone;
 use sphere_proto::{AnswerKind, EventBody};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -94,6 +95,11 @@ enum Command {
         #[arg(long)]
         prompt: Option<String>,
     },
+    /// Agents on your schedule: write a routine as one line and Sphere runs it as a task.
+    Protocol {
+        #[command(subcommand)]
+        command: ProtocolCommand,
+    },
     /// Check that everything Sphere needs is in place.
     Doctor {
         /// The agent command to check.
@@ -102,6 +108,32 @@ enum Command {
         #[arg(long)]
         state_dir: Option<PathBuf>,
     },
+}
+
+#[derive(Subcommand)]
+enum ProtocolCommand {
+    /// Write a protocol: "<schedule> [<repo>]: <what to do>", e.g. "every weekday 9:00 sphere: update the dependencies".
+    ///
+    /// Schedules: every day 9:00, daily 9:00, every weekday 9:00, every monday 9:00, every mon,wed,fri 18:30, every hour,
+    /// every 2 hours, every 30 minutes (at least 15), and once: at 18:00, tomorrow 9:00, tonight, in 2 hours, in 45 minutes.
+    Add {
+        /// The line, in quotes.
+        text: String,
+        /// The repo for a line that names none (default: the current folder).
+        #[arg(long)]
+        repo: Option<PathBuf>,
+    },
+    /// List the protocols, when they run next and how their last run went.
+    #[command(alias = "ls")]
+    List,
+    /// Delete a protocol. The tasks it started stay.
+    Rm { id: String },
+    /// Turn a protocol on.
+    On { id: String },
+    /// Turn a protocol off.
+    Off { id: String },
+    /// Run a protocol now, besides its schedule.
+    Run { id: String },
 }
 
 #[derive(Clone, Copy, clap::ValueEnum)]
@@ -185,6 +217,50 @@ async fn watch(
         }
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// The Unix time now.
+fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() as i64)
+}
+
+async fn protocol(client: &Client, command: ProtocolCommand) -> Result<()> {
+    let zone = LocalZone;
+    match command {
+        ProtocolCommand::Add { text, repo } => {
+            let repo = match repo {
+                Some(r) => r,
+                None => std::env::current_dir().context("cannot tell which folder this is")?,
+            };
+            let repo = repo.to_string_lossy().to_string();
+            let p = client.protocol_add(&text, Some(&repo)).await?;
+            println!("{}", render::protocol_saved(&p, unix_now(), &zone));
+        }
+        ProtocolCommand::List => {
+            let snap = client.snapshot().await?;
+            print_lines(render::protocol_table(&snap, unix_now(), &zone));
+        }
+        ProtocolCommand::Rm { id } => {
+            client.protocol_remove(&id).await?;
+            println!("removed {id}");
+        }
+        ProtocolCommand::On { id } => {
+            let p = client.protocol_set_enabled(&id, true).await?;
+            println!("{}", render::protocol_saved(&p, unix_now(), &zone));
+        }
+        ProtocolCommand::Off { id } => {
+            client.protocol_set_enabled(&id, false).await?;
+            println!("{id} is off");
+        }
+        ProtocolCommand::Run { id } => {
+            let task = client.protocol_run_now(&id).await?;
+            println!("started {task}");
+            println!("watch it with: sphere watch {task}");
+        }
+    }
+    Ok(())
 }
 
 fn find_sphered() -> PathBuf {
@@ -361,6 +437,7 @@ async fn run() -> Result<ExitCode> {
                 .await?;
             println!("started {id}");
         }
+        Command::Protocol { command } => protocol(&client, command).await?,
         Command::Daemon { .. } | Command::Doctor { .. } => unreachable!(),
     }
     Ok(ExitCode::SUCCESS)
