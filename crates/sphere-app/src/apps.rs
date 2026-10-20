@@ -32,6 +32,8 @@ pub struct Open {
     pub agents_click: Option<bevy::math::Vec2>,
     /// typed "protocols": `protocols::commands` opens the card of what runs on a schedule
     pub protocols: bool,
+    /// typed "play" (or `--game`): Hold the Swarm opens on the swarm (`game::control`)
+    pub game: bool,
     /// a click on the Terminal panel (panel px): FIX IT and DISMISS on a failed command's strip, anywhere else focuses
     /// the terminal (`fixit::apply` finds which)
     pub term_click: Option<bevy::math::Vec2>,

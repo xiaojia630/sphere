@@ -67,6 +67,8 @@ pub struct Agent {
     pub unseen: bool,
     /// a protocol started the task: its label carries a PROTOCOL tag
     pub protocol: bool,
+    /// an agent of Hold the Swarm (`game`): it costs nothing, and a stalled one reads Stalled
+    pub game: bool,
 }
 
 impl Agent {
@@ -278,7 +280,7 @@ pub fn from_shared(s: &Shared, prev: &Model, now: i64) -> Model {
             State::Queued => 2,
             State::Done => 3,
         };
-        let agent = Agent { id: t.id.clone(), title: t.title.clone(), repo: 0, branch: t.branch.clone().unwrap_or_default(), state, p, step, cost: t.cost_usd, started_at: started, steps, files, editing, queue_pos: None, step_seq, parent: t.parent_task.clone(), unseen: t.unseen, protocol: t.protocol.is_some() };
+        let agent = Agent { id: t.id.clone(), title: t.title.clone(), repo: 0, branch: t.branch.clone().unwrap_or_default(), state, p, step, cost: t.cost_usd, started_at: started, steps, files, editing, queue_pos: None, step_seq, parent: t.parent_task.clone(), unseen: t.unseen, protocol: t.protocol.is_some(), game: false };
         picks.push((rank, tie, agent, t.repo.clone()));
     }
     // helpers go behind every other agent, so they never push one out of the nine
@@ -579,6 +581,7 @@ fn demo_agent(d: &Def) -> Agent {
         parent: d.parent.map(str::to_string),
         unseen: d.unseen,
         protocol: false,
+        game: false,
     }
 }
 
@@ -724,6 +727,8 @@ pub fn chip(s: State) -> &'static str {
 pub fn chip_of(a: &Agent) -> &'static str {
     if a.state == State::Done && a.parent.is_some() {
         "Done"
+    } else if a.game && a.state == State::Queued {
+        "Stalled"
     } else {
         chip(a.state)
     }
@@ -741,7 +746,7 @@ pub fn pct(a: &Agent) -> String {
 /// "$0.12", queued "".
 /// An agent's cost as Claude Code reports it: an estimate at API prices (a subscription isn't billed it).
 pub fn cost(a: &Agent) -> String {
-    if a.state == State::Queued {
+    if a.state == State::Queued || a.game {
         String::new()
     } else {
         format!("≈ ${:.2}", a.cost)
@@ -1023,7 +1028,8 @@ fn unix_now() -> i64 {
 /// (and every second, for the 24 h window), or from `demo_at(sim.t)` offline. Pushes the changes as `Events`.
 fn sync(svc: Res<crate::service::Service>, args: Res<crate::Args>, sim: Res<crate::core::Sim>, time: Res<Time<Real>>, mut swarm: ResMut<crate::swarm::Swarm>, mut events: ResMut<Events>, mut st: Local<SyncState>) {
     let open = swarm.open || swarm.amt.x > 0.01;
-    if !open {
+    // the game writes the model while it plays; afterwards the real one is read fresh
+    if !open || swarm.game {
         st.was_open = false;
         return;
     }

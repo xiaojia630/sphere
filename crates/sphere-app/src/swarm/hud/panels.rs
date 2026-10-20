@@ -97,11 +97,13 @@ pub fn setup(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut image
 
 /// The panels follow how open the swarm is; Orbits and Run slots step aside and back while a focus or request is
 /// up (SPEC 3.2: x -/+ 120, back 200, opacity x .1), the focus panel slides in from the left (SPEC 4.3).
-pub fn place(swarm: Res<Swarm>, mut atlases: ResMut<AppAtlases>, mut q: Query<(&mut Panel, &HudPanel)>) {
+pub fn place(swarm: Res<Swarm>, mut atlases: ResMut<AppAtlases>, mut q: Query<(&mut Panel, &HudPanel)>, mut game_t: Local<f32>, time: Res<Time<Real>>) {
     let on = swarm.open || swarm.amt.x > 0.001;
-    atlases.want(ATLAS, on);
+    // the game has panels of its own in these places: these step out (and their texture goes once they have)
+    *game_t = if swarm.game { *game_t + time.delta_secs() } else { 0.0 };
+    atlases.want(ATLAS, on && *game_t < 1.0);
     atlases.want(ATLAS_FOCUS, on && (matches!(swarm.mode, Mode::Focus(_)) || swarm.focus_amt.x > 0.001));
-    let amt = swarm.amt.x.clamp(0.0, 1.0);
+    let amt = if swarm.game { 0.0 } else { swarm.amt.x.clamp(0.0, 1.0) };
     let dim = swarm.dim.x.clamp(0.0, 1.0);
     let foc = swarm.focus_amt.x.clamp(0.0, 1.0);
     for (mut p, h) in &mut q {
@@ -135,6 +137,7 @@ pub fn select(swarm: &mut Swarm, i: usize) {
 pub fn clicks(mut clicks: ResMut<AppClicks>, mut swarm: ResMut<Swarm>, mut keys: ResMut<HudKeys>) {
     for c in clicks.take(ATLAS).into_iter().chain(clicks.take(ATLAS_FOCUS)) {
         match c {
+            _ if swarm.game => {}
             Click::Pick(i) if swarm.open => select(&mut swarm, i),
             Click::Key(k) if swarm.open => keys.0.push(k),
             _ => {}
@@ -159,7 +162,7 @@ pub fn test_focus(sim: Res<crate::core::Sim>, mut swarm: ResMut<Swarm>, mut done
 /// Rebuilds the panels' UI when the model or mode changed; the focus panel also each second.
 #[allow(clippy::too_many_arguments)]
 pub fn draw(sim: Res<crate::core::Sim>, args: Res<crate::Args>, swarm: Res<Swarm>, roots: Res<Roots>, f: Res<UiFonts>, mut commands: Commands, mut seen: Local<(u64, i64, Option<String>)>) {
-    if !(swarm.open || swarm.amt.x > 0.001) {
+    if !(swarm.open || swarm.amt.x > 0.001) || swarm.game {
         return;
     }
     let now = now_secs(&args, &sim);

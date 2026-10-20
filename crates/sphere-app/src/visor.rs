@@ -347,6 +347,10 @@ pub fn ticker(
             let mut items: Vec<String> = Vec::new();
             if swarm.open {
                 items = crate::swarm::feedback::ticker_items(&sticker.0, &swarm.model);
+                // the game's events only: its agents have no slots or cost
+                if swarm.game {
+                    items.truncate(sticker.0.len());
+                }
             }
             for a in agents.list.iter().take(if swarm.open { 0 } else { 4 }) {
                 items.push(format!("AGENT {} · {}", a.name.to_lowercase(), a.step.to_lowercase()));

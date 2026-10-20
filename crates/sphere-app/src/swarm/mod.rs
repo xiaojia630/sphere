@@ -18,6 +18,11 @@ pub const ATLAS: u8 = 6;
 /// The focus panel's own atlas (the tall panel, over half the swarm's texels): only resident while a focus is open.
 pub const ATLAS_FOCUS: u8 = 7;
 
+/// While Hold the Swarm is on, the core rises this far (stage px) and it and the orbits shrink by this much, so the
+/// orbits clear the game's card at the bottom.
+pub const GAME_LIFT: f32 = 130.0;
+pub const GAME_SHRINK: f32 = 0.18;
+
 /// How far the orbit plane tips from face-on, in degrees (SPEC 2.1): Low 71, Mid 60, High 46.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum Tilt {
@@ -59,6 +64,8 @@ pub struct Swarm {
     pub dim: Spring,
     /// a focus panel is open: the core slides right and the orbits shrink (SPEC `focAmt`, 40/12)
     pub focus_amt: Spring,
+    /// Hold the Swarm is on: the core and the orbits rise and shrink to leave the bottom to its card (40/12)
+    pub game_amt: Spring,
     pub tilt: Tilt,
     /// degrees from face-on, springing to `tilt` (40/11)
     pub orbit_tilt: Spring,
@@ -68,6 +75,11 @@ pub struct Swarm {
     pub model: model::Model,
     /// bumps when the model or the mode changes (panels and labels redraw on it)
     pub version: u64,
+    /// Hold the Swarm has the view (`game`): it writes `model`, and the swarm's own sync, keys, pointer, panels and
+    /// feedback stand aside
+    pub game: bool,
+    /// the game's title, pause or results panel is over the core: the scene draws back as for a request
+    pub game_panel: bool,
 }
 
 impl Default for Swarm {
@@ -79,11 +91,14 @@ impl Default for Swarm {
             hover: None,
             dim: Spring::new(0.0, 40.0, 12.0),
             focus_amt: Spring::new(0.0, 40.0, 12.0),
+            game_amt: Spring::new(0.0, 40.0, 12.0),
             tilt: Tilt::Mid,
             orbit_tilt: Spring::new(Tilt::Mid.deg(), 40.0, 11.0),
             tracks: false,
             model: model::Model::default(),
             version: 0,
+            game: false,
+            game_panel: false,
         }
     }
 }

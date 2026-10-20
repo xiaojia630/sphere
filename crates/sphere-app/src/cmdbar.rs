@@ -333,6 +333,11 @@ pub(crate) fn home_command(t: &str, acts: &mut crate::home::Acts, open: &mut cra
         open.goto = Some(f);
         return true;
     }
+    // "play": Hold the Swarm, before the swarm's own words ("swarm game")
+    if crate::game::is_game_words(&l) {
+        open.game = true;
+        return true;
+    }
     if starts(&["swarm", "agents swarm", "agent swarm", "all agents"]) {
         open.swarm = true;
         return true;

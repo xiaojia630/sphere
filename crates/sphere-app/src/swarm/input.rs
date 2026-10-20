@@ -492,7 +492,7 @@ fn command(e: &mut Env, st: &mut Input, c: SwarmCmd) {
 /// `--swarm` / `--demo` has no sphered: an agent that needs you gets a request of its own (the prototype's two),
 /// so the Agent moment card has something to show.
 fn demo_requests(swarm: Res<Swarm>, args: Res<crate::Args>, mut live: ResMut<Live>) {
-    if !args.offline() || !swarm.open {
+    if !args.offline() || !swarm.open || swarm.game {
         return;
     }
     let mut add = Vec::new();
@@ -599,6 +599,14 @@ fn drive(mut ev: MessageReader<KeyboardInput>, keys: Res<ButtonInput<KeyCode>>, 
         st.prev = Mode::Overview;
         st.pending.clear();
         st.arm = None;
+        return;
+    }
+    // the game has the keys and the agents on screen; a real request's card still sets the mode
+    if e.swarm.game {
+        e.open.swarm_cmds.clear();
+        st.pending.clear();
+        st.arm = None;
+        sync(&mut e, &mut st);
         return;
     }
     let now = e.sim.t;
@@ -721,7 +729,7 @@ fn pointer(
         }
         st.hover = h;
     };
-    if !e.swarm.open {
+    if !e.swarm.open || e.swarm.game {
         st.down = None;
         set_hover(&mut e, &mut st, None);
         return;
@@ -937,7 +945,7 @@ mod tests {
     // ---- the systems, on a bare App
 
     fn args() -> crate::Args {
-        crate::Args { cmd: None, bench: None, shot: None, record: None, record_frames: 180, frames: 120, depth: false, orbit: false, apps: false, work: false, swarm: false, code: false, git: false, open_app: None, icon: false, aa: "smaa".into(), offscreen: false, collapsed: false, focus_term: false, msaa: true, size: (1600, 1000), dt: 0.05, demo: true, live: false, moment: false, elsewhere: false, calendar: false, takeover: None, memory: None, protocols: None, fixit: None, theme: None, motion: None, goto: None, tasks: false, output: None }
+        crate::Args { cmd: None, bench: None, shot: None, record: None, record_frames: 180, frames: 120, depth: false, orbit: false, apps: false, work: false, swarm: false, code: false, git: false, open_app: None, icon: false, aa: "smaa".into(), offscreen: false, collapsed: false, focus_term: false, msaa: true, size: (1600, 1000), dt: 0.05, demo: true, live: false, moment: false, elsewhere: false, calendar: false, takeover: None, memory: None, protocols: None, fixit: None, theme: None, motion: None, goto: None, tasks: false, output: None, game: None }
     }
 
     fn request(task: &str) -> sphere_proto::RequestView {
