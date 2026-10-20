@@ -211,7 +211,8 @@ impl Manager {
             save: save.clone(),
             at: now,
         };
-        self.start_task_for(params, None, vec![], Some(run), None).await
+        self.start_task_for(params, None, vec![], Some(run), None)
+            .await
     }
 
     fn save_protocol(&self, protocol: Protocol) -> ApiResult<()> {

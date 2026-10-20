@@ -1323,7 +1323,8 @@ impl Manager {
         extra: Vec<EventBody>,
         parent_task: Option<String>,
     ) -> ApiResult<api::StartResult> {
-        self.start_task_for(p, resume_session, extra, None, parent_task).await
+        self.start_task_for(p, resume_session, extra, None, parent_task)
+            .await
     }
 
     /// Starts a task like `task.start`. `protocol` is the protocol that starts it on its schedule: the task carries
