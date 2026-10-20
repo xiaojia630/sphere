@@ -24,6 +24,9 @@ pub struct Open {
     pub takeover: Option<crate::takeover::Words>,
     /// a click on the Agents panel (panel px): an "elsewhere" row opens its card, anywhere else opens the Working view
     pub agents_click: Option<bevy::math::Vec2>,
+    /// a click on the Terminal panel (panel px): FIX IT and DISMISS on a failed command's strip, anywhere else focuses
+    /// the terminal (`fixit::apply` finds which)
+    pub term_click: Option<bevy::math::Vec2>,
 }
 
 /// The Code app's tile.
@@ -34,6 +37,11 @@ pub const FILES: usize = 6;
 const SYSTEM: usize = 100;
 
 impl Open {
+    /// The app that is about to open (tests).
+    #[cfg(test)]
+    pub fn pending(&self) -> Option<usize> {
+        self.pending
+    }
     pub fn app(&mut self, i: usize, toasts: &mut Toasts) {
         match APPS.get(i) {
             Some((_, true)) => self.pending = Some(i),

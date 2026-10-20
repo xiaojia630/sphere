@@ -127,9 +127,14 @@ pub fn spawn(cols: u16, rows: u16, shell: &str) -> Option<(Handle, mpsc::Receive
     Some(wire(c, r.id, 0))
 }
 
+/// How many bytes of its old output `attach` has the host replay for this tab.
+pub fn replay_len(ch: &ChildInfo) -> u64 {
+    ch.out_len.min(REPLAY_MAX)
+}
+
 /// Re-attach a tab from a previous run, replaying (the tail of) its output.
 pub fn attach(ch: &ChildInfo) -> Option<(Handle, mpsc::Receiver<Vec<u8>>, HostWriter)> {
     let c = client()?;
-    let from = ch.out_len.saturating_sub(REPLAY_MAX);
+    let from = ch.out_len - replay_len(ch);
     Some(wire(c, ch.id.clone(), from))
 }
