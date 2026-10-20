@@ -91,6 +91,69 @@ async fn send_and_stop_work_and_unknown_tasks_error() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn protocols_are_written_listed_run_turned_off_and_removed_from_the_command_line() {
+    let mut env = Env::new("basic");
+    env.start_daemon().await;
+    let c = env.client().await;
+    let mut w = env.watcher(0, None).await;
+    let repo = env.repo.to_string_lossy().to_string();
+    let run = |args: &[&str]| tokio::task::block_in_place(|| sphere(&env, args));
+
+    let line = format!("every weekday 9:00 {repo}: update the dependencies, run the tests");
+    let (ok, out, err) = run(&["protocol", "add", &line]);
+    assert!(ok, "{out}\n{err}");
+    assert!(
+        out.starts_with("saved p1: every weekday 09:00 · next ")
+            && out.trim_end().ends_with(" · repo"),
+        "{out}"
+    );
+    // A line with no repo takes the one given beside it.
+    let (ok, out, err) = run(&["protocol", "add", "--repo", &repo, "every 2 hours: tidy up"]);
+    assert!(ok, "{out}\n{err}");
+    assert!(out.starts_with("saved p2: every 2 hours · next "), "{out}");
+
+    let (ok, out, _) = run(&["protocol", "list"]);
+    assert!(ok);
+    assert!(
+        out.contains("p1")
+            && out.contains("every weekday 09:00")
+            && out.contains("update the dependencies"),
+        "{out}"
+    );
+    assert!(out.contains("last: not run yet"), "{out}");
+
+    let (ok, out, _) = run(&["protocol", "off", "p2"]);
+    assert!(ok && out.contains("p2 is off"), "{out}");
+    let (_, out, _) = run(&["protocol", "ls"]);
+    assert!(out.contains("p2   off"), "{out}");
+    let (ok, out, _) = run(&["protocol", "on", "p2"]);
+    assert!(ok && out.starts_with("saved p2: every 2 hours"), "{out}");
+
+    // Run now: a task like any other, and `ls` says which protocol started it.
+    let (ok, out, err) = run(&["protocol", "run", "p1"]);
+    assert!(ok, "{out}\n{err}");
+    assert!(out.contains("started t1"), "{out}");
+    w.wait("the run to finish", is_turn).await;
+    let (_, ls, _) = run(&["ls"]);
+    assert!(ls.contains("(protocol p1)"), "{ls}");
+    let (_, out, _) = run(&["protocol", "list"]);
+    assert!(out.contains("last: done (t1) ·"), "{out}");
+
+    // What cannot be done says why.
+    let (ok, _, err) = run(&["protocol", "add", "evry day 9:00 x: y"]);
+    assert!(!ok);
+    assert!(err.contains("didn't understand 'evry'"), "{err}");
+    let (ok, _, err) = run(&["protocol", "run", "p9"]);
+    assert!(!ok && err.contains("p9"), "{err}");
+
+    let (ok, out, _) = run(&["protocol", "rm", "p1"]);
+    assert!(ok && out.contains("removed p1"), "{out}");
+    let (_, out, _) = run(&["protocol", "list"]);
+    assert!(!out.contains("p1 ") && out.contains("p2"), "{out}");
+    assert_eq!(c.protocol_list().await.unwrap().len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn doctor_reports_and_a_missing_daemon_is_explained() {
     let env = Env::new("basic");
     // No daemon yet.

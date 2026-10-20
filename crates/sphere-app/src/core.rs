@@ -162,6 +162,8 @@ pub struct Agent {
     /// The right-hand figure in the panel row (a percent in the demo, a step count for real agents).
     pub figure: Option<String>,
     pub chip: Option<&'static str>,
+    /// A protocol started the task: its row carries a PROTOCOL tag.
+    pub protocol: bool,
 }
 /// What the Agents panel needs of every agent: the first rows (the panel shows four at most), and how many agents
 /// there are in all, and how many of them work or wait. The rest need no row, so none is built.
@@ -213,7 +215,7 @@ pub struct Agents {
 }
 impl Agents {
     pub fn demo() -> Self {
-        let a = |name: &str, state, p, step: &str, rate| Agent { name: name.to_string(), state, p, step: step.to_string(), rate, figure: None, chip: None };
+        let a = |name: &str, state, p, step: &str, rate| Agent { name: name.to_string(), state, p, step: step.to_string(), rate, figure: None, chip: None, protocol: false };
         let list = vec![
             a("Fix flaky login test", AState::Working, 0.64, "Running tests · 41 / 64", 0.0042),
             a("Draft release notes", AState::Working, 0.28, "Reading 12 merged PRs", 0.0016),
@@ -1323,7 +1325,7 @@ mod tests {
     }
 
     fn agent(name: &str, state: AState, p: f32, step: &str) -> Agent {
-        Agent { name: name.into(), state, p, step: step.into(), rate: 0.0, figure: None, chip: None }
+        Agent { name: name.into(), state, p, step: step.into(), rate: 0.0, figure: None, chip: None, protocol: false }
     }
 
     #[test]

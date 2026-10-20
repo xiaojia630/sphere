@@ -66,6 +66,20 @@ all on your real data: code review, git, containers, ports, system and files.
   </tr>
 </table>
 
+## Protocols
+
+Write a routine as one line in the command bar and Sphere runs it as a normal agent task on that schedule, even while
+the app is closed. What it finishes waits for your review like any other task.
+
+```
+every weekday 9:00 sphere: update the dependencies, run the tests and fix what breaks
+```
+
+Schedules are in your local time: `every day 9:00`, `every mon,wed,fri 18:30`, `every 2 hours`, `tomorrow 9:00`,
+`in 45 minutes`. The bar shows when a line will next run before you press Enter, `protocols` opens the list (switch
+one off, run it now, remove it), and the Next 24h panel on the home screen shows what is coming. A run is skipped while
+the last one is still going.
+
 ## Install
 
 1. Download the latest `Sphere-<version>.dmg` from [Releases](https://github.com/xiaojia630/sphere/releases), open
@@ -85,7 +99,7 @@ else works without it. Optional: Docker Desktop or [OrbStack](https://orbstack.d
 | Key | What it does |
 | --- | --- |
 | <kbd>Option</kbd> <kbd>Space</kbd> | Show or hide Sphere from anywhere. Closing the window hides it; <kbd>Cmd</kbd> <kbd>Q</kbd> quits. |
-| <kbd>/</kbd> or <kbd>Cmd</kbd> <kbd>K</kbd> | The command bar. `repo: what to do` starts an agent in its own worktree; `> message` talks to it. |
+| <kbd>/</kbd> or <kbd>Cmd</kbd> <kbd>K</kbd> | The command bar. `repo: what to do` starts an agent in its own worktree; `> message` talks to it; `every weekday 9:00 repo: what to do` saves a protocol; `protocols` lists them. |
 | <kbd>A</kbd> | Open the core: the app orbit. <kbd>←</kbd> <kbd>→</kbd> spin, <kbd>Enter</kbd> opens, <kbd>Esc</kbd> goes back. |
 | <kbd>W</kbd> / <kbd>N</kbd> | The Working view / what needs you. <kbd>Enter</kbd> says yes, <kbd>E</kbd> changes, <kbd>L</kbd> is later; <kbd>A</kbd> says yes and saves the rule the agent suggested, <kbd>Shift</kbd> <kbd>Enter</kbd> says yes to every other agent asking exactly the same. |
 | <kbd>T</kbd> | The terminal. Its tabs survive quitting the app. |
@@ -179,6 +193,10 @@ sphere sessions                     Claude Code sessions on this machine
 sphere bring-in <session>           continue a session as a Sphere task (refused while it runs elsewhere)
 sphere remember "<note>" [--all]    tell every agent started in this repo (--all: in any repo) something, like "use pnpm, never npm"
 sphere memory [rm <id>]             the notes by repo, with their ids; rm removes one
+sphere protocol add "<text>"        save a protocol: "every weekday 9:00 sphere: update the dependencies"
+    --repo R                        the repo for a line that names none (default: this folder)
+sphere protocol list                protocols, when they run next, how the last run went
+sphere protocol on|off|rm|run <id>  switch it on or off, delete it, or run it now
 sphere doctor                       check the installation
 ```
 
@@ -226,7 +244,7 @@ Set `SPHERE_LIVE_CLAUDE` to the command if `claude` is not on your PATH.
 
 More keys:
 
-- `/` or Cmd+K: the command bar. A task starts an agent (`repo: task` picks the repo, a folder in `~/Projects` or a path; otherwise the last repo used, otherwise the app's folder) and opens the Working view. `> message` talks to the agent you heard from last, `stop` stops it. The prototype's commands work too: `depth`, `orbit`, `collapse`, a theme name, `fit`, `reset`, `apps`, `open terminal`.
+- `/` or Cmd+K: the command bar. A task starts an agent (`repo: task` picks the repo, a folder in `~/Projects` or a path; otherwise the last repo used, otherwise the app's folder) and opens the Working view. `> message` talks to the agent you heard from last, `stop` stops it. A line that starts with a schedule (`every weekday 9:00 sphere: update the dependencies`) is saved as a protocol instead, with a preview of its next run as you type; `protocols` opens them. The prototype's commands work too: `depth`, `orbit`, `collapse`, a theme name, `fit`, `reset`, `apps`, `open terminal`.
 - Views: 1 Flat, 2/D Depth, 3/O Orbit, E Depth and Flat, X collapses the rings onto the sphere, F fits, R resets everything, C cycles the five themes, M mutes.
 - Mouse: drag the core to turn it, drag panels anywhere, scroll to zoom (on a panel: push it back; on Apps: spin the rolodex), double-click the sphere to collapse, a ring to fold it, empty space to fit.
 - A (or hold the sphere, or the dock's Apps): core open, the app orbit. ← → or scroll spins it, Enter or a click opens an app, Esc closes.

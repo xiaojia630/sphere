@@ -1,3 +1,4 @@
+use crate::protocol::Protocol;
 use crate::request::{AnswerKind, RequestInfo};
 use serde::{Deserialize, Serialize};
 use time::format_description::FormatItem;
@@ -38,6 +39,9 @@ pub enum EventBody {
         /// Set when the task brings in an existing Claude session.
         #[serde(default)]
         resume_session: Option<String>,
+        /// The protocol that started the task, when one did.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        protocol: Option<String>,
     },
     WorkspaceReady {
         workdir: String,
@@ -175,6 +179,14 @@ pub enum EventBody {
         #[serde(default)]
         notes: u32,
     },
+    /// A protocol was written, changed or ran (task is empty). It replaces what was saved under its id.
+    ProtocolSaved {
+        protocol: Protocol,
+    },
+    /// A protocol was deleted (task is empty).
+    ProtocolRemoved {
+        id: String,
+    },
 }
 
 impl EventBody {
@@ -206,6 +218,8 @@ impl EventBody {
             EventBody::Warning { .. } => "warning",
             EventBody::TakenOver { .. } => "taken_over",
             EventBody::MemoryChanged { .. } => "memory_changed",
+            EventBody::ProtocolSaved { .. } => "protocol_saved",
+            EventBody::ProtocolRemoved { .. } => "protocol_removed",
         }
     }
 }
@@ -448,10 +462,39 @@ mod tests {
                 resumed: false,
                 briefed: 2,
             },
+            EventBody::ProtocolRemoved { id: "p1".into() },
+            EventBody::ProtocolSaved {
+                protocol: crate::protocol::Protocol {
+                    id: "p1".into(),
+                    text: "in 2 hours sphere: x".into(),
+                    schedule: crate::protocol::Schedule::Once { at: 9 },
+                    repo: "/r".into(),
+                    prompt: "x".into(),
+                    enabled: true,
+                    created_at: 1,
+                    last_run: None,
+                    next_run: Some(9),
+                },
+            },
         ];
         for b in bodies {
             let v = serde_json::to_value(&b).unwrap();
             assert_eq!(v["kind"], b.kind_name());
+            let back: EventBody = serde_json::from_value(v).unwrap();
+            assert_eq!(back, b);
         }
+    }
+
+    #[test]
+    fn a_task_made_before_protocols_has_none() {
+        let raw = r#"{"seq":1,"task":"t1","at":"x","kind":"task_created","title":"t","prompt":"p","repo":"/r","budget_usd":1.0}"#;
+        let ev: Event = serde_json::from_str(raw).unwrap();
+        assert!(matches!(
+            ev.body,
+            EventBody::TaskCreated { protocol: None, .. }
+        ));
+        // And a task that no protocol started doesn't carry the field.
+        let v = serde_json::to_value(&ev).unwrap();
+        assert!(v.get("protocol").is_none());
     }
 }

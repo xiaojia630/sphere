@@ -398,12 +398,9 @@ impl Plugin for MemoryPlugin {
     }
 }
 
-/// Copies the notes out of the shared slot, and toasts what went through.
-pub fn sync(svc: Res<Service>, mut notes: ResMut<Notes>, mut card: ResMut<MemoryCard>, mut toasts: ResMut<Toasts>, mut seen: Local<u64>) {
-    let mut s = svc.shared.lock().unwrap();
-    for line in s.done.drain(..) {
-        toasts.push_ok(line);
-    }
+/// Copies the notes out of the shared slot. (What went through is toasted with the rest, by `live`.)
+pub fn sync(svc: Res<Service>, mut notes: ResMut<Notes>, mut card: ResMut<MemoryCard>, mut seen: Local<u64>) {
+    let s = svc.shared.lock().unwrap();
     if s.memory_rev == *seen {
         return;
     }
@@ -1220,24 +1217,22 @@ mod tests {
     }
 
     #[test]
-    fn notes_reach_the_card_and_what_went_through_is_toasted_once() {
+    fn notes_reach_the_card_once() {
         let (svc, _rx) = Service::with_receiver();
         let mut app = App::new();
-        app.init_resource::<Notes>().init_resource::<MemoryCard>().init_resource::<Toasts>().insert_resource(svc.clone()).add_systems(Update, sync);
+        app.init_resource::<Notes>().init_resource::<MemoryCard>().insert_resource(svc.clone()).add_systems(Update, sync);
         app.update();
         assert!(app.world().resource::<Notes>().list.is_empty());
         {
             let mut s = svc.shared.lock().unwrap();
             s.memory = six();
             s.memory_rev = 1;
-            s.done.push("Remembered for sphere · 3 notes".into());
         }
         app.update();
         assert_eq!(app.world().resource::<Notes>().list.len(), 6);
-        assert_eq!(toasts_of(app.world().resource::<Toasts>()), [("Remembered for sphere · 3 notes".to_string(), ToastKind::Ok)]);
         let v = app.world().resource::<Notes>().version;
         app.update();
-        assert_eq!((app.world().resource::<Notes>().version, app.world().resource::<Toasts>().list.len()), (v, 1), "nothing new, nothing done");
+        assert_eq!(app.world().resource::<Notes>().version, v, "nothing new");
     }
 
     // ---- the keys and the buttons, on a bare App

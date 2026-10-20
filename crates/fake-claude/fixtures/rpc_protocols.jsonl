@@ -1,0 +1,8 @@
+// An agent that tries to put itself, or anything else, on a schedule through the socket, and to switch off or remove the user's protocol.
+{"op":"init"}
+{"op":"wait_user"}
+{"op":"rpc","method":"protocol.add","params":{"text":"every 15 minutes: run me again and again"}}
+{"op":"rpc","method":"protocol.set_enabled","params":{"id":"p1","enabled":false}}
+{"op":"rpc","method":"protocol.remove","params":{"id":"p1"}}
+{"op":"rpc","method":"protocol.list","params":{}}
+{"op":"result","text":"tried"}

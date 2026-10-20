@@ -4,6 +4,7 @@
 
 use crate::api::Snapshot;
 use crate::event::{Event, EventBody, FileStat, PlanItem, TaskState};
+use crate::protocol::Protocol;
 use crate::request::{AnswerKind, RequestInfo, RequestStatus};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
@@ -82,6 +83,9 @@ pub struct TaskView {
     /// How many of the user's notes the latest agent process was told when it started.
     #[serde(default)]
     pub briefed: u32,
+    /// The protocol (`p1`) that started the task on its schedule.
+    #[serde(default)]
+    pub protocol: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -102,8 +106,12 @@ pub struct Views {
     cost_by_day: BTreeMap<String, f64>,
     /// Seconds agents waited on the human, by the UTC day the request closed.
     waited_by_day: BTreeMap<String, u64>,
+    protocols: HashMap<String, Protocol>,
+    protocol_order: Vec<String>,
     max_task: u64,
     max_request: u64,
+    /// The highest protocol number ever saved: ids are not reused when a protocol is removed.
+    max_protocol: u64,
     /// `task + tool` -> the request that was answered `change`.
     revise_hints: HashMap<String, String>,
 }
@@ -161,6 +169,9 @@ impl Views {
             }
             v.requests.insert(r.info.id.clone(), r);
         }
+        for p in snap.protocols {
+            v.save_protocol(p);
+        }
         v.cost_by_day.insert(today.to_string(), snap.cost_today_usd);
         v.waited_by_day
             .insert(today.to_string(), snap.waited_today_secs);
@@ -185,6 +196,31 @@ impl Views {
             .iter()
             .filter_map(|id| self.tasks.get(id))
             .collect()
+    }
+
+    pub fn protocol(&self, id: &str) -> Option<&Protocol> {
+        self.protocols.get(id)
+    }
+
+    /// Protocols in the order they were written.
+    pub fn protocols(&self) -> Vec<&Protocol> {
+        self.protocol_order
+            .iter()
+            .filter_map(|id| self.protocols.get(id))
+            .collect()
+    }
+
+    /// The highest protocol number ever saved, for numbering the next one.
+    pub fn max_protocol(&self) -> u64 {
+        self.max_protocol
+    }
+
+    fn save_protocol(&mut self, p: Protocol) {
+        self.max_protocol = self.max_protocol.max(numeric_suffix(&p.id));
+        if !self.protocols.contains_key(&p.id) {
+            self.protocol_order.push(p.id.clone());
+        }
+        self.protocols.insert(p.id.clone(), p);
     }
 
     pub fn request(&self, id: &str) -> Option<&RequestView> {
@@ -288,6 +324,7 @@ impl Views {
                 model,
                 allow_rewrites,
                 resume_session,
+                protocol,
             } => {
                 self.max_task = self.max_task.max(numeric_suffix(id));
                 if !self.tasks.contains_key(id) {
@@ -327,8 +364,18 @@ impl Views {
                         starts: 0,
                         taken_over_from: None,
                         briefed: 0,
+                        protocol: protocol.clone(),
                     },
                 );
+                return;
+            }
+            EventBody::ProtocolSaved { protocol } => {
+                self.save_protocol(protocol.clone());
+                return;
+            }
+            EventBody::ProtocolRemoved { id: removed } => {
+                self.protocols.remove(removed);
+                self.protocol_order.retain(|p| p != removed);
                 return;
             }
             EventBody::Warning { .. } | EventBody::MemoryChanged { .. } => return,
@@ -574,6 +621,7 @@ fn request_line(info: &RequestInfo) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::{Schedule, Weekday};
     use crate::request::AnswerKind::{Change, Later, Yes};
     use crate::request::RequestKind;
     use serde_json::json;
@@ -601,8 +649,37 @@ mod tests {
                 model: None,
                 allow_rewrites: false,
                 resume_session: None,
+                protocol: None,
             },
         )
+    }
+
+    fn created_by(seq: u64, task: &str, protocol: &str) -> Event {
+        let mut e = created(seq, task);
+        if let EventBody::TaskCreated { protocol: p, .. } = &mut e.body {
+            *p = Some(protocol.to_string());
+        }
+        e
+    }
+
+    fn saved(id: &str, enabled: bool) -> EventBody {
+        EventBody::ProtocolSaved {
+            protocol: Protocol {
+                id: id.into(),
+                text: format!("every day 9:00 sphere: {id}"),
+                schedule: Schedule::Weekly {
+                    days: Weekday::ALL.to_vec(),
+                    hour: 9,
+                    minute: 0,
+                },
+                repo: "/r".into(),
+                prompt: id.into(),
+                enabled,
+                created_at: 1,
+                last_run: None,
+                next_run: enabled.then_some(3600),
+            },
+        }
     }
 
     fn started(seq: u64, task: &str) -> Event {
@@ -695,6 +772,7 @@ mod tests {
                 model: None,
                 allow_rewrites: false,
                 resume_session: Some("s1".into()),
+                protocol: None,
             },
         ));
         v.apply(&ev(
@@ -990,6 +1068,7 @@ mod tests {
             max_concurrent: None,
             waited_today_secs: v.waited_on(TODAY),
             memory: vec![],
+            protocols: v.protocols().into_iter().cloned().collect(),
         }
     }
 
@@ -1002,6 +1081,7 @@ mod tests {
             server.open_requests(),
             "{what}: open requests"
         );
+        assert_eq!(client.protocols(), server.protocols(), "{what}: protocols");
         assert_eq!(client.cost_on(TODAY), server.cost_on(TODAY), "{what}: cost");
         assert_eq!(
             client.waited_on(TODAY),
@@ -1241,12 +1321,17 @@ mod tests {
         for seq in 1..=n {
             let at = format!("2026-03-0{}T05:06:{:02}.000Z", 3 + next(2), next(60));
             let mut task = format!("t{}", 1 + next(4));
-            let kind = next(14);
+            let kind = next(16);
             let body = match kind {
                 _ if made < 4 && (kind < 3 || task == format!("t{}", made + 1)) => {
                     made += 1;
                     task = format!("t{made}");
-                    created(0, &task).body
+                    // Every other task is one a protocol started.
+                    if made % 2 == 0 {
+                        created_by(0, &task, &format!("p{}", 1 + next(3))).body
+                    } else {
+                        created(0, &task).body
+                    }
                 }
                 0 | 1 => started(0, &task).body,
                 2..=4 => {
@@ -1300,6 +1385,16 @@ mod tests {
                 12 => EventBody::UserMessage {
                     text: "again".into(),
                 },
+                14 => {
+                    task = String::new();
+                    saved(&format!("p{}", 1 + next(3)), next(2) == 0)
+                }
+                15 => {
+                    task = String::new();
+                    EventBody::ProtocolRemoved {
+                        id: format!("p{}", 1 + next(3)),
+                    }
+                }
                 _ => [
                     EventBody::Warning {
                         message: "w".into(),
@@ -1498,5 +1593,72 @@ mod tests {
         assert_eq!(v.waited_on("2026-03-04"), 0);
         assert_eq!(v.waited_on(""), 0);
         assert!(v.open_requests().is_empty(), "they still closed");
+    }
+
+    #[test]
+    fn protocols_are_saved_replaced_and_removed_in_order() {
+        let mut v = Views::default();
+        v.apply(&ev(1, "", saved("p1", true)));
+        v.apply(&ev(2, "", saved("p2", true)));
+        assert_eq!(v.seq, 2);
+        let ids = |v: &Views| {
+            v.protocols()
+                .iter()
+                .map(|p| p.id.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(ids(&v), ["p1", "p2"]);
+        // Saving again replaces what was there and keeps its place.
+        v.apply(&ev(3, "", saved("p1", false)));
+        assert_eq!(ids(&v), ["p1", "p2"]);
+        assert!(!v.protocol("p1").unwrap().enabled);
+        assert_eq!(v.protocol("p1").unwrap().next_run, None);
+        v.apply(&ev(4, "", EventBody::ProtocolRemoved { id: "p1".into() }));
+        assert_eq!(ids(&v), ["p2"]);
+        assert!(v.protocol("p1").is_none());
+        // A number that was used is not handed out again, even once its protocol is gone.
+        assert_eq!(v.max_protocol(), 2);
+        v.apply(&ev(5, "", EventBody::ProtocolRemoved { id: "p2".into() }));
+        assert_eq!(v.max_protocol(), 2);
+        // Removing what isn't there is nothing.
+        v.apply(&ev(6, "", EventBody::ProtocolRemoved { id: "p9".into() }));
+        assert!(v.protocols().is_empty() && v.seq == 6);
+        assert!(v.tasks().is_empty());
+    }
+
+    #[test]
+    fn a_task_remembers_the_protocol_that_started_it() {
+        let mut v = Views::default();
+        v.apply(&created(1, "t1"));
+        v.apply(&created_by(2, "t2", "p3"));
+        assert_eq!(v.task("t1").unwrap().protocol, None);
+        assert_eq!(v.task("t2").unwrap().protocol.as_deref(), Some("p3"));
+        // The task view travels in a snapshot with it, and one from an older sphered has none.
+        let json = serde_json::to_value(v.task("t2").unwrap()).unwrap();
+        assert_eq!(json["protocol"], "p3");
+        let mut old = json;
+        old.as_object_mut().unwrap().remove("protocol");
+        let t: TaskView = serde_json::from_value(old).unwrap();
+        assert_eq!(t.protocol, None);
+    }
+
+    #[test]
+    fn a_client_keeps_the_protocols_current_from_a_snapshot() {
+        let mut server = Views::default();
+        server.apply(&ev(1, "", saved("p1", true)));
+        server.apply(&created_by(2, "t1", "p1"));
+        let mut client = Views::from_snapshot(snapshot_of(&server), TODAY);
+        assert_eq!(client.protocols(), server.protocols());
+        assert_eq!(client.max_protocol(), 1);
+        for e in [
+            ev(3, "", saved("p2", true)),
+            ev(4, "", saved("p1", false)),
+            ev(5, "", EventBody::ProtocolRemoved { id: "p2".into() }),
+        ] {
+            server.apply(&e);
+            client.apply(&e);
+        }
+        assert_eq!(client.protocols(), server.protocols());
+        assert_eq!(client.protocols().len(), 1);
     }
 }

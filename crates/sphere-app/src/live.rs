@@ -139,7 +139,7 @@ fn row(t: &TaskView, merged: bool) -> Agent {
     if step.chars().count() > 44 {
         step = step.chars().take(43).collect::<String>() + "…";
     }
-    Agent { name, state, p: p.max(0.04), step, rate: 0.0, figure, chip }
+    Agent { name, state, p: p.max(0.04), step, rate: 0.0, figure, chip, protocol: t.protocol.is_some() }
 }
 
 /// How a task ranks on the panel: what needs you first, then working, then queued, then the finished.
@@ -373,6 +373,9 @@ pub fn sync(svc: Res<Service>, mut live: ResMut<Live>, mut agents: ResMut<Agents
     }
     for n in s.notes.drain(..) {
         toasts.push(n);
+    }
+    for n in s.good.drain(..) {
+        toasts.push_ok(n);
     }
     if live.link != s.link {
         if let Some(Link::Down(e)) = &s.link {
@@ -740,7 +743,7 @@ mod tests {
     // ---- the systems, on a bare App
 
     fn args() -> crate::Args {
-        crate::Args { cmd: None, bench: None, shot: None, record: None, record_frames: 180, frames: 120, depth: false, orbit: false, apps: false, work: false, swarm: false, code: false, git: false, open_app: None, icon: false, aa: "smaa".into(), offscreen: false, collapsed: false, focus_term: false, msaa: true, size: (1600, 1000), dt: 0.05, demo: false, live: false, moment: false, elsewhere: false, calendar: false, takeover: None, memory: None, theme: None, motion: None }
+        crate::Args { cmd: None, bench: None, shot: None, record: None, record_frames: 180, frames: 120, depth: false, orbit: false, apps: false, work: false, swarm: false, code: false, git: false, open_app: None, icon: false, aa: "smaa".into(), offscreen: false, collapsed: false, focus_term: false, msaa: true, size: (1600, 1000), dt: 0.05, demo: false, live: false, moment: false, elsewhere: false, calendar: false, takeover: None, memory: None, protocols: None, theme: None, motion: None }
     }
 
     fn app() -> App {

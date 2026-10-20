@@ -6,7 +6,7 @@
 use bevy::prelude::*;
 use sphere_client::{Client, ClientKind, StartParams, Update};
 use sphere_proto::api::Snapshot;
-use sphere_proto::{AnswerKind, Event, EventBody, Note, NoteSource, RequestView, TaskState, TaskView, Views};
+use sphere_proto::{AnswerKind, Event, EventBody, Note, NoteSource, Protocol, RequestView, TaskState, TaskView, Views};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -97,8 +97,12 @@ pub struct Shared {
     pub memory: Vec<Note>,
     /// moves with `memory`, so `memory::sync` copies the notes only when they changed
     pub memory_rev: u64,
-    /// what went through, for a green toast ("Remembered for sphere · 4 notes")
-    pub done: Vec<String>,
+    /// the saved protocols, oldest first (the mirror's); `protocols_rev` moves whenever one is saved, changed or removed
+    pub protocols: Vec<Protocol>,
+    pub protocols_rev: u64,
+    /// Toasts for something that went through ("Protocol saved · next Mon 09:00", "Remembered for sphere · 4 notes"):
+    /// drawn with the green bar
+    pub good: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -194,6 +198,13 @@ pub enum Cmd {
     Remember { repo: Option<String>, text: String, source: NoteSource },
     /// Drop a note.
     Forget { id: u64 },
+    /// Save a protocol from the line as typed (`protocol.add`); `repo` is the folder for a line that names none.
+    ProtocolAdd { text: String, repo: Option<String> },
+    /// Turn a protocol on or off (`protocol.set_enabled`).
+    ProtocolEnable { id: String, enabled: bool },
+    /// Run a protocol now, besides its schedule (`protocol.run_now`).
+    ProtocolRunNow { id: String },
+    ProtocolRemove { id: String },
 }
 
 #[derive(Resource, Clone)]
@@ -265,6 +276,13 @@ async fn read_notes(c: &Client, sh: &Mutex<Shared>) {
     }
 }
 
+/// A toast for something that went through (the green bar).
+fn good(sh: &Mutex<Shared>, n: impl Into<String>) {
+    let mut s = sh.lock().unwrap();
+    s.good.push(n.into());
+    s.version += 1;
+}
+
 /// Whether a task still runs or waits: its arc on the Timeline has no end yet.
 pub fn is_live(t: &TaskView) -> bool {
     matches!(t.state, TaskState::Queued | TaskState::Working | TaskState::NeedsYou)
@@ -296,6 +314,8 @@ impl Mirror {
         let views = Views::from_snapshot(snap, &day);
         s.cost_today_usd = views.cost_on(&day);
         s.waited_today_secs = views.waited_on(&day);
+        s.protocols = views.protocols().into_iter().cloned().collect();
+        s.protocols_rev += 1;
         // only a finished task can read merged
         s.merged.retain(|id| at.get(id).is_some_and(|&i| s.tasks[i].state == TaskState::Done));
         s.roster += 1;
@@ -315,7 +335,7 @@ impl Mirror {
         if ev.seq != seen + 1 {
             return Err(format!("missed events {}..{}, resyncing", seen + 1, ev.seq - 1));
         }
-        // a change to the notes belongs to no task
+        // an event of no task (a note changed, a protocol saved or removed) is nobody's run
         if !ev.task.is_empty() {
             match s.runs.get_mut(&ev.task) {
                 Some(r) => r.apply(ev),
@@ -327,6 +347,10 @@ impl Mirror {
             }
         }
         self.views.apply(ev);
+        if matches!(ev.body, EventBody::ProtocolSaved { .. } | EventBody::ProtocolRemoved { .. }) {
+            s.protocols = self.views.protocols().into_iter().cloned().collect();
+            s.protocols_rev += 1;
+        }
         if matches!(ev.body, EventBody::Request { .. } | EventBody::RequestSnoozed { .. } | EventBody::RequestAnswered { .. } | EventBody::RequestWithdrawn { .. }) {
             self.views.forget_closed_requests();
             s.requests = self.views.open_requests().into_iter().cloned().collect();
@@ -677,9 +701,7 @@ async fn command(c: &Client, cmd: Cmd, sh: &Mutex<Shared>) -> Result<(), String>
         Cmd::Stop { task } => c.stop(&task).await.map_err(|e| format!("could not stop: {e}")),
         Cmd::Remember { repo, text, source } => {
             let added = c.memory_add(repo.as_deref(), &text, source).await.map_err(|e| format!("could not remember: {e}"))?;
-            let mut s = sh.lock().unwrap();
-            s.done.push(crate::memory::remembered(&added));
-            s.version += 1;
+            good(sh, crate::memory::remembered(&added));
             Ok(())
         }
         Cmd::Forget { id } => match c.memory_remove(id).await {
@@ -688,8 +710,41 @@ async fn command(c: &Client, cmd: Cmd, sh: &Mutex<Shared>) -> Result<(), String>
             Err(e) if matches!(e.kind(), Some(k) if k == kind::NOT_FOUND) => Ok(()),
             Err(e) => Err(format!("could not forget: {e}")),
         },
+        Cmd::ProtocolAdd { text, repo } => {
+            let p = c.protocol_add(&text, repo.as_deref()).await.map_err(|e| format!("could not save the protocol: {e}"))?;
+            good(sh, saved_words(&p, crate::core::unix_now()));
+            Ok(())
+        }
+        Cmd::ProtocolEnable { id, enabled } => {
+            let p = c.protocol_set_enabled(&id, enabled).await.map_err(|e| format!("could not turn it {}: {e}", if enabled { "on" } else { "off" }))?;
+            good(sh, if enabled { format!("Protocol on · {}", next_words(&p, crate::core::unix_now())) } else { "Protocol off".to_string() });
+            Ok(())
+        }
+        Cmd::ProtocolRunNow { id } => {
+            c.protocol_run_now(&id).await.map_err(|e| format!("could not run it: {e}"))?;
+            good(sh, "Protocol running");
+            Ok(())
+        }
+        Cmd::ProtocolRemove { id } => {
+            c.protocol_remove(&id).await.map_err(|e| format!("could not remove it: {e}"))?;
+            good(sh, "Protocol removed");
+            Ok(())
+        }
         Cmd::Shown => Ok(()),
     }
+}
+
+/// "next Mon 09:00": when a protocol runs next, in local time (a one-shot that has passed or a protocol that is off has none).
+pub fn next_words(p: &Protocol, now: i64) -> String {
+    match p.next_run {
+        Some(t) => format!("next {}", sphere_proto::protocol::when_words(t, now, &sphere_proto::protocol::LocalZone)),
+        None => "no next run".to_string(),
+    }
+}
+
+/// The toast after a protocol is saved: "Protocol saved · next Mon 09:00".
+pub fn saved_words(p: &Protocol, now: i64) -> String {
+    format!("Protocol saved · {}", next_words(p, now))
 }
 
 #[cfg(test)]
@@ -748,7 +803,7 @@ mod tests {
     }
 
     fn created(seq: u64, task: &str) -> Event {
-        event(seq, task, EventBody::TaskCreated { title: format!("Task {task}"), prompt: "p".into(), repo: "/r".into(), in_place: false, budget_usd: 1.0, mode: None, model: None, allow_rewrites: false, resume_session: None })
+        event(seq, task, EventBody::TaskCreated { title: format!("Task {task}"), prompt: "p".into(), repo: "/r".into(), in_place: false, budget_usd: 1.0, mode: None, model: None, allow_rewrites: false, resume_session: None, protocol: None })
     }
 
     fn started(seq: u64, task: &str) -> Event {
@@ -791,7 +846,7 @@ mod tests {
     }
 
     fn empty_snapshot() -> Snapshot {
-        Snapshot { seq: 0, tasks: vec![], requests: vec![], cost_today_usd: 0.0, daily_cap_usd: None, max_concurrent: Some(3), waited_today_secs: 0, memory: vec![] }
+        Snapshot { seq: 0, tasks: vec![], requests: vec![], cost_today_usd: 0.0, daily_cap_usd: None, max_concurrent: Some(3), waited_today_secs: 0, memory: vec![], protocols: vec![] }
     }
 
     fn kept(id: u64, repo: Option<&str>, text: &str) -> Note {
@@ -827,6 +882,8 @@ mod tests {
             assert_eq!(self.s.requests, open, "open requests");
             assert_eq!(self.s.cost_today_usd, self.server.cost_on(&today()), "cost");
             assert_eq!(self.s.waited_today_secs, self.server.waited_on(&today()), "waited");
+            let protocols: Vec<Protocol> = self.server.protocols().into_iter().cloned().collect();
+            assert_eq!(self.s.protocols, protocols, "protocols");
         }
         fn counters(&self) -> (u64, u64, u64) {
             (self.s.roster, self.s.states, self.s.spans)
@@ -877,7 +934,7 @@ mod tests {
         for e in [created(1, "t1"), started(2, "t1"), step(3, "t1", "a"), ask(4, "t1", "r1"), created(5, "t2")] {
             server.apply(&e);
         }
-        let snap = Snapshot { seq: server.seq, tasks: server.tasks().into_iter().cloned().collect(), requests: server.open_requests().into_iter().cloned().collect(), cost_today_usd: 1.25, daily_cap_usd: None, max_concurrent: Some(2), waited_today_secs: 90, memory: vec![] };
+        let snap = Snapshot { seq: server.seq, tasks: server.tasks().into_iter().cloned().collect(), requests: server.open_requests().into_iter().cloned().collect(), cost_today_usd: 1.25, daily_cap_usd: None, max_concurrent: Some(2), waited_today_secs: 90, memory: vec![], protocols: server.protocols().into_iter().cloned().collect() };
         let mut s = Shared::default();
         let mut mirror = Mirror::connect(snap, &mut s);
         assert_eq!((s.tasks.len(), s.requests.len(), s.cost_today_usd, s.max_concurrent, s.waited_today_secs), (2, 1, 1.25, Some(2), 90));
@@ -1055,6 +1112,78 @@ mod tests {
         assert!(!is_live(&p.s.tasks[0]), "done");
     }
 
+    // ---- protocols
+
+    fn protocol(id: &str, enabled: bool) -> Protocol {
+        use sphere_proto::protocol::{Schedule, Weekday};
+        Protocol {
+            id: id.into(),
+            text: format!("every weekday 9:00 sphere: update {id}"),
+            schedule: Schedule::Weekly { days: Weekday::WEEKDAYS.to_vec(), hour: 9, minute: 0 },
+            repo: "/home/me/Projects/sphere".into(),
+            prompt: format!("update {id}"),
+            enabled,
+            created_at: 1_000,
+            last_run: None,
+            next_run: enabled.then_some(4_000_000_000),
+        }
+    }
+
+    fn saved(seq: u64, id: &str, enabled: bool) -> Event {
+        event(seq, "", EventBody::ProtocolSaved { protocol: protocol(id, enabled) })
+    }
+
+    #[test]
+    fn protocols_fold_in_beside_the_tasks_and_are_nobodys_run() {
+        let mut p = Pair::new();
+        let rev = p.s.protocols_rev;
+        p.feed(created(1, "t1"));
+        p.feed(saved(2, "p1", true));
+        p.feed(saved(3, "p2", true));
+        assert_eq!(p.s.protocols.iter().map(|x| x.id.as_str()).collect::<Vec<_>>(), ["p1", "p2"]);
+        assert_eq!(p.s.protocols_rev, rev + 2);
+        assert!(!p.s.runs.contains_key(""), "an event of no task makes no run");
+        // saved again: replaced in its place; a task starting changes none of them
+        p.feed(saved(4, "p1", false));
+        assert!(!p.s.protocols[0].enabled);
+        assert_eq!(p.s.protocols_rev, rev + 3);
+        p.feed(started(5, "t1"));
+        assert_eq!(p.s.protocols_rev, rev + 3, "tasks leave the protocols alone");
+        p.feed(event(6, "", EventBody::ProtocolRemoved { id: "p1".into() }));
+        assert_eq!(p.s.protocols.iter().map(|x| x.id.as_str()).collect::<Vec<_>>(), ["p2"]);
+        assert_eq!(p.s.tasks.len(), 1);
+    }
+
+    fn created_by(seq: u64, task: &str, protocol: &str) -> Event {
+        let mut e = created(seq, task);
+        if let EventBody::TaskCreated { protocol: p, .. } = &mut e.body {
+            *p = Some(protocol.to_string());
+        }
+        e
+    }
+
+    #[test]
+    fn a_snapshot_brings_the_protocols_and_the_tasks_they_started_keep_their_tag() {
+        let snap = picture(&[saved(1, "p1", true), created_by(2, "t1", "p1"), started(3, "t1")]);
+        let mut s = Shared::default();
+        let mut mirror = Mirror::connect(snap, &mut s);
+        assert_eq!(s.protocols, vec![protocol("p1", true)]);
+        assert_eq!(s.tasks[0].protocol.as_deref(), Some("p1"));
+        let rev = s.protocols_rev;
+        mirror.fold(&saved(4, "p2", false), &mut s).unwrap();
+        assert_eq!(s.protocols.len(), 2);
+        assert!(s.protocols_rev > rev);
+    }
+
+    #[test]
+    fn the_toast_after_saving_says_when_it_runs_next() {
+        let p = protocol("p1", true);
+        let words = saved_words(&p, 4_000_000_000 - 3 * 3600);
+        assert!(words.starts_with("Protocol saved · next ") && words.ends_with(char::is_numeric), "{words}");
+        let off = Protocol { enabled: false, next_run: None, ..p };
+        assert_eq!(next_words(&off, 0), "no next run");
+    }
+
     // ---- the link, against a stand-in for sphered
 
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -1093,6 +1222,8 @@ mod tests {
                             serde_json::to_value(&snaps[(taken - 1).min(snaps.len() - 1)]).unwrap()
                         }
                         "history" => serde_json::json!({"events": []}),
+                        "protocol.add" | "protocol.set_enabled" => serde_json::to_value(protocol("p1", true)).unwrap(),
+                        "protocol.run_now" => serde_json::json!({"task": "t9"}),
                         "subscribe" => serde_json::json!({"seq": snaps[0].seq}),
                         "status" => serde_json::json!({"seq": snaps[0].seq, "version": env!("CARGO_PKG_VERSION"), "active": 0, "queued": 0, "needs_you": 0, "cost_today_usd": 0.0, "tasks": [], "requests": [], "host_pid": null}),
                         "memory.list" => serde_json::json!({"notes": *held.lock().unwrap()}),
@@ -1157,7 +1288,7 @@ mod tests {
         for e in events {
             v.apply(e);
         }
-        Snapshot { seq: v.seq, tasks: v.tasks().into_iter().cloned().collect(), requests: v.open_requests().into_iter().cloned().collect(), cost_today_usd: 0.0, daily_cap_usd: None, max_concurrent: Some(3), waited_today_secs: 0, memory: vec![] }
+        Snapshot { seq: v.seq, tasks: v.tasks().into_iter().cloned().collect(), requests: v.open_requests().into_iter().cloned().collect(), cost_today_usd: 0.0, daily_cap_usd: None, max_concurrent: Some(3), waited_today_secs: 0, memory: vec![], protocols: v.protocols().into_iter().cloned().collect() }
     }
 
     /// A sphered at event 3 (one task that works), and the two events it sends next: a question, then a second task.
@@ -1254,6 +1385,25 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn protocol_commands_reach_sphered_and_what_went_through_is_announced() {
+        let (snap, _) = scene();
+        let fake = Fake::start("protocols", vec![snap], vec![], false);
+        let (sh, tx, _task) = connected(&fake).await;
+        until(|| sh.lock().unwrap().link == Some(Link::Connected)).await;
+        tx.send(Cmd::ProtocolAdd { text: "every weekday 9:00 sphere: update".into(), repo: None }).unwrap();
+        tx.send(Cmd::ProtocolEnable { id: "p1".into(), enabled: false }).unwrap();
+        tx.send(Cmd::ProtocolRunNow { id: "p1".into() }).unwrap();
+        tx.send(Cmd::ProtocolRemove { id: "p1".into() }).unwrap();
+        until(|| sh.lock().unwrap().good.len() == 4).await;
+        assert_eq!((fake.calls("protocol.add"), fake.calls("protocol.set_enabled"), fake.calls("protocol.run_now"), fake.calls("protocol.remove")), (1, 1, 1, 1));
+        let s = sh.lock().unwrap();
+        for want in ["Protocol saved · next ", "Protocol off", "Protocol running", "Protocol removed"] {
+            assert!(s.good.iter().any(|g| g.starts_with(want)), "{want}: {:?}", s.good);
+        }
+        assert!(s.notes.is_empty(), "no errors: {:?}", s.notes);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn a_lost_event_is_made_up_with_a_new_snapshot_and_the_stream_goes_on() {
         // event 5 never comes: after the question at 4 the next one is 6, so the link takes a new snapshot (which
         // holds 6) and carries on with 7
@@ -1291,16 +1441,16 @@ mod tests {
         let (sh, tx, _task) = connected(&fake).await;
         until(|| sh.lock().unwrap().link == Some(Link::Connected)).await;
         tx.send(Cmd::Remember { repo: Some("/code/sphere".into()), text: "Use pnpm".into(), source: NoteSource::Change }).unwrap();
-        until(|| !sh.lock().unwrap().done.is_empty()).await;
-        assert_eq!(sh.lock().unwrap().done, ["Remembered for sphere · 1 note"]);
+        until(|| !sh.lock().unwrap().good.is_empty()).await;
+        assert_eq!(sh.lock().unwrap().good, ["Remembered for sphere · 1 note"]);
         {
             let held = fake.notes.lock().unwrap();
             assert_eq!((held[0].repo.as_deref(), held[0].text.as_str(), held[0].source), (Some("/code/sphere"), "Use pnpm", NoteSource::Change));
         }
         // for every repo
         tx.send(Cmd::Remember { repo: None, text: "Keep commits small".into(), source: NoteSource::Typed }).unwrap();
-        until(|| sh.lock().unwrap().done.len() == 2).await;
-        assert_eq!(sh.lock().unwrap().done[1], "Remembered for all repos · 2 notes");
+        until(|| sh.lock().unwrap().good.len() == 2).await;
+        assert_eq!(sh.lock().unwrap().good[1], "Remembered for all repos · 2 notes");
         assert_eq!(fake.notes.lock().unwrap()[0].repo, None);
         tx.send(Cmd::Forget { id: 1 }).unwrap();
         until(|| fake.notes.lock().unwrap().len() == 1).await;

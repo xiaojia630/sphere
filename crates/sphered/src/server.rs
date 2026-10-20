@@ -223,6 +223,27 @@ async fn dispatch(
                 mgr.memory_remove(p.id)?;
                 Ok(ok(api::Ack { ok: true })?)
             }
+            method::PROTOCOL_ADD => {
+                let p: api::ProtocolAddParams = parse(params)?;
+                authorize_user(mgr, conn, "change your protocols").await?;
+                Ok(ok(mgr.protocol_add(p).await?)?)
+            }
+            method::PROTOCOL_LIST => Ok(ok(mgr.protocol_list())?),
+            method::PROTOCOL_SET_ENABLED => {
+                let p: api::ProtocolEnabledParams = parse(params)?;
+                authorize_user(mgr, conn, "change your protocols").await?;
+                Ok(ok(mgr.protocol_set_enabled(&p.id, p.enabled).await?)?)
+            }
+            method::PROTOCOL_REMOVE => {
+                let p: api::ProtocolParams = parse(params)?;
+                authorize_user(mgr, conn, "change your protocols").await?;
+                mgr.protocol_remove(&p.id).await?;
+                Ok(ok(api::Ack { ok: true })?)
+            }
+            method::PROTOCOL_RUN_NOW => {
+                let p: api::ProtocolParams = parse(params)?;
+                Ok(ok(mgr.protocol_run_now(&p.id).await?)?)
+            }
             other => Err(ApiError(RpcError {
                 code: code::METHOD_NOT_FOUND,
                 message: format!("unknown method `{other}`"),
@@ -240,8 +261,8 @@ impl From<RpcError> for ApiError {
     }
 }
 
-/// Only you decide what `what` names (answer requests, change your notes): not the assistant, and not anything
-/// an agent started.
+/// Only you decide what `what` names (answer requests, change your notes or your protocols): not the assistant, and
+/// not anything an agent started. A note or a schedule an agent wrote would outlive its task.
 async fn authorize_user(mgr: &Arc<Manager>, conn: &Conn, what: &str) -> Result<(), ApiError> {
     let forbidden = |why: String| ApiError(RpcError::app(kind::FORBIDDEN, why));
     if conn.kind == ClientKind::Assistant {

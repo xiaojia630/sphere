@@ -100,6 +100,8 @@ All of this was checked against the installed Claude Code (2.1.301).
 
 **Signing in.** On start, Sphere checks `claude auth status`. If you're signed out, it runs `claude auth login` in a Sphere terminal tab.
 
+**Protocols.** A protocol is a routine on a schedule: a line like `every weekday 9:00 sphere: update the dependencies` that `sphere-proto` reads into a schedule, a repo and a prompt. Protocols are events in the log (`protocol_saved`, `protocol_removed`), so they survive a restart and every client sees them in the snapshot. While `sphered` runs, a loop looks at the clock every 30 seconds and starts whatever has come due through the same path as `task.start`; the task carries the protocol's id and waits for review like any other. A run is skipped, with the reason kept on the protocol, while the last task it started is still queued, working or waiting on you, or when the daily cap is reached; one missed by less than 12 hours (the computer slept, `sphered` was down) runs once, older ones are dropped; a one-shot turns itself off after it fires. Times are local, worked out with the system's time zone rules so they stay right across daylight saving changes. As with notes, only the app and the CLI write, switch or remove protocols: the assistant and anything an agent started are refused, since a schedule an agent wrote would outlive its task.
+
 ## Terminals
 
 The service owns every terminal: your shells, Claude Code's own screen when you open it, the open-source apps Sphere runs in panels, and later other CLI agents.
@@ -196,6 +198,7 @@ A Unix socket, user-only, speaking JSON-RPC 2.0 over newline-delimited JSON. The
 
 - **Sync:** `snapshot`, `subscribe`, `history`, `blob.read`.
 - **Agents:** `task.start`, `task.send`, `task.interrupt`, `task.set_mode`, `task.set_model`, `task.rewind`, `task.stop`, `task.open_in_terminal`, `session.list`, `session.bring_in`.
+- **Protocols:** `protocol.add`, `protocol.list`, `protocol.set_enabled`, `protocol.remove`, `protocol.run_now`.
 - **Requests:** `request.answer`.
 - **Notes:** `memory.list`, `memory.add`, `memory.remove`. The snapshot carries them too.
 - **Terminals:** `term.open`, `term.attach`, `term.input`, `term.resize`, `term.close`.
