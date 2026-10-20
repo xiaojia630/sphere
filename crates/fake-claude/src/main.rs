@@ -83,6 +83,12 @@ fn text_of(v: &Value) -> String {
 }
 
 fn mode_matches(op: &Value, resumed: bool) -> bool {
+    // `"task": "t2"` keeps an op for one task, so a parent and its helper can share a fixture.
+    if let Some(t) = op.get("task").and_then(|t| t.as_str()) {
+        if std::env::var("SPHERE_TASK").ok().as_deref() != Some(t) {
+            return false;
+        }
+    }
     match op.get("mode").and_then(|m| m.as_str()) {
         Some("fresh") => !resumed,
         Some("resume") => resumed,
@@ -121,6 +127,38 @@ impl Fake {
     fn control_ok(&self, request_id: &str) {
         self.emit(json!({"type":"control_response","response":{
             "subtype":"success","request_id":request_id,"response":{}}}));
+    }
+
+    /// Send an `mcp_message` for the `sphere` server and wait for its
+    /// answer: the `mcp_response` object.
+    fn mcp(&mut self, method: &str, params: Value) -> Result<Value, Flow> {
+        self.req_n += 1;
+        let req_id = format!("req_{}_{}", std::process::id(), self.req_n);
+        self.emit(
+            json!({"type":"control_request","request_id":req_id,"request":{
+            "subtype":"mcp_message","server_name":"sphere",
+            "message":{"jsonrpc":"2.0","id":self.req_n,"method":method,"params":params}}}),
+        );
+        loop {
+            match self.next_input(None) {
+                Some(Input::Eof) | None => self.eof(),
+                Some(Input::Msg(m)) => match self.classify(m) {
+                    Cls::Interrupt => return Err(Flow::Interrupted),
+                    Cls::Response(r)
+                        if r.pointer("/response/request_id").and_then(|i| i.as_str())
+                            == Some(&req_id) =>
+                    {
+                        let rpc = r
+                            .pointer("/response/response/mcp_response")
+                            .cloned()
+                            .unwrap_or(Value::Null);
+                        self.last_response = rpc.clone();
+                        return Ok(rpc);
+                    }
+                    _ => {}
+                },
+            }
+        }
     }
 
     fn next_input(&self, timeout: Option<Duration>) -> Option<Input> {
@@ -326,6 +364,30 @@ impl Fake {
                 if let Some(ops) = op.get(branch).and_then(|b| b.as_array()).cloned() {
                     return self.block(&ops);
                 }
+            }
+            // A raw message to the `sphere` server (`initialize`, `tools/list`, ...).
+            "mcp" => {
+                if let Err(f) = self.mcp(&s("method").unwrap_or_default(), op.get("params").cloned().unwrap_or(json!({}))) {
+                    return f;
+                }
+            }
+            // A tool call to the `sphere` server, as a step the agent takes.
+            "mcp_call" => {
+                self.tool_n += 1;
+                let id = format!("toolu_{}", self.tool_n);
+                let tool = s("tool").unwrap_or_default();
+                let args = op.get("arguments").cloned().unwrap_or(json!({}));
+                self.assistant(vec![json!({"type":"tool_use","id":id,
+                    "name":format!("mcp__sphere__{tool}"),"input":args})]);
+                let rpc = match self.mcp("tools/call", json!({"name": tool, "arguments": args})) {
+                    Ok(r) => r,
+                    Err(f) => return f,
+                };
+                let text = rpc.pointer("/result/content/0/text").and_then(|t| t.as_str()).unwrap_or("").to_string();
+                let is_error = rpc.pointer("/result/isError").and_then(|e| e.as_bool()).unwrap_or(rpc.get("error").is_some());
+                self.emit(json!({"type":"user","message":{"role":"user","content":[
+                    {"type":"tool_result","tool_use_id":id,"content":text,"is_error":is_error}]},
+                    "session_id":self.session_id}));
             }
             "rpc" => {
                 use std::os::unix::net::UnixStream;

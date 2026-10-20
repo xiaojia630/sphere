@@ -1,0 +1,24 @@
+// A parent that starts a helper and waits for it, and the helper it starts.
+// Ops with a "task" run only in that task's agent: the parent is t1, its helper t2.
+{"op":"init"}
+{"op":"wait_user"}
+{"task":"t1","op":"say_args"}
+{"task":"t1","op":"say_settings"}
+{"task":"t1","op":"mcp","method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"fake-claude","version":"0"}}}
+{"task":"t1","op":"say_response"}
+{"task":"t1","op":"mcp","method":"tools/list"}
+{"task":"t1","op":"say_response"}
+{"task":"t1","op":"mcp_call","tool":"start_helper","arguments":{"title":"Write notes","prompt":"Write notes.txt"}}
+{"task":"t1","op":"say_response"}
+{"task":"t1","op":"mcp_call","tool":"wait_for_helpers","arguments":{"timeout_seconds":60}}
+{"task":"t1","op":"say_response"}
+{"task":"t1","op":"result","text":"Parent finished"}
+{"task":"t2","op":"mcp","method":"tools/list"}
+{"task":"t2","op":"say_response"}
+{"task":"t2","op":"mcp_call","tool":"start_helper","arguments":{"title":"Nested","prompt":"No"}}
+{"task":"t2","op":"say_response"}
+{"task":"t2","op":"tool_use","id":"toolu_note","name":"Write","input":{"file_path":"notes.txt","content":"one\n"}}
+{"task":"t2","op":"touch_file","path":"notes.txt","content":"one\n"}
+{"task":"t2","op":"tool_result","id":"toolu_note","result":"File created successfully"}
+{"task":"t2","op":"sleep","ms":600}
+{"task":"t2","op":"result","text":"Wrote notes.txt for you"}

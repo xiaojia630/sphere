@@ -187,6 +187,10 @@ async fn dispatch(
                 mgr.stop(&parse::<api::TaskParams>(params)?.task).await?;
                 Ok(ok(api::Ack { ok: true })?)
             }
+            method::TASK_SEEN => {
+                mgr.seen(&parse::<api::TaskParams>(params)?.task)?;
+                Ok(ok(api::Ack { ok: true })?)
+            }
             method::TASK_SET_MODE => {
                 let p: api::SetModeParams = parse(params)?;
                 mgr.set_mode(&p.task, p.mode).await?;

@@ -185,7 +185,7 @@ sphere doctor
 sphere daemon                       run sphered in the foreground
 sphere run <repo> "<task>"          start an agent in a new worktree and branch (sphere/<slug>)
     --in-place --budget 2 --title T --mode plan --allow-rewrites --follow
-sphere ls                           tasks, and what is waiting on you
+sphere ls                           tasks (helpers indented under their parent, results you haven't seen marked [new]), and what is waiting on you
 sphere watch [task] [--typing]      follow live (a task is replayed from its start)
 sphere answer <request> yes|change|later [text] [--always] [--input JSON]
 sphere send <task> "<message>"      talk to the agent
@@ -204,6 +204,10 @@ sphere doctor                       check the installation
 ### Answers
 
 `yes` allows (optionally with an edited input; `--always` also saves the suggested rule), `change` refuses and tells the agent what to do instead, `later` snoozes the request. The first answer wins; any other gets `already_answered`. Stopping or interrupting a task withdraws its open requests. Answers are refused from any process an agent started, and from clients that identify as the assistant.
+
+### Helpers
+
+An agent can hand work to helper agents. Sphere serves four tools to every agent it runs, as an in-process MCP server named `sphere`: `start_helper`, `wait_for_helpers`, `message_helper` and `stop_helper`. A helper is an ordinary task with its own worktree and a `parent_task`. It can't start helpers of its own, a parent has at most 4 helpers working at once and 8 in all, and stopping the parent stops its helpers. A helper's requests go to you like any other, and `wait_for_helpers` returns early when one is waiting. A finished top-level task counts as new until you look at it (`task.seen`); helpers never do, because their parent reads them.
 
 ### Configuration
 

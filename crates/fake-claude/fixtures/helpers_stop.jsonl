@@ -1,0 +1,6 @@
+// A parent that starts a helper and then keeps working; the helper works too.
+{"op":"init"}
+{"op":"wait_user"}
+{"task":"t1","op":"mcp_call","tool":"start_helper","arguments":{"title":"Slow","prompt":"Take your time"}}
+{"op":"sleep","ms":60000}
+{"op":"result","text":"never"}

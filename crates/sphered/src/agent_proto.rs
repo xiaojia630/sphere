@@ -72,6 +72,12 @@ pub enum Incoming {
     ControlCancel {
         request_id: String,
     },
+    /// A JSON-RPC message for an in-process (SDK) MCP server, such as Sphere's own.
+    McpMessage {
+        request_id: String,
+        server_name: String,
+        message: Value,
+    },
     /// Anything else, by its `type`.
     Other(String),
 }
@@ -217,6 +223,11 @@ pub fn parse_line(line: &str) -> Result<Incoming, serde_json::Error> {
                         .unwrap_or_default(),
                     blocked_path: s(&req, "blocked_path"),
                 }),
+                Some("mcp_message") => Incoming::McpMessage {
+                    request_id,
+                    server_name: s(&req, "server_name").unwrap_or_default(),
+                    message: req.get("message").cloned().unwrap_or(Value::Null),
+                },
                 other => Incoming::OtherControl {
                     request_id,
                     subtype: other.unwrap_or("").to_string(),
@@ -275,6 +286,14 @@ pub fn control_error(request_id: &str, message: &str) -> String {
         "subtype": "error", "request_id": request_id, "error": message}}))
 }
 
+/// The answer to an `mcp_message`: a JSON-RPC response (`result` or `error`,
+/// with the message's `id`) wrapped in a control response.
+pub fn mcp_response(request_id: &str, rpc_response: Value) -> String {
+    line(json!({"type": "control_response", "response": {
+        "subtype": "success", "request_id": request_id,
+        "response": {"mcp_response": rpc_response}}}))
+}
+
 fn control_request(request_id: &str, request: Value) -> String {
     line(json!({"type": "control_request", "request_id": request_id, "request": request}))
 }
@@ -301,7 +320,13 @@ pub struct AgentArgs<'a> {
     pub mode: &'a str,
     pub model: Option<&'a str>,
     pub resume: Option<&'a str>,
+    /// Serve Sphere's own tools to the agent as an in-process MCP server.
+    pub sphere_tools: bool,
 }
+
+/// Declares Sphere's tools as an SDK server: Claude Code sends its messages
+/// over the agent's pipe instead of starting a process.
+pub const SPHERE_MCP_CONFIG: &str = r#"{"mcpServers":{"sphere":{"type":"sdk","name":"sphere"}}}"#;
 
 pub fn build_args(a: &AgentArgs) -> Vec<String> {
     let mut args: Vec<String> = [
@@ -324,6 +349,10 @@ pub fn build_args(a: &AgentArgs) -> Vec<String> {
     args.push(a.settings.to_string());
     args.push("--max-budget-usd".into());
     args.push(a.budget_usd.to_string());
+    if a.sphere_tools {
+        args.push("--mcp-config".into());
+        args.push(SPHERE_MCP_CONFIG.into());
+    }
     if let Some(m) = a.model {
         args.push("--model".into());
         args.push(m.to_string());
@@ -424,8 +453,50 @@ pub fn step_info(tool: &str, input: &Value) -> (StepKind, String, String) {
             ),
             String::new(),
         ),
+        t if t.starts_with(SPHERE_TOOL_PREFIX) => {
+            sphere_step_info(&t[SPHERE_TOOL_PREFIX.len()..], input)
+        }
         other => (StepKind::Other, format!("Using {other}"), String::new()),
     }
+}
+
+/// The prefix Claude Code gives the tools of the `sphere` server.
+pub const SPHERE_TOOL_PREFIX: &str = "mcp__sphere__";
+
+fn sphere_step_info(tool: &str, input: &Value) -> (StepKind, String, String) {
+    let f = |k: &str| input.get(k).and_then(|v| v.as_str()).unwrap_or("");
+    let (title, detail) = match tool {
+        "start_helper" => (
+            format!("Start helper: {}", first_line(f("title"), 80)),
+            f("prompt").to_string(),
+        ),
+        "wait_for_helpers" => {
+            let n = input
+                .get("helpers")
+                .and_then(|h| h.as_array())
+                .map_or(0, |h| h.len());
+            let title = match n {
+                0 => "Waiting for helpers".to_string(),
+                1 => "Waiting for 1 helper".to_string(),
+                n => format!("Waiting for {n} helpers"),
+            };
+            (title, String::new())
+        }
+        "message_helper" => (
+            format!("Message helper {}", f("helper"))
+                .trim_end()
+                .to_string(),
+            f("text").to_string(),
+        ),
+        "stop_helper" => (
+            format!("Stop helper {}", f("helper"))
+                .trim_end()
+                .to_string(),
+            String::new(),
+        ),
+        other => (format!("Using sphere {other}"), String::new()),
+    };
+    (StepKind::Delegate, title, detail)
 }
 
 /// Plan items from a `TodoWrite` input.
@@ -519,6 +590,8 @@ pub fn is_outbound(tool: &str, detail_or_input: &Value) -> bool {
                         || OUTBOUND_PREFIXES.iter().any(|p| seg.starts_with(p))
                 })
         }
+        // Sphere's own tools only talk to Sphere.
+        t if t.starts_with(SPHERE_TOOL_PREFIX) => false,
         t if t.starts_with("mcp__") => {
             let lower = t.to_ascii_lowercase();
             OUTBOUND_MCP_WORDS.iter().any(|w| lower.contains(w))
@@ -753,22 +826,79 @@ mod tests {
             mode: "acceptEdits",
             model: None,
             resume: Some("sess"),
+            sphere_tools: false,
         });
         let joined = args.join(" ");
         assert!(joined.starts_with("-p --input-format stream-json --output-format stream-json --verbose --include-partial-messages --permission-prompt-tool stdio --permission-mode acceptEdits"));
         assert!(joined.contains("--settings /s.json --max-budget-usd 2.5"));
         assert!(joined.ends_with("--resume sess"));
-        assert!(!joined.contains("--model"));
+        assert!(!joined.contains("--model") && !joined.contains("--mcp-config"));
         let with_model = build_args(&AgentArgs {
             settings: "s",
             budget_usd: 1.0,
             mode: "plan",
             model: Some("m"),
             resume: None,
+            sphere_tools: true,
         });
         assert!(
             with_model.join(" ").contains("--model m")
                 && !with_model.join(" ").contains("--resume")
+        );
+    }
+
+    #[test]
+    fn the_sphere_server_is_declared_as_an_sdk_server() {
+        let args = build_args(&AgentArgs {
+            settings: "s",
+            budget_usd: 1.0,
+            mode: "plan",
+            model: None,
+            resume: None,
+            sphere_tools: true,
+        });
+        let at = args.iter().position(|a| a == "--mcp-config").unwrap();
+        let cfg: Value = serde_json::from_str(&args[at + 1]).unwrap();
+        assert_eq!(
+            cfg,
+            json!({"mcpServers": {"sphere": {"type": "sdk", "name": "sphere"}}})
+        );
+    }
+
+    #[test]
+    fn parses_mcp_messages() {
+        let l = r#"{"type":"control_request","request_id":"req_7","request":{"subtype":"mcp_message","server_name":"sphere","message":{"jsonrpc":"2.0","id":3,"method":"tools/list"}}}"#;
+        assert_eq!(
+            parse_line(l).unwrap(),
+            Incoming::McpMessage {
+                request_id: "req_7".into(),
+                server_name: "sphere".into(),
+                message: json!({"jsonrpc":"2.0","id":3,"method":"tools/list"}),
+            }
+        );
+        let bare =
+            r#"{"type":"control_request","request_id":"r","request":{"subtype":"mcp_message"}}"#;
+        assert_eq!(
+            parse_line(bare).unwrap(),
+            Incoming::McpMessage {
+                request_id: "r".into(),
+                server_name: String::new(),
+                message: Value::Null,
+            }
+        );
+    }
+
+    #[test]
+    fn builds_mcp_responses() {
+        let r: Value = serde_json::from_str(&mcp_response(
+            "req_7",
+            json!({"jsonrpc":"2.0","id":3,"result":{"tools":[]}}),
+        ))
+        .unwrap();
+        assert_eq!(
+            r,
+            json!({"type":"control_response","response":{"subtype":"success","request_id":"req_7",
+                "response":{"mcp_response":{"jsonrpc":"2.0","id":3,"result":{"tools":[]}}}}})
         );
     }
 
@@ -792,6 +922,45 @@ mod tests {
             (StepKind::Edit, "Editing /a.rs".into(), "/a.rs".into())
         );
         assert_eq!(step_info("mcp__x__y", &json!({})).0, StepKind::Other);
+        let helper = step_info(
+            "mcp__sphere__start_helper",
+            &json!({"title": "Check the docs", "prompt": "Read them\nall"}),
+        );
+        assert_eq!(
+            helper,
+            (
+                StepKind::Delegate,
+                "Start helper: Check the docs".into(),
+                "Read them\nall".into()
+            )
+        );
+        let title = |tool: &str, input: Value| step_info(tool, &input).1;
+        assert_eq!(
+            title("mcp__sphere__wait_for_helpers", json!({})),
+            "Waiting for helpers"
+        );
+        assert_eq!(
+            title(
+                "mcp__sphere__wait_for_helpers",
+                json!({"helpers": ["t2", "t3"]})
+            ),
+            "Waiting for 2 helpers"
+        );
+        assert_eq!(
+            title(
+                "mcp__sphere__message_helper",
+                json!({"helper": "t2", "text": "x"})
+            ),
+            "Message helper t2"
+        );
+        assert_eq!(
+            title("mcp__sphere__stop_helper", json!({"helper": "t2"})),
+            "Stop helper t2"
+        );
+        assert_eq!(
+            step_info("mcp__sphere__stop_helper", &json!({})).0,
+            StepKind::Delegate
+        );
         let plan =
             plan_items(&json!({"todos":[{"content":"a","status":"completed"},{"content":"b"}]}));
         assert_eq!(plan.len(), 2);
@@ -815,6 +984,8 @@ mod tests {
         assert!(is_outbound("WebFetch", &json!({})));
         assert!(is_outbound("mcp__slack__post_message", &json!({})));
         assert!(!is_outbound("mcp__files__read", &json!({})));
+        // "message_helper" has a word that would count for another server.
+        assert!(!is_outbound("mcp__sphere__message_helper", &json!({})));
         assert!(!is_outbound("Edit", &json!({})));
         // A step's stored detail (the bare command) works too.
         assert!(is_outbound(
